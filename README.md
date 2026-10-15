@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.0.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.2/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.0.2)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.0.3)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.3/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.0.3)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.0.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.2/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.0.3)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.3/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -28,7 +28,7 @@
 
 ## 🏷️ Versiune curentă
 
-**v1.0.2**
+**v1.0.3**
 
 ## 📖 Ghid Dezvoltare și Reguli Versionare
 Pentru ghidul complet de update și convențiile SemVer (`x.y.z`) dedicate dezvoltatorilor și agenților AI, consultă [AGENTS.md](AGENTS.md).
