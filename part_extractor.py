@@ -322,10 +322,44 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+
+def _is_geometry_visible(geom_str):
+    """
+    Check if the window described by geom_str (e.g. '960x860+100+100' or '960x860+-1500+100')
+    is visible on any connected monitor across the Windows virtual desktop.
+    Prevents windows from reopening off-screen if a monitor was disconnected.
+    """
+    if not geom_str or not isinstance(geom_str, str):
+        return False
+    try:
+        m = re.match(r'^(\d+)x(\d+)\+?(-?\d+)\+?(-?\d+)$', geom_str.strip())
+        if not m:
+            return False
+        w, h, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        if w < 100 or h < 100:
+            return False
+
+        if os.name == 'nt':
+            import ctypes
+            user32 = ctypes.windll.user32
+            vx = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+            vy = user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
+            vw = user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+            vh = user32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
+            if vw > 0 and vh > 0:
+                ix1 = max(x, vx)
+                iy1 = max(y, vy)
+                ix2 = min(x + w, vx + vw)
+                iy2 = min(y + h, vy + vh)
+                return (ix2 - ix1 >= 100) and (iy2 - iy1 >= 100)
+    except Exception:
+        pass
+    return True
 
 
 def parse_version(v_str):
@@ -745,6 +779,11 @@ exit
                 env=clean_env
             )
 
+            try:
+                self.parent_app.save_settings()
+            except Exception:
+                pass
+
             self.parent_app.destroy()
             os._exit(0)
         except Exception as e:
@@ -757,6 +796,7 @@ class UnifiedApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("⚙ SteelSync Toolkit")
+        self._last_normal_geometry = None
         self.geometry("960x860")
         self.minsize(850, 780)
         
@@ -811,6 +851,7 @@ class UnifiedApp(ctk.CTk):
 
         self.create_widgets()
         self.load_settings()
+        self.bind("<Configure>", self._on_window_configure)
 
         # Preload heavy modules (pandas, openpyxl) asynchronously in background
         threading.Thread(target=_preload_heavy_libraries, daemon=True).start()
@@ -820,6 +861,16 @@ class UnifiedApp(ctk.CTk):
 
         # Save settings on close
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _on_window_configure(self, event=None):
+        """Track window position and size when in normal (non-maximized) state."""
+        if event is not None and getattr(event, "widget", None) != self:
+            return
+        try:
+            if self.state() == "normal":
+                self._last_normal_geometry = self.geometry()
+        except Exception:
+            pass
 
     # ══════════════════════════════════════════════════════════════════════
     #  SETTINGS PERSISTENCE
@@ -865,6 +916,20 @@ class UnifiedApp(ctk.CTk):
                     self.available_extensions.append(ext)
                     self.extension_vars[ext] = ctk.BooleanVar(value=val)
             self.draw_extensions()
+
+            # Restore window geometry and position (multi-monitor safe)
+            saved_geom = s.get("window_geometry", "")
+            if saved_geom and _is_geometry_visible(saved_geom):
+                try:
+                    self.geometry(saved_geom)
+                    self._last_normal_geometry = saved_geom
+                except Exception:
+                    pass
+            if s.get("window_maximized", False):
+                try:
+                    self.after(50, lambda: self.state("zoomed"))
+                except Exception:
+                    pass
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         except Exception:
@@ -872,8 +937,26 @@ class UnifiedApp(ctk.CTk):
 
     def save_settings(self):
         """Persist current user settings to JSON."""
+        is_zoomed = False
+        try:
+            is_zoomed = (self.state() == "zoomed")
+        except Exception:
+            pass
+
+        current_geom = None
+        if is_zoomed:
+            current_geom = self._last_normal_geometry or "960x860"
+        else:
+            try:
+                current_geom = self.geometry()
+                self._last_normal_geometry = current_geom
+            except Exception:
+                current_geom = self._last_normal_geometry or "960x860"
+
         ext_map = {ext: var.get() for ext, var in self.extension_vars.items()}
         settings = {
+            "window_geometry": current_geom,
+            "window_maximized": is_zoomed,
             "appearance_mode": self.appearance_mode_var.get(),
             "source_dir": self.source_dir.get(),
             "dest_dir": self.dest_dir.get(),
