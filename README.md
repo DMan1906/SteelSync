@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.0.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.0.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.0.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.1/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.0.1)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.0.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.0.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.0.1/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -14,19 +14,21 @@
 2. Descarcă fișierul **`SteelSync.exe`** de la secțiunea **Assets**.
 3. Rulează fișierul direct pe Windows.
 
+## 🚀 Funcționalități
 
-- **File Extractor** – Cauta si copiaza fisierele unui proiect pe baza unei liste Excel (BOM).
-- **NC Sorter** – Sorteaza fisierele .nc/.nc1 in foldere dupa tipul profilului:
-  - PLACI (S235, S355, Z35, INOX, ALUMINIU)
-  - PROFILE (HEA, HEB, IPE, UPN, etc.)
+- **Sistem Auto-Update inteligent** – Verifică automat versiunile noi din GitHub Release la pornire (fără blocaje, 100% silențios când ești offline). Actualizare cu un singur click fără pierderea portabilității.
+- **File Extractor** – Caută și copiază fișierele unui proiect pe baza unei liste Excel (BOM).
+- **NC Sorter** – Sortează fișierele .nc/.nc1 în foldere după tipul profilului:
+  - PLĂCI (S235, S355, Z35, INOX, ALUMINIU)
+  - PROFILE (HEA, HEB, IPE, UPN etc.)
   - BARE
   - CHESON (HSQEN, HSQ)
-  - TEVI / T-URI / SINE
-- **Modify NC** – Inlocuire text in masa in fisierele NC, ajustare cantitati.
+  - ȚEVI / T-URI / ȘINE
+- **Modify NC** – Înlocuire text în masă în fișierele NC, ajustare automată a cantităților.
 
-## Versiune curenta
+## 🏷️ Versiune curentă
 
-1.0.0
+**v1.0.1**
 
 ## Build
 

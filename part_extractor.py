@@ -12,6 +12,8 @@ import sys
 import json
 import stat
 import subprocess
+import tempfile
+import urllib.request
 from collections import Counter
 
 # openpyxl for advanced Excel formatting
@@ -261,7 +263,383 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
+
+GITHUB_REPO = "DMan1906/SteelSync"
+GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+
+def parse_version(v_str):
+    """Parse 'v1.0.1' or '1.0.1' into tuple of integers for comparison."""
+    clean = re.sub(r'^[vV]', '', str(v_str).strip())
+    parts = []
+    for p in clean.split('.'):
+        digits = re.match(r'^\d+', p)
+        if digits:
+            parts.append(int(digits.group(0)))
+        else:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def is_newer_version(latest_tag, current_ver=APP_VERSION):
+    """Return True if latest_tag is strictly newer than current_ver."""
+    try:
+        return parse_version(latest_tag) > parse_version(current_ver)
+    except Exception:
+        return False
+
+
+def fetch_latest_release_info(timeout=3.5):
+    """
+    Fetch release info from GitHub API.
+    Returns dict with tag_name, body, html_url, asset_url, asset_size, asset_name or None.
+    """
+    req = urllib.request.Request(
+        GITHUB_API_LATEST,
+        headers={
+            "User-Agent": "SteelSync-Toolkit-Updater",
+            "Accept": "application/vnd.github.v3+json"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode('utf-8'))
+                tag = data.get("tag_name", "").strip()
+                body = data.get("body", "").strip()
+                html_url = data.get("html_url", "")
+                
+                assets = data.get("assets", [])
+                asset_url = None
+                asset_size = 0
+                asset_name = "SteelSync.exe"
+                for a in assets:
+                    if a.get("name", "").lower().endswith(".exe"):
+                        asset_url = a.get("browser_download_url")
+                        asset_size = a.get("size", 0)
+                        asset_name = a.get("name")
+                        break
+                
+                if not asset_url and tag:
+                    asset_url = f"https://github.com/{GITHUB_REPO}/releases/download/{tag}/SteelSync.exe"
+
+                return {
+                    "tag_name": tag,
+                    "body": body,
+                    "html_url": html_url,
+                    "asset_url": asset_url,
+                    "asset_size": asset_size,
+                    "asset_name": asset_name
+                }
+    except Exception:
+        return None
+    return None
+
+
+class UpdateDialog(ctk.CTkToplevel):
+    """
+    Modern modal dialog notifying the user about a new version with release notes,
+    progress bar for downloading, and automatic restart via batch script.
+    """
+    def __init__(self, parent, release_info):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.release_info = release_info
+        self.tag_name = release_info.get("tag_name", "")
+        self.asset_url = release_info.get("asset_url", "")
+        self.asset_name = release_info.get("asset_name", "SteelSync.exe")
+        self.asset_size = release_info.get("asset_size", 0)
+        self.body = release_info.get("body", "").strip() or "Îmbunătățiri și optimizări de performanță."
+
+        self.title("Actualizare SteelSync Toolkit")
+        self.geometry("560x520")
+        self.minsize(500, 480)
+        self.configure(fg_color=_BG)
+        
+        self.transient(parent)
+        self.grab_set()
+
+        self.update_idletasks()
+        try:
+            x = parent.winfo_x() + (parent.winfo_width() // 2) - 280
+            y = parent.winfo_y() + (parent.winfo_height() // 2) - 260
+            self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        self._cancelled = False
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._create_widgets()
+
+    def on_close(self):
+        self._cancelled = True
+        self.destroy()
+
+    def _create_widgets(self):
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # Header card
+        header_card = ctk.CTkFrame(container, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=12)
+        header_card.pack(fill="x", pady=(0, 14), padx=2)
+
+        hdr_inner = ctk.CTkFrame(header_card, fg_color="transparent")
+        hdr_inner.pack(fill="x", padx=16, pady=14)
+
+        title_lbl = ctk.CTkLabel(
+            hdr_inner,
+            text=f"🚀 Versiune nouă disponibilă: {self.tag_name}",
+            font=("Segoe UI", 16, "bold"),
+            text_color=_TEXT_PRI,
+            anchor="w"
+        )
+        title_lbl.pack(fill="x")
+
+        sub_lbl = ctk.CTkLabel(
+            hdr_inner,
+            text=f"Versiunea curentă instalată: v{APP_VERSION}",
+            font=("Segoe UI", 12),
+            text_color=_TEXT_SEC,
+            anchor="w"
+        )
+        sub_lbl.pack(fill="x", pady=(2, 0))
+
+        # Changelog / Release notes
+        notes_card = ctk.CTkFrame(container, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=12)
+        notes_card.pack(fill="both", expand=True, pady=(0, 14), padx=2)
+
+        notes_hdr = ctk.CTkFrame(notes_card, fg_color="transparent")
+        notes_hdr.pack(fill="x", padx=16, pady=(12, 6))
+
+        notes_title = ctk.CTkLabel(
+            notes_hdr,
+            text="Ce aduce nou această versiune:",
+            font=("Segoe UI", 13, "bold"),
+            text_color=_ACCENT,
+            anchor="w"
+        )
+        notes_title.pack(fill="x")
+
+        self.notes_box = ctk.CTkTextbox(
+            notes_card,
+            font=("Segoe UI", 12),
+            fg_color=_ENTRY_BG,
+            text_color=_TEXT_PRI,
+            corner_radius=8,
+            wrap="word"
+        )
+        self.notes_box.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        self.notes_box.insert("1.0", self.body)
+        self.notes_box.configure(state="disabled")
+
+        # Progress / Status Frame
+        self.progress_frame = ctk.CTkFrame(container, fg_color="transparent")
+        self.progress_frame.pack(fill="x", pady=(0, 12))
+
+        self.status_lbl = ctk.CTkLabel(
+            self.progress_frame,
+            text="Apasă pe 'Actualizează acum' pentru descărcare și instalare automată.",
+            font=("Segoe UI", 11),
+            text_color=_TEXT_SEC,
+            anchor="w"
+        )
+        self.status_lbl.pack(fill="x", padx=2, pady=(0, 4))
+
+        self.progress_bar = ctk.CTkProgressBar(
+            self.progress_frame,
+            progress_color=_ACCENT,
+            height=10,
+            corner_radius=5
+        )
+        self.progress_bar.pack(fill="x", padx=2)
+        self.progress_bar.set(0)
+
+        # Buttons Frame
+        self.btn_frame = ctk.CTkFrame(container, fg_color="transparent")
+        self.btn_frame.pack(fill="x", pady=(0, 2))
+
+        self.update_btn = ctk.CTkButton(
+            self.btn_frame,
+            text="🚀 Actualizează acum",
+            font=("Segoe UI", 13, "bold"),
+            fg_color=_GREEN,
+            hover_color=_GREEN_HOV,
+            height=38,
+            corner_radius=8,
+            command=self.start_download
+        )
+        self.update_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.later_btn = ctk.CTkButton(
+            self.btn_frame,
+            text="Mai târziu",
+            font=("Segoe UI", 12),
+            fg_color=_CARD_BG,
+            hover_color=_CARD_BORDER,
+            text_color=_TEXT_PRI,
+            height=38,
+            corner_radius=8,
+            command=self.destroy
+        )
+        self.later_btn.pack(side="left", padx=6)
+
+        self.ignore_btn = ctk.CTkButton(
+            self.btn_frame,
+            text="Nu mai întreba",
+            font=("Segoe UI", 11),
+            fg_color="transparent",
+            hover_color=_CARD_BORDER,
+            text_color=_TEXT_SEC,
+            height=38,
+            corner_radius=8,
+            command=self.ignore_this_version
+        )
+        self.ignore_btn.pack(side="left", padx=(6, 0))
+
+    def start_download(self):
+        self.update_btn.configure(state="disabled")
+        self.later_btn.configure(state="disabled")
+        self.ignore_btn.configure(state="disabled")
+        self.status_lbl.configure(text="Se inițializează conexiunea...", text_color=_TEXT_PRI)
+        threading.Thread(target=self._download_worker, daemon=True).start()
+
+    def _download_worker(self):
+        url = self.asset_url
+        if not url:
+            url = f"https://github.com/{GITHUB_REPO}/releases/download/{self.tag_name}/SteelSync.exe"
+
+        temp_dir = tempfile.gettempdir()
+        temp_exe = os.path.join(temp_dir, f"SteelSync_update_{self.tag_name}.exe")
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "SteelSync-Toolkit-Updater"
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp, open(temp_exe, "wb") as out_f:
+                content_len = resp.getheader("Content-Length")
+                total_bytes = int(content_len) if content_len else self.asset_size
+                downloaded = 0
+                chunk_size = 65536  # 64 KB
+
+                while True:
+                    if self._cancelled:
+                        return
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    out_f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if total_bytes > 0:
+                        prog = min(1.0, downloaded / total_bytes)
+                        mb_down = downloaded / (1024 * 1024)
+                        mb_total = total_bytes / (1024 * 1024)
+                        status_text = f"Se descarcă: {mb_down:.1f} MB din {mb_total:.1f} MB ({int(prog * 100)}%)"
+                    else:
+                        mb_down = downloaded / (1024 * 1024)
+                        prog = 0.5
+                        status_text = f"Se descarcă: {mb_down:.1f} MB..."
+
+                    self.after(0, self._update_progress_ui, prog, status_text)
+
+            if not self._cancelled:
+                self.after(0, lambda: self._apply_update(temp_exe))
+
+        except Exception as e:
+            if not self._cancelled:
+                self.after(0, lambda: self._handle_download_error(str(e)))
+
+    def _update_progress_ui(self, prog, status_text):
+        try:
+            self.progress_bar.set(prog)
+            self.status_lbl.configure(text=status_text)
+        except Exception:
+            pass
+
+    def _handle_download_error(self, err_msg):
+        self.status_lbl.configure(text=f"Eroare descărcare: {err_msg}", text_color=_DANGER)
+        self.update_btn.configure(state="normal", text="Reîncearcă")
+        self.later_btn.configure(state="normal")
+        self.ignore_btn.configure(state="normal")
+
+    def ignore_this_version(self):
+        self.parent_app.ignored_update_version = self.tag_name
+        self.parent_app.save_settings()
+        self.destroy()
+
+    def _apply_update(self, temp_exe):
+        self.status_lbl.configure(text="Descărcare finalizată! Se aplică actualizarea...", text_color=_GREEN)
+        self.progress_bar.set(1.0)
+
+        is_frozen = getattr(sys, 'frozen', False)
+        if not is_frozen:
+            messagebox.showinfo(
+                "Mod Dezvoltare (Python)",
+                f"Actualizarea {self.tag_name} a fost descărcată cu succes în:\n{temp_exe}\n\n"
+                "(În versiunea compilată SteelSync.exe, aplicația va fi înlocuită automat și va reporni)."
+            )
+            self.destroy()
+            return
+
+        current_exe = os.path.abspath(sys.executable)
+        current_pid = os.getpid()
+        bat_path = os.path.join(tempfile.gettempdir(), "steelsync_updater.bat")
+
+        bat_content = f"""@echo off
+chcp 65001 > nul
+set "TARGET_EXE={current_exe}"
+set "NEW_EXE={temp_exe}"
+set "TARGET_PID={current_pid}"
+set /a RETRIES=0
+
+:wait_loop
+set /a RETRIES+=1
+timeout /t 1 /nobreak > nul
+tasklist /fi "PID eq %TARGET_PID%" 2>nul | find "%TARGET_PID%" >nul
+if not errorlevel 1 (
+    if %RETRIES% lss 10 goto wait_loop
+    taskkill /f /pid %TARGET_PID% >nul 2>&1
+)
+
+copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul
+if errorlevel 1 (
+    timeout /t 1 /nobreak > nul
+    move /y "%NEW_EXE%" "%TARGET_EXE%" > nul
+)
+
+if exist "%NEW_EXE%" del /f /q "%NEW_EXE%" > nul 2>&1
+
+start "" "%TARGET_EXE%"
+
+(goto) 2>nul & del /f /q "%~f0"
+exit
+"""
+
+        try:
+            with open(bat_path, "w", encoding="utf-8") as f:
+                f.write(bat_content)
+
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat_path],
+                creationflags=creationflags,
+                close_fds=True
+            )
+
+            self.parent_app.destroy()
+            sys.exit(0)
+        except Exception as e:
+            messagebox.showerror("Eroare Actualizare", f"Nu s-a putut porni scriptul de actualizare:\n{e}")
+            self.update_btn.configure(state="normal")
+            self.later_btn.configure(state="normal")
+
 
 class UnifiedApp(ctk.CTk):
     def __init__(self):
@@ -315,8 +693,15 @@ class UnifiedApp(ctk.CTk):
         self.available_extensions = ['.nc', '.pdf', '.dwg', '.dxf', '.step', '.stp']
         self.extension_vars = {}
 
+        # ── Update tracking ──
+        self.ignored_update_version = ""
+        self._update_dialog = None
+
         self.create_widgets()
         self.load_settings()
+
+        # Check for updates automatically in background (silent & non-blocking)
+        self.after(1500, lambda: self.start_update_check(manual=False))
 
         # Save settings on close
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -329,6 +714,7 @@ class UnifiedApp(ctk.CTk):
         try:
             with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
                 s = json.load(f)
+            self.ignored_update_version = s.get("ignored_update_version", "")
             self.appearance_mode_var.set(s.get("appearance_mode", "Dark"))
             ctk.set_appearance_mode(self.appearance_mode_var.get())
             self.source_dir.set(s.get("source_dir", ""))
@@ -395,6 +781,7 @@ class UnifiedApp(ctk.CTk):
             "mod_nc_replace": self.mod_nc_replace.get(),
             "mod_nc_excel": self.mod_nc_excel.get(),
             "mod_nc_create_subfolder": self.mod_nc_create_subfolder.get(),
+            "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
         }
         try:
@@ -413,6 +800,42 @@ class UnifiedApp(ctk.CTk):
     def on_close(self):
         self.save_settings()
         self.destroy()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  AUTO-UPDATE METHODS
+    # ══════════════════════════════════════════════════════════════════════
+    def start_update_check(self, manual=False):
+        """Check for updates in a non-blocking background thread."""
+        threading.Thread(target=self._check_update_worker, args=(manual,), daemon=True).start()
+
+    def _check_update_worker(self, manual=False):
+        info = fetch_latest_release_info(timeout=4.0 if not manual else 7.0)
+        if not info:
+            if manual:
+                self.after(0, lambda: messagebox.showinfo(
+                    "Verificare Actualizări",
+                    "Nu s-a putut contacta serverul GitHub.\nVerifică conexiunea la internet sau încearcă mai târziu."
+                ))
+            return
+
+        tag = info.get("tag_name", "")
+        if is_newer_version(tag, APP_VERSION):
+            if not manual and tag == getattr(self, "ignored_update_version", ""):
+                return
+            self.after(0, lambda: self.show_update_dialog(info))
+        else:
+            if manual:
+                self.after(0, lambda: messagebox.showinfo(
+                    "Verificare Actualizări",
+                    f"Aplicația este la zi!\nVersiunea curentă este v{APP_VERSION}."
+                ))
+
+    def show_update_dialog(self, release_info):
+        if getattr(self, "_update_dialog", None) is not None and self._update_dialog.winfo_exists():
+            self._update_dialog.lift()
+            self._update_dialog.focus_force()
+            return
+        self._update_dialog = UpdateDialog(self, release_info)
 
     # ══════════════════════════════════════════════════════════════════════
     #  UI HELPERS
@@ -485,13 +908,15 @@ class UnifiedApp(ctk.CTk):
         )
         theme_switch.pack(side="right", padx=(8, 0))
 
-        version_lbl = ctk.CTkLabel(
+        self.version_lbl = ctk.CTkLabel(
             top_bar,
             text=f"v{APP_VERSION}",
             font=("Segoe UI", 11),
             text_color=_TEXT_SEC,
+            cursor="hand2"
         )
-        version_lbl.pack(side="right", padx=(0, 16))
+        self.version_lbl.pack(side="right", padx=(0, 16))
+        self.version_lbl.bind("<Button-1>", lambda e: self.start_update_check(manual=True))
 
         self.tabview = ctk.CTkTabview(container, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1)
         self.tabview.pack(fill="both", expand=True)
@@ -2150,7 +2575,7 @@ if __name__ == "__main__":
     if sys.platform.startswith("win"):
         try:
             import ctypes
-            myappid = "steelsync.toolkit.app.1.0"
+            myappid = f"steelsync.toolkit.app.{APP_VERSION}"
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
             pass
