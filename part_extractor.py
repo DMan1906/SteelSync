@@ -607,33 +607,43 @@ class UpdateDialog(ctk.CTkToplevel):
             return
 
         current_exe = os.path.abspath(sys.executable)
-        current_pid = os.getpid()
+        exe_name = os.path.basename(current_exe)
         bat_path = os.path.join(tempfile.gettempdir(), "steelsync_updater.bat")
 
         bat_content = f"""@echo off
 chcp 65001 > nul
 set "TARGET_EXE={current_exe}"
 set "NEW_EXE={temp_exe}"
-set "TARGET_PID={current_pid}"
+set "EXE_NAME={exe_name}"
 set /a RETRIES=0
 
 :wait_loop
 set /a RETRIES+=1
 timeout /t 1 /nobreak > nul
-tasklist /fi "PID eq %TARGET_PID%" 2>nul | find "%TARGET_PID%" >nul
+tasklist /fi "IMAGENAME eq %EXE_NAME%" 2>nul | find /i "%EXE_NAME%" >nul
 if not errorlevel 1 (
     if %RETRIES% lss 10 goto wait_loop
-    taskkill /f /pid %TARGET_PID% >nul 2>&1
+    taskkill /f /im "%EXE_NAME%" >nul 2>&1
+    timeout /t 1 /nobreak > nul
 )
 
+timeout /t 2 /nobreak > nul
+
+set /a COPY_RETRIES=0
+:copy_loop
+set /a COPY_RETRIES+=1
 copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul
 if errorlevel 1 (
-    timeout /t 1 /nobreak > nul
+    if %COPY_RETRIES% lss 10 (
+        timeout /t 1 /nobreak > nul
+        goto copy_loop
+    )
     move /y "%NEW_EXE%" "%TARGET_EXE%" > nul
 )
 
 if exist "%NEW_EXE%" del /f /q "%NEW_EXE%" > nul 2>&1
 
+timeout /t 1 /nobreak > nul
 start "" "%TARGET_EXE%"
 
 (goto) 2>nul & del /f /q "%~f0"
