@@ -263,7 +263,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -613,6 +613,10 @@ class UpdateDialog(ctk.CTkToplevel):
 
         bat_content = f"""@echo off
 chcp 65001 > nul
+set "_PYI_APPLICATION_HOME_DIR="
+set "_PYI_ARCHIVE_FILE="
+set "_PYI_PARENT_PROCESS_LEVEL="
+set "_PYI_SPLASH_IPC="
 set "_MEIPASS2="
 set "_MEIPASS="
 set "TARGET_EXE={current_exe}"
@@ -626,7 +630,7 @@ set /a RETRIES+=1
 timeout /t 1 /nobreak > nul
 tasklist /fi "IMAGENAME eq %EXE_NAME%" 2>nul | find /i "%EXE_NAME%" >nul
 if not errorlevel 1 (
-    if %RETRIES% lss 10 goto wait_loop
+    if %RETRIES% lss 8 goto wait_loop
     taskkill /f /im "%EXE_NAME%" >nul 2>&1
     timeout /t 1 /nobreak > nul
 )
@@ -636,22 +640,34 @@ timeout /t 2 /nobreak > nul
 set /a COPY_RETRIES=0
 :copy_loop
 set /a COPY_RETRIES+=1
-copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul
+copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
 if errorlevel 1 (
-    if %COPY_RETRIES% lss 10 (
-        timeout /t 1 /nobreak > nul
-        goto copy_loop
+    ren "%TARGET_EXE%" "%EXE_NAME%.old_%RANDOM%" > nul 2>&1
+    copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
+    if errorlevel 1 (
+        if %COPY_RETRIES% lss 10 (
+            timeout /t 1 /nobreak > nul
+            goto copy_loop
+        )
+        move /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
     )
-    move /y "%NEW_EXE%" "%TARGET_EXE%" > nul
 )
 
 if exist "%NEW_EXE%" del /f /q "%NEW_EXE%" > nul 2>&1
+del /f /q "%TARGET_DIR%\\*.old_*" > nul 2>&1
 
 timeout /t 1 /nobreak > nul
+set "_PYI_APPLICATION_HOME_DIR="
+set "_PYI_ARCHIVE_FILE="
+set "_PYI_PARENT_PROCESS_LEVEL="
+set "_PYI_SPLASH_IPC="
 set "_MEIPASS2="
 set "_MEIPASS="
 cd /d "%TARGET_DIR%"
-start "" /D "%TARGET_DIR%" "%TARGET_EXE%"
+explorer.exe "%TARGET_EXE%"
+if errorlevel 1 (
+    start "" /D "%TARGET_DIR%" "%TARGET_EXE%"
+)
 
 (goto) 2>nul & del /f /q "%~f0"
 exit
@@ -663,11 +679,15 @@ exit
 
             clean_env = os.environ.copy()
             for var in list(clean_env.keys()):
-                if var.startswith('_MEI') or var in ('_MEIPASS2', '_MEIPASS', 'PYI_CHILD_SPLASH'):
+                uvar = var.upper()
+                if (uvar.startswith('_PYI') or uvar.startswith('PYI') or
+                    uvar.startswith('_MEI') or uvar.startswith('MEI') or
+                    'PYTHON' in uvar):
                     clean_env.pop(var, None)
 
             if 'PATH' in clean_env:
-                clean_paths = [p for p in clean_env['PATH'].split(os.pathsep) if '_MEI' not in p and '_mei' not in p]
+                clean_paths = [p for p in clean_env['PATH'].split(os.pathsep)
+                               if '_MEI' not in p.upper() and 'PYTHON' not in p.upper()]
                 clean_env['PATH'] = os.pathsep.join(clean_paths)
 
             creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)

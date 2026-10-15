@@ -30,9 +30,9 @@ Versiunea aplicației este definită strict în formatul `x.y.z`:
 3. **Descărcare & Înlocuire pe loc (Hot-Swap în Windows):**
    * Se descarcă noul `SteelSync.exe` în `%TEMP%\SteelSync_update_<tag>.exe`.
    * Se generează scriptul `%TEMP%\steelsync_updater.bat`.
-   * **Regulă critică PyInstaller (`_MEIPASS2`):** Variabila de mediu `_MEIPASS2` și `_MEIPASS` **trebuie obligatoriu curățate** (`set _MEIPASS2=` și eliminarea din `env` în Python). Altfel, noua aplicație moștenește folderul temporar al vechiului proces deja șters și crapă cu eroarea `Failed to load Python DLL`.
-   * **Regulă critică de sincronizare:** Scriptul `.bat` așteaptă oprirea completă a tuturor proceselor `SteelSync.exe` și include o pauză de siguranță de **2 secunde** pentru ca PyInstaller să își șteargă folderul temporar `_MEI...` înainte de copiere.
-   * Scriptul copiază noul executabil peste cel vechi, setează directorul de lucru (`cd /d "%TARGET_DIR%"`) și repornește noua versiune curat.
+   * **Regulă critică PyInstaller 6+ (`_PYI_*` & `_MEIPASS2`):** PyInstaller 6+ setează `_PYI_APPLICATION_HOME_DIR`, `_PYI_ARCHIVE_FILE` și `_PYI_PARENT_PROCESS_LEVEL` (pe lângă clasicul `_MEIPASS2`). Acestea **trebuie obligatoriu curățate** atât în Python (`clean_env`), cât și în scriptul `.bat`. Altfel, noua aplicație caută DLL-urile Python în folderul temporar al vechiului proces deja șters și crapă cu eroarea `Failed to load Python DLL`.
+   * **Regulă critică de sincronizare & Hot-Swap:** Scriptul `.bat` așteaptă oprirea proceselor, folosește redenumire atomică (`.old_%RANDOM%`) dacă fișierul este încă blocat, copiază binarul nou și curăță fișierele temporare.
+   * **Lansare decuplată:** Aplicația se repornește prin `explorer.exe "%TARGET_EXE%"` (care rulează în contextul shell-ului Windows curat, rupând orice moștenire coruptă de mediu), cu fallback la `start "" /D "%TARGET_DIR%" "%TARGET_EXE%"`.
 
 ---
 
