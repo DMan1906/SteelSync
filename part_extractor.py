@@ -263,7 +263,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -665,9 +665,6 @@ set "_MEIPASS2="
 set "_MEIPASS="
 cd /d "%TARGET_DIR%"
 explorer.exe "%TARGET_EXE%"
-if errorlevel 1 (
-    start "" /D "%TARGET_DIR%" "%TARGET_EXE%"
-)
 
 (goto) 2>nul & del /f /q "%~f0"
 exit
@@ -2642,6 +2639,11 @@ if __name__ == "__main__":
             import ctypes
             myappid = f"steelsync.toolkit.app.{APP_VERSION}"
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
+            # Prevent multiple instances from running simultaneously
+            _single_instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "SteelSync_Toolkit_SingleInstance_Mutex")
+            if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                sys.exit(0)
         except Exception:
             pass
 
