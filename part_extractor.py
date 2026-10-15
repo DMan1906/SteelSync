@@ -263,31 +263,49 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.1t"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 
 def parse_version(v_str):
-    """Parse 'v1.0.1' or '1.0.1' into tuple of integers for comparison."""
+    """
+    Parse 'v1.0.1t', 'v1.0.1', '1.0.2' into a tuple comparable with other versions.
+    For each part, splits into (integer_part, string_suffix).
+    E.g. '1.0.1t' -> ((1, ''), (0, ''), (1, 't'))
+         '1.0.1'  -> ((1, ''), (0, ''), (1, ''))
+    """
     clean = re.sub(r'^[vV]', '', str(v_str).strip())
     parts = []
     for p in clean.split('.'):
-        digits = re.match(r'^\d+', p)
-        if digits:
-            parts.append(int(digits.group(0)))
+        m = re.match(r'^(\d+)(.*)$', p)
+        if m:
+            num = int(m.group(1))
+            suffix = m.group(2).strip().lower()
+            parts.append((num, suffix))
         else:
-            parts.append(0)
+            parts.append((0, p.lower()))
     while len(parts) < 3:
-        parts.append(0)
+        parts.append((0, ''))
     return tuple(parts)
 
 
 def is_newer_version(latest_tag, current_ver=APP_VERSION):
     """Return True if latest_tag is strictly newer than current_ver."""
     try:
-        return parse_version(latest_tag) > parse_version(current_ver)
+        clean_latest = re.sub(r'^[vV]', '', str(latest_tag).strip())
+        clean_current = re.sub(r'^[vV]', '', str(current_ver).strip())
+        if clean_latest.lower() == clean_current.lower():
+            return False
+
+        if parse_version(clean_latest) > parse_version(clean_current):
+            return True
+
+        if clean_latest.startswith(clean_current) and len(clean_latest) > len(clean_current):
+            return True
+
+        return False
     except Exception:
         return False
 
