@@ -30,8 +30,9 @@ Versiunea aplicației este definită strict în formatul `x.y.z`:
 3. **Descărcare & Înlocuire pe loc (Hot-Swap în Windows):**
    * Se descarcă noul `SteelSync.exe` în `%TEMP%\SteelSync_update_<tag>.exe`.
    * Se generează scriptul `%TEMP%\steelsync_updater.bat`.
-   * **Regulă critică de sincronizare:** Scriptul `.bat` așteaptă oprirea completă a tuturor proceselor `SteelSync.exe` și include o pauză de siguranță de **2 secunde** pentru ca PyInstaller să își șteargă folderul temporar `_MEI...` înainte de copiere. Aceasta previne eroarea `Failed to load Python DLL`.
-   * Scriptul copiază noul executabil peste cel vechi, așteaptă 1 secundă și repornește noua versiune.
+   * **Regulă critică PyInstaller (`_MEIPASS2`):** Variabila de mediu `_MEIPASS2` și `_MEIPASS` **trebuie obligatoriu curățate** (`set _MEIPASS2=` și eliminarea din `env` în Python). Altfel, noua aplicație moștenește folderul temporar al vechiului proces deja șters și crapă cu eroarea `Failed to load Python DLL`.
+   * **Regulă critică de sincronizare:** Scriptul `.bat` așteaptă oprirea completă a tuturor proceselor `SteelSync.exe` și include o pauză de siguranță de **2 secunde** pentru ca PyInstaller să își șteargă folderul temporar `_MEI...` înainte de copiere.
+   * Scriptul copiază noul executabil peste cel vechi, setează directorul de lucru (`cd /d "%TARGET_DIR%"`) și repornește noua versiune curat.
 
 ---
 

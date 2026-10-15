@@ -263,7 +263,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -607,12 +607,16 @@ class UpdateDialog(ctk.CTkToplevel):
             return
 
         current_exe = os.path.abspath(sys.executable)
+        target_dir = os.path.dirname(current_exe)
         exe_name = os.path.basename(current_exe)
         bat_path = os.path.join(tempfile.gettempdir(), "steelsync_updater.bat")
 
         bat_content = f"""@echo off
 chcp 65001 > nul
+set "_MEIPASS2="
+set "_MEIPASS="
 set "TARGET_EXE={current_exe}"
+set "TARGET_DIR={target_dir}"
 set "NEW_EXE={temp_exe}"
 set "EXE_NAME={exe_name}"
 set /a RETRIES=0
@@ -644,7 +648,10 @@ if errorlevel 1 (
 if exist "%NEW_EXE%" del /f /q "%NEW_EXE%" > nul 2>&1
 
 timeout /t 1 /nobreak > nul
-start "" "%TARGET_EXE%"
+set "_MEIPASS2="
+set "_MEIPASS="
+cd /d "%TARGET_DIR%"
+start "" /D "%TARGET_DIR%" "%TARGET_EXE%"
 
 (goto) 2>nul & del /f /q "%~f0"
 exit
@@ -654,15 +661,25 @@ exit
             with open(bat_path, "w", encoding="utf-8") as f:
                 f.write(bat_content)
 
+            clean_env = os.environ.copy()
+            for var in list(clean_env.keys()):
+                if var.startswith('_MEI') or var in ('_MEIPASS2', '_MEIPASS', 'PYI_CHILD_SPLASH'):
+                    clean_env.pop(var, None)
+
+            if 'PATH' in clean_env:
+                clean_paths = [p for p in clean_env['PATH'].split(os.pathsep) if '_MEI' not in p and '_mei' not in p]
+                clean_env['PATH'] = os.pathsep.join(clean_paths)
+
             creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
             subprocess.Popen(
                 ["cmd.exe", "/c", bat_path],
                 creationflags=creationflags,
-                close_fds=True
+                close_fds=True,
+                env=clean_env
             )
 
             self.parent_app.destroy()
-            sys.exit(0)
+            os._exit(0)
         except Exception as e:
             messagebox.showerror("Eroare Actualizare", f"Nu s-a putut porni scriptul de actualizare:\n{e}")
             self.update_btn.configure(state="normal")
