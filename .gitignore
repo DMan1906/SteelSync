@@ -1,0 +1,24 @@
+﻿# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local user settings
+steelsync_settings.json
+
+# Test files
+test.nc1
+
+# Old spec files
+PartExtractor Pro.spec
+ProjectFileExtractor.spec
+part_extractor_v2.spec
+
+# OS
+.DS_Store
+Thumbs.db
