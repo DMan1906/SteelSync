@@ -6,7 +6,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 # pyrefly: ignore [missing-import]
 import customtkinter as ctk
-import pandas as pd
 from pathlib import Path
 import sys
 import json
@@ -16,10 +15,70 @@ import tempfile
 import urllib.request
 from collections import Counter
 
-# openpyxl for advanced Excel formatting
-from openpyxl import Workbook
-from openpyxl.styles import Font, Border, Side, Alignment, PatternFill
-from openpyxl.utils import get_column_letter
+# ─── High-performance lazy imports for instant startup ───────────────────────
+_pd = None
+
+def get_pd():
+    global _pd
+    if _pd is None:
+        import pandas as __pd
+        _pd = __pd
+    return _pd
+
+class _LazyPandasProxy:
+    def __getattr__(self, name):
+        return getattr(get_pd(), name)
+
+pd = _LazyPandasProxy()
+
+def _load_openpyxl():
+    global Workbook, Font, Border, Side, Alignment, PatternFill, get_column_letter
+    from openpyxl import Workbook as _WB
+    from openpyxl.styles import Font as _F, Border as _B, Side as _S, Alignment as _A, PatternFill as _PF
+    from openpyxl.utils import get_column_letter as _GCL
+    Workbook = _WB
+    Font = _F
+    Border = _B
+    Side = _S
+    Alignment = _A
+    PatternFill = _PF
+    get_column_letter = _GCL
+
+def Workbook(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['Workbook'](*args, **kwargs)
+
+def Font(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['Font'](*args, **kwargs)
+
+def Border(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['Border'](*args, **kwargs)
+
+def Side(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['Side'](*args, **kwargs)
+
+def Alignment(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['Alignment'](*args, **kwargs)
+
+def PatternFill(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['PatternFill'](*args, **kwargs)
+
+def get_column_letter(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['get_column_letter'](*args, **kwargs)
+
+def _preload_heavy_libraries():
+    """Silently preloads pandas and openpyxl in background once UI is rendered."""
+    try:
+        get_pd()
+        _load_openpyxl()
+    except Exception:
+        pass
 
 # ─── Permissions & File Access Management ────────────────────────────────────
 
@@ -263,7 +322,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -627,36 +686,24 @@ set /a RETRIES=0
 
 :wait_loop
 set /a RETRIES+=1
-timeout /t 1 /nobreak > nul
 tasklist /fi "IMAGENAME eq %EXE_NAME%" 2>nul | find /i "%EXE_NAME%" >nul
 if not errorlevel 1 (
-    if %RETRIES% lss 8 goto wait_loop
-    taskkill /f /im "%EXE_NAME%" >nul 2>&1
-    timeout /t 1 /nobreak > nul
+    if %RETRIES% geq 25 (
+        taskkill /f /im "%EXE_NAME%" >nul 2>&1
+    )
+    ping -n 1 -w 150 127.255.255.255 > nul 2>&1
+    goto wait_loop
 )
 
-timeout /t 2 /nobreak > nul
-
-set /a COPY_RETRIES=0
-:copy_loop
-set /a COPY_RETRIES+=1
+:: Instant Hot-Swap
 copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
 if errorlevel 1 (
     ren "%TARGET_EXE%" "%EXE_NAME%.old_%RANDOM%" > nul 2>&1
-    copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
-    if errorlevel 1 (
-        if %COPY_RETRIES% lss 10 (
-            timeout /t 1 /nobreak > nul
-            goto copy_loop
-        )
-        move /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
-    )
+    move /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
+    if errorlevel 1 copy /y "%NEW_EXE%" "%TARGET_EXE%" > nul 2>&1
 )
 
-if exist "%NEW_EXE%" del /f /q "%NEW_EXE%" > nul 2>&1
-del /f /q "%TARGET_DIR%\\*.old_*" > nul 2>&1
-
-timeout /t 1 /nobreak > nul
+:: Launch updated app immediately
 set "_PYI_APPLICATION_HOME_DIR="
 set "_PYI_ARCHIVE_FILE="
 set "_PYI_PARENT_PROCESS_LEVEL="
@@ -666,6 +713,9 @@ set "_MEIPASS="
 cd /d "%TARGET_DIR%"
 explorer.exe "%TARGET_EXE%"
 
+:: Background cleanup
+if exist "%NEW_EXE%" del /f /q "%NEW_EXE%" > nul 2>&1
+del /f /q "%TARGET_DIR%\\*.old_*" > nul 2>&1
 (goto) 2>nul & del /f /q "%~f0"
 exit
 """
@@ -761,6 +811,9 @@ class UnifiedApp(ctk.CTk):
 
         self.create_widgets()
         self.load_settings()
+
+        # Preload heavy modules (pandas, openpyxl) asynchronously in background
+        threading.Thread(target=_preload_heavy_libraries, daemon=True).start()
 
         # Check for updates automatically in background (silent & non-blocking)
         self.after(1500, lambda: self.start_update_check(manual=False))
