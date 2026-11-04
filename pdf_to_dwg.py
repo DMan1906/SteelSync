@@ -2,6 +2,7 @@
 """
 pdf_to_dwg.py - Generator CAD (DWG / DXF) din Desene de Piesă PDF
 Extrage doar geometria curată a piesei (1:1 în milimetri), fără cote, texte, săgeți de secțiune sau cartuș.
+Suportă decupaje complexe, găuri și expansiunea exactă a vederilor scurtate (Tekla view shortening).
 """
 
 import os
@@ -78,7 +79,7 @@ class PdfToCadConverter:
 
     @classmethod
     def clean_part_name(cls, raw_name):
-        """Curăță denumirea piesei de cratime, spații și caractere speciale (ex: DSBO-21159 -> DSBO21159)."""
+        """Curăță denumirea piesei de cratime, spații și caractere speciale (ex: DSBO-21051 -> DSBO21051)."""
         if not raw_name:
             return "PART"
         clean = re.sub(r'[^A-Za-z0-9]', '', raw_name).upper()
@@ -121,7 +122,7 @@ class PdfToCadConverter:
             b_txt = b[4].strip()
             lines = [l.strip() for l in b_txt.splitlines() if l.strip()]
             for idx, line in enumerate(lines):
-                # Detecție profil (ex: PL25X300, BL3*931, FL100X10, PL20-294)
+                # Detecție profil (ex: PL20X200, PL25X300, BL3*931)
                 m_prof = re.search(r'\b(?:PL|BL|FL|P|FLAT)?\s*(\d+(?:\.\d+)?)\s*[*xX\-]\s*(\d+(?:\.\d+)?)\b', line, re.IGNORECASE)
                 if m_prof:
                     try:
@@ -165,27 +166,22 @@ class PdfToCadConverter:
                     meta["pos_no"] = candidate
 
         # 5. Prioritate / Fallback Nume Fișier PDF
-        # Dacă numele fișierului PDF este un cod alfanumeric valid (ex: DSBO21159_.pdf), îl folosim ca garanție
         if clean_stem and clean_stem not in self.BLACKLIST_NAMES and any(c.isdigit() for c in clean_stem):
             if not meta["pos_no"] or meta["pos_no"].upper() in self.BLACKLIST_NAMES:
                 meta["pos_no"] = clean_stem
-            else:
-                # Dacă codul extras e aproape identic cu stem-ul, preferăm forma curată a numelui
-                pass
         elif not meta["pos_no"]:
             meta["pos_no"] = stem
 
         meta["clean_name"] = self.clean_part_name(meta["pos_no"])
 
         # 6. Identificare Scară (Målestokk 1:X sau Front 1:X)
-        m_scale = re.search(r'(?:M[aå]lestokk|Scale|Front|Top|View)\s*[:\s]\s*1\s*:\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+        m_scale = re.search(r'(?:M.*?lestokk|Scale|Front|Top|View)\s*[:\s]?\s*1\s*:\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
         if m_scale:
             try:
                 meta["scale"] = float(m_scale.group(1))
             except ValueError:
                 meta["scale"] = 10.0
 
-        # Fallback LENGDE / PROFIL din text general dacă nu au fost găsite în blocul STYKKLISTE
         if not meta["lengde"]:
             m_len = re.search(r'LENGDE\s*[\r\n]+\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
             if m_len:
@@ -211,7 +207,7 @@ class PdfToCadConverter:
         - Filtrează cartușul și tabelele.
         - Elimină automat liniile de cotă, cotele, săgețile și simbolurile de secțiune (cutting planes).
         - Izolează vederea principală (Front) față de secțiunile laterale înguste.
-        - Unește segmentele coliniare întrerupte de simboluri de secțiune pentru a obține conturul întreg.
+        - Păstrează decupajele, găurile și colțurile 100% intacte (fără uniri accidentale prin decupaje).
         """
         max_y = (stykk_y - 8) if stykk_y else (page.rect.height * 0.72)
         margin_x0 = 20
@@ -227,8 +223,7 @@ class PdfToCadConverter:
         if not graphic_drawings:
             return [], None
 
-        # 1. Eliminare directă a liniilor de secțiune (cutting planes)
-        # În standardele Tekla/CAD, liniile de secțiune / simbolurile de secțiune sunt trasate cu Pen gros (w > 1.05 pt)
+        # 1. Eliminare directă a simbolurilor de secțiune / cutting planes (w > 1.05 pt)
         non_section_drawings = [
             d for d in graphic_drawings
             if (d.get("width") or 0) <= 1.05
@@ -238,8 +233,6 @@ class PdfToCadConverter:
             non_section_drawings = graphic_drawings
 
         # 2. Identificare grosime pentru conturul obiectului (Visible outline)
-        # În Tekla metric, conturul este de regulă ~0.709 pt (sau ~0.567 pt)
-        # Liniile de cotă / hașurile sunt subțiri (~0.28 - 0.51 pt)
         ns_widths = [round(d.get("width") or 0, 3) for d in non_section_drawings if d.get("width")]
         
         if any(0.65 <= w <= 0.85 for w in ns_widths):
@@ -258,7 +251,6 @@ class PdfToCadConverter:
         ]
 
         if not contour_drawings:
-            # Fallback dacă nu sunt diferențe clare de grosime
             contour_drawings = [d for d in non_section_drawings if d.get("width") and d.get("items")]
 
         # 3. Izolare vedere principală (Front View) prin clustering orizontal pe axa X
@@ -277,23 +269,20 @@ class PdfToCadConverter:
                     cur_drawings = [dr]
             clusters.append((cur_x0, cur_x1, cur_drawings))
 
-            # Selectăm clusterul cel mai lat (Front view are lățimea piesei, în timp ce secțiunea A-A are doar grosimea t)
+            # Selectăm clusterul cel mai lat (Front view)
             clusters.sort(key=lambda c: (c[1] - c[0]), reverse=True)
             contour_drawings = clusters[0][2]
 
         # 4. Colectare primitive geometrice
-        raw_items = []
+        items = []
         for d in contour_drawings:
             for it in d.get("items", []):
-                raw_items.append(it)
+                items.append(it)
 
-        if not raw_items:
+        if not items:
             return [], None
 
-        # 5. Unire segmente coliniare întrerupte de simboluri de secțiune sau axe
-        items = self._merge_collinear_lines(raw_items, max_gap=35.0)
-
-        # 6. Calcul Bounding Box
+        # 5. Calcul Bounding Box
         pts = []
         for it in items:
             cmd = it[0]
@@ -320,85 +309,30 @@ class PdfToCadConverter:
         return items, bbox
 
     @staticmethod
-    def _merge_collinear_lines(items, max_gap=35.0):
+    def _find_view_break(lines, min_x, max_x):
         """
-        Unește segmentele de linie coliniare întrerupte de goluri mici
-        (generate de trecerea liniilor de secțiune sau axe prin conturul piesei).
+        Detectează dacă vederea este scurtată de Tekla (view shortening break)
+        prin căutarea capetelor moarte (dead ends) coliniare din zona centrală a piesei.
         """
-        lines = [it for it in items if it[0] == "l"]
-        non_lines = [it for it in items if it[0] != "l"]
-
-        if not lines:
-            return items
-
-        h_lines = []
-        v_lines = []
-        other_lines = []
-
+        vertex_count = defaultdict(int)
         for it in lines:
-            p1, p2 = it[1], it[2]
-            if abs(p1.y - p2.y) < 0.6:
-                y = (p1.y + p2.y) / 2.0
-                x_min, x_max = min(p1.x, p2.x), max(p1.x, p2.x)
-                h_lines.append((y, x_min, x_max))
-            elif abs(p1.x - p2.x) < 0.6:
-                x = (p1.x + p2.x) / 2.0
-                y_min, y_max = min(p1.y, p2.y), max(p1.y, p2.y)
-                v_lines.append((x, y_min, y_max))
-            else:
-                other_lines.append(it)
+            if it[0] == "l":
+                k1 = (round(it[1].x * 2) / 2, round(it[1].y * 2) / 2)
+                k2 = (round(it[2].x * 2) / 2, round(it[2].y * 2) / 2)
+                vertex_count[k1] += 1
+                vertex_count[k2] += 1
 
-        merged = []
+        w = max_x - min_x
+        # Capete moarte strict în zona centrală (între 20% și 80% din lățimea vederii)
+        dead_ends = [p for p, count in vertex_count.items() if count == 1 and min_x + 0.2 * w < p[0] < max_x - 0.2 * w]
+        if not dead_ends:
+            return None
 
-        # Unire orizontale
-        h_by_y = defaultdict(list)
-        for y, x0, x1 in h_lines:
-            matched_y = None
-            for ey in h_by_y:
-                if abs(ey - y) < 0.6:
-                    matched_y = ey
-                    break
-            if matched_y is None:
-                matched_y = y
-            h_by_y[matched_y].append((x0, x1))
-
-        for y, spans in h_by_y.items():
-            spans.sort()
-            cur_x0, cur_x1 = spans[0]
-            for s0, s1 in spans[1:]:
-                if s0 - cur_x1 <= max_gap:
-                    cur_x1 = max(cur_x1, s1)
-                else:
-                    merged.append(("l", fitz.Point(cur_x0, y), fitz.Point(cur_x1, y)))
-                    cur_x0, cur_x1 = s0, s1
-            merged.append(("l", fitz.Point(cur_x0, y), fitz.Point(cur_x1, y)))
-
-        # Unire verticale
-        v_by_x = defaultdict(list)
-        for x, y0, y1 in v_lines:
-            matched_x = None
-            for ex in v_by_x:
-                if abs(ex - x) < 0.6:
-                    matched_x = ex
-                    break
-            if matched_x is None:
-                matched_x = x
-            v_by_x[matched_x].append((y0, y1))
-
-        for x, spans in v_by_x.items():
-            spans.sort()
-            cur_y0, cur_y1 = spans[0]
-            for s0, s1 in spans[1:]:
-                if s0 - cur_y1 <= max_gap:
-                    cur_y1 = max(cur_y1, s1)
-                else:
-                    merged.append(("l", fitz.Point(x, cur_y0), fitz.Point(x, cur_y1)))
-                    cur_y0, cur_y1 = s0, s1
-            merged.append(("l", fitz.Point(x, cur_y0), fitz.Point(x, cur_y1)))
-
-        merged.extend(other_lines)
-        merged.extend(non_lines)
-        return merged
+        xs = sorted(set(p[0] for p in dead_ends))
+        # O ruptură de scurtare are exact 2 coordonate X apropiate (gap de 4-30 pt)
+        if len(xs) == 2 and 4.0 <= (xs[1] - xs[0]) <= 30.0:
+            return xs[0], xs[1], dead_ends
+        return None
 
     def convert_single_pdf(
         self,
@@ -411,7 +345,7 @@ class PdfToCadConverter:
     ):
         """
         Convertește un singur PDF într-un fișier CAD (.dwg sau .dxf) 1:1.
-        output_format: 'dwg', 'dxf', sau 'both'
+        Păstrează decupajele și găurile 1:1 nedistorsionate și extinde vederile scurtate la lungimea reală.
         """
         if not self.is_available():
             return False, None, "Bibliotecile PyMuPDF sau ezdxf nu sunt instalate."
@@ -440,85 +374,134 @@ class PdfToCadConverter:
             if not items or not bbox or bbox["width"] <= 0 or bbox["height"] <= 0:
                 return False, None, "Nu s-a putut izola conturul piesei (lipsă vectori sau desen raster)."
 
-            # 3. Scalare și Calibrare 1:1
-            # 1 pt = 25.4 / 72.0 mm
             base_scale_factor = (25.4 / 72.0) * meta["scale"]
-            scale_x = base_scale_factor
-            scale_y = base_scale_factor
+            min_x = bbox["min_x"]
+            max_x = bbox["max_x"]
+            min_y = bbox["min_y"]
+            max_y = bbox["max_y"]
 
-            # Calibrare precisă când avem LENGDE și PROFIL
-            if calibrate_1to1 and meta["lengde"] and meta["profil_width"]:
-                target_len = meta["lengde"]
-                target_wid = meta["profil_width"]
+            drawn_w_pt = bbox["width"]
+            drawn_h_pt = bbox["height"]
+            drawn_len_mm = drawn_w_pt * base_scale_factor
 
-                # Verificăm orientarea vederii desenate (orizontală vs verticală)
-                if bbox["width"] >= bbox["height"]:
-                    target_x = target_len
-                    target_y = target_wid
-                else:
-                    target_x = target_wid
-                    target_y = target_len
+            target_len = meta["lengde"]
+            target_wid = meta["profil_width"]
 
-                curr_x_mm = bbox["width"] * base_scale_factor
-                curr_y_mm = bbox["height"] * base_scale_factor
+            # Verificare dacă este o vedere scurtată grafic (Tekla view shortening)
+            view_break_info = None
+            if calibrate_1to1 and target_len and (target_len / drawn_len_mm >= 1.35):
+                view_break_info = self._find_view_break(items, min_x, max_x)
 
-                ratio_x = target_x / curr_x_mm if curr_x_mm > 0 else 1.0
-                ratio_y = target_y / curr_y_mm if curr_y_mm > 0 else 1.0
-
-                # Dacă piesa a fost desenată scurtată pe lungime (Tekla view shortening),
-                # calibrăm axa lungimii exact la valoarea nominală din STYKKLISTE
-                if 0.5 <= ratio_y <= 2.0:
-                    scale_y = base_scale_factor * ratio_y
-                if ratio_x > 0:
-                    scale_x = base_scale_factor * ratio_x
-
-            dim_x_final = bbox["width"] * scale_x
-            dim_y_final = bbox["height"] * scale_y
-
-            # 4. Construire document CAD cu ezdxf
             dxf_doc = ezdxf.new("R2010", setup=True)
             dxf_doc.units = ezdxf.units.MM
             msp = dxf_doc.modelspace()
-
-            min_x = bbox["min_x"]
-            max_y_pt = bbox["max_y"]
-
             dxf_doc.layers.add("CONTUR_PIESA", color=4)  # Cyan
 
-            for it in items:
-                cmd = it[0]
-                if cmd == "l":
-                    p1, p2 = it[1], it[2]
-                    x1 = (p1.x - min_x) * scale_x
-                    y1 = (max_y_pt - p1.y) * scale_y
-                    x2 = (p2.x - min_x) * scale_x
-                    y2 = (max_y_pt - p2.y) * scale_y
-                    msp.add_line((x1, y1), (x2, y2), dxfattribs={"layer": "CONTUR_PIESA"})
+            if view_break_info is not None:
+                # ── Caz 1: Vedere Scurtată (Tekla View Shortening) ──
+                # Păstrăm toate detaliile/decupajele de la capete la scara reală 1:1,
+                # și extindem strict porțiunea de mijloc la lungimea nominală.
+                x_brk_left, x_brk_right, dead_ends = view_break_info
 
-                elif cmd == "c":
-                    # Interpolare Bezier cubică
-                    p1, p2, p3, p4 = it[1], it[2], it[3], it[4]
-                    steps = 16
-                    pts = []
-                    for s in range(steps + 1):
-                        t = s / float(steps)
-                        bx = (1 - t)**3 * p1.x + 3 * (1 - t)**2 * t * p2.x + 3 * (1 - t) * t**2 * p3.x + t**3 * p4.x
-                        by = (1 - t)**3 * p1.y + 3 * (1 - t)**2 * t * p2.y + 3 * (1 - t) * t**2 * p3.y + t**3 * p4.y
-                        cx = (bx - min_x) * scale_x
-                        cy = (max_y_pt - by) * scale_y
-                        pts.append((cx, cy))
-                    msp.add_lwpolyline(pts, dxfattribs={"layer": "CONTUR_PIESA"})
+                left_mm = (x_brk_left - min_x) * base_scale_factor
+                right_mm = (max_x - x_brk_right) * base_scale_factor
+                delta_gap_mm = target_len - (left_mm + right_mm)
 
-                elif cmd == "re":
-                    r = it[1]
-                    rx0 = (r.x0 - min_x) * scale_x
-                    rx1 = (r.x1 - min_x) * scale_x
-                    ry0 = (max_y_pt - r.y1) * scale_y
-                    ry1 = (max_y_pt - r.y0) * scale_y
-                    poly_pts = [(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1), (rx0, ry0)]
-                    msp.add_lwpolyline(poly_pts, dxfattribs={"layer": "CONTUR_PIESA"})
+                def pt_to_cad(pt):
+                    if pt.x <= x_brk_left + 0.5:
+                        xc = (pt.x - min_x) * base_scale_factor
+                    else:
+                        xc = left_mm + delta_gap_mm + (pt.x - x_brk_right) * base_scale_factor
+                    yc = (max_y - pt.y) * base_scale_factor
+                    return (xc, yc)
 
-            # 5. Salvare DXF / DWG
+                # Export elemente geometrice originale (fără modificări la decupaje/colțuri)
+                for it in items:
+                    cmd = it[0]
+                    if cmd == "l":
+                        p1 = pt_to_cad(it[1])
+                        p2 = pt_to_cad(it[2])
+                        msp.add_line(p1, p2, dxfattribs={"layer": "CONTUR_PIESA"})
+
+                    elif cmd == "c":
+                        p1, p2, p3, p4 = it[1], it[2], it[3], it[4]
+                        steps = 16
+                        pts = []
+                        for s in range(steps + 1):
+                            t = s / float(steps)
+                            bx = (1 - t)**3 * p1.x + 3 * (1 - t)**2 * t * p2.x + 3 * (1 - t) * t**2 * p3.x + t**3 * p4.x
+                            by = (1 - t)**3 * p1.y + 3 * (1 - t)**2 * t * p2.y + 3 * (1 - t) * t**2 * p3.y + t**3 * p4.y
+                            pts.append(pt_to_cad(fitz.Point(bx, by)))
+                        msp.add_lwpolyline(pts, dxfattribs={"layer": "CONTUR_PIESA"})
+
+                    elif cmd == "re":
+                        r = it[1]
+                        p0 = pt_to_cad(fitz.Point(r.x0, r.y0))
+                        p1 = pt_to_cad(fitz.Point(r.x1, r.y0))
+                        p2 = pt_to_cad(fitz.Point(r.x1, r.y1))
+                        p3 = pt_to_cad(fitz.Point(r.x0, r.y1))
+                        msp.add_lwpolyline([p0, p1, p2, p3, p0], dxfattribs={"layer": "CONTUR_PIESA"})
+
+                # Conectăm strict liniile de contur peste golul de scurtare
+                by_y = defaultdict(list)
+                for p in dead_ends:
+                    by_y[p[1]].append(p[0])
+
+                for y_val, xs in by_y.items():
+                    if len(xs) == 2:
+                        yc = (max_y - y_val) * base_scale_factor
+                        msp.add_line((left_mm, yc), (left_mm + delta_gap_mm, yc), dxfattribs={"layer": "CONTUR_PIESA"})
+
+                dim_x_final = target_len
+                dim_y_final = drawn_h_pt * base_scale_factor
+
+            else:
+                # ── Caz 2: Vedere Normală (Nescurtată) ──
+                scale_final = base_scale_factor
+                if calibrate_1to1 and target_len and target_wid:
+                    target_max = max(target_len, target_wid)
+                    curr_max_mm = max(drawn_w_pt, drawn_h_pt) * base_scale_factor
+                    if curr_max_mm > 0:
+                        ratio = target_max / curr_max_mm
+                        if 0.85 <= ratio <= 1.15:
+                            scale_final = base_scale_factor * ratio
+
+                dim_x_final = drawn_w_pt * scale_final
+                dim_y_final = drawn_h_pt * scale_final
+
+                for it in items:
+                    cmd = it[0]
+                    if cmd == "l":
+                        p1, p2 = it[1], it[2]
+                        x1 = (p1.x - min_x) * scale_final
+                        y1 = (max_y - p1.y) * scale_final
+                        x2 = (p2.x - min_x) * scale_final
+                        y2 = (max_y - p2.y) * scale_final
+                        msp.add_line((x1, y1), (x2, y2), dxfattribs={"layer": "CONTUR_PIESA"})
+
+                    elif cmd == "c":
+                        p1, p2, p3, p4 = it[1], it[2], it[3], it[4]
+                        steps = 16
+                        pts = []
+                        for s in range(steps + 1):
+                            t = s / float(steps)
+                            bx = (1 - t)**3 * p1.x + 3 * (1 - t)**2 * t * p2.x + 3 * (1 - t) * t**2 * p3.x + t**3 * p4.x
+                            by = (1 - t)**3 * p1.y + 3 * (1 - t)**2 * t * p2.y + 3 * (1 - t) * t**2 * p3.y + t**3 * p4.y
+                            cx = (bx - min_x) * scale_final
+                            cy = (max_y - by) * scale_final
+                            pts.append((cx, cy))
+                        msp.add_lwpolyline(pts, dxfattribs={"layer": "CONTUR_PIESA"})
+
+                    elif cmd == "re":
+                        r = it[1]
+                        rx0 = (r.x0 - min_x) * scale_final
+                        rx1 = (r.x1 - min_x) * scale_final
+                        ry0 = (max_y - r.y1) * scale_final
+                        ry1 = (max_y - r.y0) * scale_final
+                        poly_pts = [(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1), (rx0, ry0)]
+                        msp.add_lwpolyline(poly_pts, dxfattribs={"layer": "CONTUR_PIESA"})
+
+            # 4. Salvare DXF / DWG
             os.makedirs(output_dir, exist_ok=True)
             dxf_filename = f"{clean_name}.dxf"
             dwg_filename = f"{clean_name}.dwg"
@@ -587,7 +570,6 @@ class PdfToCadConverter:
 
         total = len(pdf_paths)
         for idx, pdf_p in enumerate(pdf_paths, 1):
-            name_base = Path(pdf_p).stem
             if log_callback:
                 log_callback(f"[{idx}/{total}] Procesare: {os.path.basename(pdf_p)}...")
 
