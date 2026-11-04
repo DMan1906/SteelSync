@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.2.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.2.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.2.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.3.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.3.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.3.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.2.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.2.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.3.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.3.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,12 +16,16 @@
 
 ## 🚀 Funcționalități
 
-- **🔍 DWG Finder (NOU în v1.2.0)** – Identifică și extrage automat fișierele CAD `.dwg` existente într-un arbore de clienți/proiecte pe baza unui pachet de fișiere `.pdf` cu piese de desenat:
+- **🔍 DWG Finder (Avansat în v1.3.0)** – Identifică și extrage automat fișierele CAD `.dwg` existente într-un arbore de clienți/proiecte pe baza unui pachet de fișiere `.pdf` cu piese de desenat:
+  - **Păstrare subfoldere de grosimi:** Recunoaște și organizează automat fișierele DWG în subfoldere de grosimi identice cu cele din proiect (`t10`, `t5`, `10`, `PL12` etc.).
+  - **Suport complet pentru variații piese:** Trage automat toate variațiile aceluiași cod de piesă (ex: dacă PDF-ul este `DSBO2014`, extrage `DSBO2014.dwg`, `DSBO2014T.dwg`, `DSBO2014C.dwg`, `DSBO2014L1.dwg`, excluzând fals-pozitivele numerice precum `DSBO20145`).
   - Localizează automat folderele proiectului după număr în orice structură de directoare.
-  - Algoritm avansat de normalizare și potrivire cod piesă (elimină caractere speciale, prefixe de proiect, paranteze și revizii, fără fals-pozitive pe cifre).
   - Fallback inteligent bazat pe textul extras din antetul PDF (`pypdf`).
   - Tabel interactiv cu rezultate: **Piese cu DWG Găsit** (deschidere fișier la dublu-click) și **Piese Fără DWG (Lipsă)** (copiere rapidă a codurilor în clipboard).
   - Export raport detaliat Excel cu formatare profesională pe două foi de lucru.
+- **📁 Căutare Automată Proiect în Folderul Mamă (NOU în v1.3.0)** – Opțiune în `File Extractor` pentru scanarea automată a arborelui de clienți după număr/denumire proiect, folosind potrivire strictă pe cuvânt întreg (whole-word regex). Selectare automată când există o potrivire unică sau dialog modal intuitiv când există mai multe potriviri.
+- **🖍️ Evidențiere Repere Lipsă cu Roșu în Rapoarte (NOU în v1.3.0)** – Colorează automat cu roșu (`FF9999`) rândurile pieselor care au fișiere lipsă în rapoartele Excel generate (`raport_PLACI.xlsx`, `raport_table.xlsx`, `raport_PROFILE.xlsx`), păstrând 100% intactă structura tabelelor fără a modifica numărul de rânduri sau coloane.
+- **📊 Verificare Multi-Sheet la Rectificare Cantități NC (NOU în v1.3.0)** – Modulul `Modify NC` parcurge automat toate foile de calcul (sheets) din fișierul Excel de croi/BOM și cumulează corect cantitățile pieselor.
 - **Sistem Auto-Update inteligent** – Verifică automat versiunile noi din GitHub Release la pornire (fără blocaje, 100% silențios când ești offline). Actualizare cu un singur click fără pierderea portabilității.
 - **Reordonare Tab-uri Floating prin Drag & Drop** – Tab-urile își păstrează estetica nativă flotantă (floating pills) și pot fi reordonate direct prin Drag & Drop cu mouse-ul (sau prin click-dreapta / scurtături). Ordinea preferată se salvează automat și este reținută la repornire.
 - **Memorii Independente pentru Browse** – Câmpul `Sursă` din `File Extractor` are memorie proprie izolată (`extractor_source_last_dir`), în timp ce toate celelalte butoane `Browse` partajează o memorie globală independentă (`global_last_dir`).
@@ -37,7 +41,7 @@
 
 ## 🏷️ Versiune curentă
 
-**v1.2.0**
+**v1.3.0**
 
 ## 📖 Ghid Dezvoltare și Reguli Versionare
 Pentru ghidul complet de update și convențiile SemVer (`x.y.z`) dedicate dezvoltatorilor și agenților AI, consultă [AGENTS.md](AGENTS.md).
@@ -49,13 +53,3 @@ Aplicația este compilată cu PyInstaller:
 ```powershell
 python -m PyInstaller SteelSync.spec --noconfirm
 ```
-
-Executabilul rezultat se găsește în `dist/SteelSync.exe`.
-
-## Cerințe
-
-- Python 3.10+
-- customtkinter
-- openpyxl
-- pandas
-- pypdf

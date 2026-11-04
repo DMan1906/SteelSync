@@ -32,17 +32,22 @@ class _LazyPandasProxy:
 pd = _LazyPandasProxy()
 
 def _load_openpyxl():
-    global Workbook, Font, Border, Side, Alignment, PatternFill, get_column_letter
-    from openpyxl import Workbook as _WB
+    global Workbook, load_workbook, Font, Border, Side, Alignment, PatternFill, get_column_letter
+    from openpyxl import Workbook as _WB, load_workbook as _LWB
     from openpyxl.styles import Font as _F, Border as _B, Side as _S, Alignment as _A, PatternFill as _PF
     from openpyxl.utils import get_column_letter as _GCL
     Workbook = _WB
+    load_workbook = _LWB
     Font = _F
     Border = _B
     Side = _S
     Alignment = _A
     PatternFill = _PF
     get_column_letter = _GCL
+
+def load_workbook(*args, **kwargs):
+    _load_openpyxl()
+    return globals()['load_workbook'](*args, **kwargs)
 
 def Workbook(*args, **kwargs):
     _load_openpyxl()
@@ -366,7 +371,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -535,6 +540,132 @@ def fetch_latest_release_info(timeout=3.5):
     except Exception:
         return None
     return None
+
+
+class ProjectSelectionDialog(ctk.CTkToplevel):
+    """
+    Modal dialog allowing the user to select one project folder when multiple match.
+    """
+    def __init__(self, parent, matches, search_term):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.matches = matches
+        self.selected_path = None
+
+        self.title("Selectare Folder Proiect")
+        self.geometry("720x460")
+        self.minsize(620, 360)
+        self.configure(fg_color=_BG)
+        
+        self.transient(parent)
+        self.grab_set()
+
+        self.update_idletasks()
+        try:
+            x = parent.winfo_x() + (parent.winfo_width() // 2) - 360
+            y = parent.winfo_y() + (parent.winfo_height() // 2) - 230
+            self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        self._create_widgets(search_term)
+
+    def _create_widgets(self, search_term):
+        container = ctk.CTkFrame(self, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=18, pady=16)
+
+        hdr_card = ctk.CTkFrame(container, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        hdr_card.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(
+            hdr_card,
+            text=f"🔍 S-au găsit {len(self.matches)} foldere de proiect pentru: '{search_term}'",
+            font=("Segoe UI", 14, "bold"),
+            text_color=_TEXT_PRI,
+            anchor="w"
+        ).pack(fill="x", padx=14, pady=(10, 2))
+
+        ctk.CTkLabel(
+            hdr_card,
+            text="Alege folderul dorit din lista de mai jos (dublu-click sau selectează și apasă butonul verde):",
+            font=("Segoe UI", 11),
+            text_color=_TEXT_SEC,
+            anchor="w"
+        ).pack(fill="x", padx=14, pady=(0, 10))
+
+        tree_card = ctk.CTkFrame(container, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        tree_card.pack(fill="both", expand=True, pady=(0, 12))
+
+        tree_inner = tk.Frame(tree_card, bg="#0d1b2a" if ctk.get_appearance_mode() == "Dark" else "#ffffff")
+        tree_inner.pack(fill="both", expand=True, padx=8, pady=8)
+        tree_inner.grid_rowconfigure(0, weight=1)
+        tree_inner.grid_columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(
+            tree_inner,
+            columns=("name", "path"),
+            show="headings",
+            style="DWG.Treeview",
+            selectmode="browse"
+        )
+        self.tree.heading("name", text="Folder Proiect")
+        self.tree.heading("path", text="Cale Completă")
+        self.tree.column("name", width=220, anchor="w")
+        self.tree.column("path", width=440, anchor="w")
+
+        vsb = ttk.Scrollbar(tree_inner, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_inner, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        for p in self.matches:
+            self.tree.insert("", "end", values=(os.path.basename(p), p))
+
+        first_child = self.tree.get_children()
+        if first_child:
+            self.tree.selection_set(first_child[0])
+
+        self.tree.bind("<Double-1>", self._on_double_click)
+
+        btn_box = ctk.CTkFrame(container, fg_color="transparent")
+        btn_box.pack(fill="x")
+
+        ctk.CTkButton(
+            btn_box,
+            text="Renunță",
+            width=100,
+            height=32,
+            fg_color=_ENTRY_BG,
+            hover_color=_CARD_BORDER,
+            text_color=_TEXT_PRI,
+            command=self.destroy
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkButton(
+            btn_box,
+            text="✔ Selectează Proiect",
+            width=160,
+            height=32,
+            fg_color=_GREEN,
+            hover_color=_GREEN_HOV,
+            text_color="#0b0f19",
+            font=("Segoe UI", 12, "bold"),
+            command=self._on_select
+        ).pack(side="right")
+
+    def _on_double_click(self, event):
+        self._on_select()
+
+    def _on_select(self):
+        sel = self.tree.selection()
+        if sel:
+            vals = self.tree.item(sel[0], "values")
+            if vals and len(vals) >= 2:
+                self.selected_path = vals[1]
+        self.destroy()
 
 
 class UpdateDialog(ctk.CTkToplevel):
@@ -907,6 +1038,8 @@ class UnifiedApp(ctk.CTk):
         self.extract_mode = ctk.StringVar(value="Doar Deficit")
         self.excel_file = ctk.StringVar()
         self.col_name = ctk.StringVar()
+        self.extractor_auto_search = ctk.BooleanVar(value=False)
+        self.extractor_proj_search = ctk.StringVar()
         
         # ── NC Sorter Variables ──
         self.nc_source_folder = ctk.StringVar()
@@ -1020,6 +1153,8 @@ class UnifiedApp(ctk.CTk):
             self.dest_dir.set(s.get("dest_dir", ""))
             self.excel_file.set(s.get("excel_file", ""))
             self.col_name.set(s.get("col_name", ""))
+            self.extractor_auto_search.set(s.get("extractor_auto_search", False))
+            self.extractor_proj_search.set(s.get("extractor_proj_search", ""))
             self.duplicate_handling.set(s.get("duplicate_handling", "Keep Newest"))
             self.extract_mode.set(s.get("extract_mode", "Doar Deficit"))
             self.nc_source_folder.set(s.get("nc_source_folder", ""))
@@ -1138,6 +1273,8 @@ class UnifiedApp(ctk.CTk):
             "dest_dir": self.dest_dir.get(),
             "excel_file": self.excel_file.get(),
             "col_name": self.col_name.get(),
+            "extractor_auto_search": self.extractor_auto_search.get(),
+            "extractor_proj_search": self.extractor_proj_search.get(),
             "duplicate_handling": self.duplicate_handling.get(),
             "extract_mode": self.extract_mode.get(),
             "nc_source_folder": self.nc_source_folder.get(),
@@ -1635,18 +1772,54 @@ class UnifiedApp(ctk.CTk):
         section_lbl = ctk.CTkLabel(paths_card, text="📂 Directoare & Excel", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI)
         section_lbl.grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
 
-        self._label(paths_card, text="Sursă:").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
-        self._entry(paths_card, self.source_dir).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
-        self._browse_btn(paths_card, self.browse_source).grid(row=1, column=2, padx=(4, 16), pady=4)
+        # Auto project search checkbox
+        self.cb_auto_proj = ctk.CTkCheckBox(
+            paths_card,
+            text="Caută automat proiectul în Folderul Mamă",
+            variable=self.extractor_auto_search,
+            command=self._on_toggle_auto_search,
+            font=("Segoe UI", 12),
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            border_color=_CARD_BORDER,
+            text_color=_TEXT_PRI
+        )
+        self.cb_auto_proj.grid(row=1, column=1, columnspan=2, padx=4, pady=(2, 6), sticky="w")
 
-        self._label(paths_card, text="Destinație:").grid(row=2, column=0, padx=(16, 6), pady=4, sticky="w")
-        self._entry(paths_card, self.dest_dir).grid(row=2, column=1, padx=4, pady=4, sticky="ew")
-        self._browse_btn(paths_card, self.browse_dest).grid(row=2, column=2, padx=(4, 16), pady=4)
+        self.lbl_extractor_source = self._label(paths_card, text="Sursă:")
+        self.lbl_extractor_source.grid(row=2, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(paths_card, self.source_dir).grid(row=2, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(paths_card, self.browse_source).grid(row=2, column=2, padx=(4, 16), pady=4)
 
-        self._label(paths_card, text="Fișier Excel:").grid(row=3, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
+        # Dynamic Project search frame (shown when auto search is enabled)
+        self.proj_search_frame = ctk.CTkFrame(paths_card, fg_color="transparent")
+        self.proj_search_frame.grid_columnconfigure(0, weight=0)
+        self.proj_search_frame.grid_columnconfigure(1, weight=1)
+        self.proj_search_frame.grid_columnconfigure(2, weight=0)
+
+        self._label(self.proj_search_frame, text="Nr. / Denumire Proiect:").grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        self._entry(self.proj_search_frame, self.extractor_proj_search, placeholder_text="ex: 1242 sau Fiskebrygga").grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+        ctk.CTkButton(
+            self.proj_search_frame,
+            text="🔍 Verifică",
+            width=110,
+            height=34,
+            font=("Segoe UI", 12, "bold"),
+            fg_color=_ENTRY_BG,
+            hover_color=_ACCENT,
+            text_color=_TEXT_PRI,
+            corner_radius=8,
+            command=self.find_project_folder_interactive
+        ).grid(row=0, column=2, padx=(4, 0), pady=2)
+
+        self._label(paths_card, text="Destinație:").grid(row=4, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(paths_card, self.dest_dir).grid(row=4, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(paths_card, self.browse_dest).grid(row=4, column=2, padx=(4, 16), pady=4)
+
+        self._label(paths_card, text="Fișier Excel:").grid(row=5, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
         
         excel_inner = ctk.CTkFrame(paths_card, fg_color="transparent")
-        excel_inner.grid(row=3, column=1, padx=4, pady=(4, 10), sticky="ew")
+        excel_inner.grid(row=5, column=1, padx=4, pady=(4, 10), sticky="ew")
         excel_inner.grid_columnconfigure(0, weight=1)
         excel_inner.grid_columnconfigure(1, weight=0)
         excel_inner.grid_columnconfigure(2, weight=0)
@@ -1655,7 +1828,9 @@ class UnifiedApp(ctk.CTk):
         self._label(excel_inner, text="Col:", font=("Segoe UI", 11)).grid(row=0, column=1, padx=(8, 2))
         self._entry(excel_inner, self.col_name, width=80, placeholder_text="auto").grid(row=0, column=2, padx=(0, 0))
 
-        self._browse_btn(paths_card, self.browse_excel).grid(row=3, column=2, padx=(4, 16), pady=(4, 10))
+        self._browse_btn(paths_card, self.browse_excel).grid(row=5, column=2, padx=(4, 16), pady=(4, 10))
+
+        self._on_toggle_auto_search()
 
         # ──── Extensions card ────
         ext_card = self._make_card(container)
@@ -1832,6 +2007,92 @@ class UnifiedApp(ctk.CTk):
                 self.draw_extensions()
             self.new_ext_entry.delete(0, 'end')
 
+    def _on_toggle_auto_search(self):
+        """Toggle UI between manual project folder selection and Parent Folder + Project search."""
+        if hasattr(self, "cb_auto_proj") and hasattr(self, "proj_search_frame"):
+            if self.extractor_auto_search.get():
+                self.lbl_extractor_source.configure(text="Folder Mamă Clienți:")
+                self.proj_search_frame.grid(row=3, column=0, columnspan=3, padx=16, pady=4, sticky="ew")
+            else:
+                self.lbl_extractor_source.configure(text="Sursă:")
+                self.proj_search_frame.grid_forget()
+            self.save_settings()
+
+    def find_matching_project_folders(self, parent_dir, search_term):
+        """Scan parent_dir for directories matching search_term as whole words."""
+        tokens = [t.strip() for t in re.split(r'[\s\-_\.,\(\)\[\]]+', search_term) if t.strip()]
+        if not tokens:
+            return []
+
+        matches = []
+        for root, dirs, files in os.walk(parent_dir):
+            rel_depth = len(os.path.relpath(root, parent_dir).split(os.sep))
+            if rel_depth > 3:
+                dirs.clear()
+                continue
+
+            matched_in_level = []
+            for d in dirs:
+                all_match = True
+                for token in tokens:
+                    pattern = rf'(?:^|[\s\-_\.,\(\)\[\]]){re.escape(token)}(?:$|[\s\-_\.,\(\)\[\]])'
+                    if not re.search(pattern, d, re.IGNORECASE):
+                        all_match = False
+                        break
+                if all_match:
+                    matched_in_level.append(d)
+                    matches.append(os.path.join(root, d))
+
+            for d in matched_in_level:
+                dirs.remove(d)
+
+        return matches
+
+    def resolve_project_folder(self):
+        """Resolve project folder from parent dir and search term. Returns folder path or None."""
+        parent_dir = self.source_dir.get().strip()
+        search_term = self.extractor_proj_search.get().strip()
+
+        if not parent_dir or not os.path.exists(parent_dir):
+            messagebox.showwarning("Atenție", "Te rog selectează Folderul Mamă valid.")
+            return None
+
+        if not search_term:
+            messagebox.showwarning("Atenție", "Te rog introdu numărul sau denumirea proiectului căutat (ex: 1242).")
+            return None
+
+        matches = self.find_matching_project_folders(parent_dir, search_term)
+
+        if not matches:
+            messagebox.showwarning(
+                "Proiect Negăsit",
+                f"Nu s-a găsit niciun folder de proiect care să conțină '{search_term}' ca și cuvânt întreg în:\n{parent_dir}"
+            )
+            return None
+        elif len(matches) == 1:
+            chosen = matches[0]
+            self.log(f"✅ Proiect identificat automat: {os.path.basename(chosen)} ({chosen})")
+            return chosen
+        else:
+            dlg = ProjectSelectionDialog(self, matches, search_term)
+            self.wait_window(dlg)
+            chosen = dlg.selected_path
+            if chosen:
+                self.log(f"✅ Proiect selectat manual: {os.path.basename(chosen)} ({chosen})")
+                return chosen
+            else:
+                self.log("⚠ Selecția proiectului a fost anulată.")
+                return None
+
+    def find_project_folder_interactive(self):
+        """Button click handler to test and verify project search immediately."""
+        chosen = self.resolve_project_folder()
+        if chosen:
+            messagebox.showinfo(
+                "Proiect Identificat",
+                f"A fost identificat folderul de proiect:\n\n{os.path.basename(chosen)}\n({chosen})"
+            )
+
     def browse_source(self):
         """Browse source folder exclusively for File Extractor (Requirement #3)."""
         curr = self.source_dir.get().strip()
@@ -1841,7 +2102,8 @@ class UnifiedApp(ctk.CTk):
         elif getattr(self, "extractor_source_last_dir", "") and os.path.isdir(self.extractor_source_last_dir):
             initial = self.extractor_source_last_dir
 
-        folder = filedialog.askdirectory(title="Selectare Director Sursă (File Extractor)", initialdir=initial)
+        title = "Selectează Folderul Mamă al Clienților" if self.extractor_auto_search.get() else "Selectare Director Sursă (File Extractor)"
+        folder = filedialog.askdirectory(title=title, initialdir=initial)
         if folder:
             norm = os.path.normpath(folder)
             self.source_dir.set(norm)
@@ -1892,9 +2154,16 @@ class UnifiedApp(ctk.CTk):
         return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
 
     def start_extraction(self):
-        if not self.source_dir.get() or not os.path.isdir(self.source_dir.get()):
-            messagebox.showerror("Eroare", "Director sursă invalid")
-            return
+        if self.extractor_auto_search.get():
+            effective_source = self.resolve_project_folder()
+            if not effective_source:
+                return
+        else:
+            effective_source = self.source_dir.get().strip()
+            if not effective_source or not os.path.isdir(effective_source):
+                messagebox.showerror("Eroare", "Director sursă invalid")
+                return
+
         if not self.dest_dir.get():
             messagebox.showerror("Eroare", "Director destinație invalid")
             return
@@ -1920,8 +2189,9 @@ class UnifiedApp(ctk.CTk):
         self.set_progress(0)
         self.log("=" * 50)
         self.log("Extracția a început...")
+        self.log(f"📁 Director sursă proiect: {effective_source}")
         
-        threading.Thread(target=self.run_extraction_process, args=(selected_exts,), daemon=True).start()
+        threading.Thread(target=self.run_extraction_process, args=(selected_exts, effective_source), daemon=True).start()
 
     def _detect_column(self, df, keywords, fallback_idx=None):
         """Auto-detect a column by searching for keywords in the header."""
@@ -2003,7 +2273,7 @@ class UnifiedApp(ctk.CTk):
         bom_path = os.path.join(dest_path, "BOM_piese_ramase.xlsx")
         return safe_save_workbook(wb, bom_path, self.log)
 
-    def run_extraction_process(self, selected_exts):
+    def run_extraction_process(self, selected_exts, effective_source=None):
         try:
             self.log(f"Citire fișier Excel: {self.excel_file.get()}")
             df = pd.read_excel(self.excel_file.get())
@@ -2093,7 +2363,8 @@ class UnifiedApp(ctk.CTk):
             self.log("Scanare director sursă...")
             
             files_db = {}
-            source_path = Path(self.source_dir.get())
+            source_dir_to_use = effective_source if effective_source else self.source_dir.get()
+            source_path = Path(source_dir_to_use)
             
             all_files = []
             for root, _, files in os.walk(source_path):
@@ -2220,6 +2491,26 @@ class UnifiedApp(ctk.CTk):
                         
                 status_path = safe_save_workbook(wb_status, status_path, self.log)
                 self.log(f"Raport status generat: {status_path}")
+                
+                # Identificare repere lipsă și evidențiere în rapoartele de piese
+                missing_parts = set()
+                for part in part_names:
+                    is_missing = False
+                    for ext in display_exts:
+                        if ext == '.nc':
+                            found = ('.nc' in part_to_ext_found[part] or '.nc1' in part_to_ext_found[part])
+                        else:
+                            found = (ext in part_to_ext_found[part])
+                        if not found:
+                            is_missing = True
+                            break
+                    if is_missing:
+                        missing_parts.add(part)
+                
+                if missing_parts:
+                    missing_norms = {self._normalize_name(p) for p in missing_parts}
+                    self.log(f"🖍️ Evidențiere {len(missing_parts)} repere lipsă cu roșu în rapoartele de piese...")
+                    self.highlight_missing_parts_in_reports(str(dest_path), missing_norms)
             except Exception as e:
                 self.log(f"Eroare generare raport status: {e}")
 
@@ -2870,7 +3161,7 @@ class UnifiedApp(ctk.CTk):
         self.dwg_found_frame.grid_rowconfigure(0, weight=1)
         self.dwg_found_frame.grid_columnconfigure(0, weight=1)
 
-        found_cols = ("piece_code", "pdf_file", "dwg_file", "source_dir")
+        found_cols = ("piece_code", "pdf_file", "dwg_file", "subfolder", "source_dir")
         self.dwg_found_tree = ttk.Treeview(
             self.dwg_found_frame,
             columns=found_cols,
@@ -2881,12 +3172,14 @@ class UnifiedApp(ctk.CTk):
         self.dwg_found_tree.heading("piece_code", text="Cod Piesă")
         self.dwg_found_tree.heading("pdf_file", text="Fișier PDF (Desenat)")
         self.dwg_found_tree.heading("dwg_file", text="Fișier DWG Găsit")
+        self.dwg_found_tree.heading("subfolder", text="Subfolder / Grosime")
         self.dwg_found_tree.heading("source_dir", text="Folder Sursă în Proiect")
 
-        self.dwg_found_tree.column("piece_code", width=140, anchor="w")
-        self.dwg_found_tree.column("pdf_file", width=220, anchor="w")
-        self.dwg_found_tree.column("dwg_file", width=200, anchor="w")
-        self.dwg_found_tree.column("source_dir", width=360, anchor="w")
+        self.dwg_found_tree.column("piece_code", width=130, anchor="w")
+        self.dwg_found_tree.column("pdf_file", width=200, anchor="w")
+        self.dwg_found_tree.column("dwg_file", width=180, anchor="w")
+        self.dwg_found_tree.column("subfolder", width=130, anchor="center")
+        self.dwg_found_tree.column("source_dir", width=300, anchor="w")
 
         found_vsb = ttk.Scrollbar(self.dwg_found_frame, orient="vertical", command=self.dwg_found_tree.yview)
         found_hsb = ttk.Scrollbar(self.dwg_found_frame, orient="horizontal", command=self.dwg_found_tree.xview)
@@ -3003,12 +3296,18 @@ class UnifiedApp(ctk.CTk):
         if not sel:
             return
         vals = self.dwg_found_tree.item(sel[0], "values")
-        if vals and len(vals) >= 4:
+        if vals and len(vals) >= 3:
             dwg_file = vals[2]
+            subfolder = vals[3] if len(vals) >= 4 and vals[3] != "-" else ""
             dest_dir = self.dwg_dest_dir.get().strip() or os.path.join(self.dwg_pdf_dir.get().strip(), "DWG_Gasite")
-            target_path = os.path.join(dest_dir, dwg_file)
+            target_path = os.path.join(dest_dir, subfolder, dwg_file) if subfolder else os.path.join(dest_dir, dwg_file)
             if not os.path.exists(target_path):
-                target_path = os.path.join(vals[3], dwg_file)
+                target_path = os.path.join(dest_dir, dwg_file)
+            if not os.path.exists(target_path):
+                for item in self.dwg_results.get("found", []):
+                    if item.get("dwg_file") == dwg_file:
+                        target_path = item.get("dest_path") or item.get("source_path")
+                        break
             if os.path.exists(target_path):
                 try:
                     os.startfile(target_path)
@@ -3099,14 +3398,14 @@ class UnifiedApp(ctk.CTk):
             self.dwg_log("\n⚠ Solicitare de oprire primită. Se finalizează operațiunea curentă...")
 
     def _dwg_search_worker(self, parent_dir, proj_num, pdf_dir, dest_dir):
-        """Worker thread executing the 3-step CAD matching & extraction algorithm."""
-        self.dwg_log(f"============================================================")
+        """Worker thread executing CAD matching & extraction with thickness subfolders and variations."""
+        self.dwg_log("=" * 60)
         self.dwg_log(f"🚀 Pornire Căutare DWG-uri Existente (SteelSync v{APP_VERSION})")
         self.dwg_log(f"• Director Mamă: {parent_dir}")
         self.dwg_log(f"• Număr Proiect Căutat: '{proj_num}'")
         self.dwg_log(f"• Folder Piese PDF: {pdf_dir}")
         self.dwg_log(f"• Folder Salvare DWG: {dest_dir}")
-        self.dwg_log(f"============================================================\n")
+        self.dwg_log("=" * 60 + "\n")
 
         make_dir_with_permissions(dest_dir)
 
@@ -3115,7 +3414,6 @@ class UnifiedApp(ctk.CTk):
         proj_pattern = re.compile(rf'(?<!\d){re.escape(proj_num)}(?!\d)', re.IGNORECASE)
         matched_proj_dirs = []
 
-        # If parent_dir itself contains project number:
         if proj_pattern.search(os.path.basename(parent_dir)):
             matched_proj_dirs.append(parent_dir)
         else:
@@ -3138,15 +3436,27 @@ class UnifiedApp(ctk.CTk):
                 self.dwg_log(f"   ↳ {p}")
 
         # ─── Indexare DWG-uri existente în directoarele găsite ───
-        self.dwg_log("\n📂 Indexare fișiere DWG din directoarele proiectului...")
-        dwg_index = {}  # clean_key -> dict(path, filename, stem, mtime)
+        self.dwg_log("\n📂 Indexare fișiere DWG din directoarele proiectului (inclusiv subfoldere de grosimi)...")
+        dwg_records = []  # list of dicts: path, filename, stem, clean_key, mtime, subfolder, proj_dir
+        generic_folder_names = {'dwg', 'dwgs', 'cad', 'drawings', 'desene', 'model', 'tekla', 'advance steel'}
 
         for p_dir in matched_proj_dirs:
             if self._dwg_cancel_requested:
                 break
+            proj_root_name = os.path.basename(p_dir).lower()
             for root, dirs, files in os.walk(p_dir):
                 if self._dwg_cancel_requested:
                     break
+                parent_folder_name = os.path.basename(root)
+                subfolder = ""
+                if parent_folder_name.lower() != proj_root_name and parent_folder_name.lower() not in generic_folder_names:
+                    subfolder = parent_folder_name
+                else:
+                    rel = os.path.relpath(root, p_dir)
+                    rel_parts = [p for p in rel.split(os.sep) if p and p != '.' and p.lower() not in generic_folder_names]
+                    if rel_parts:
+                        subfolder = rel_parts[-1]
+
                 for f in files:
                     if f.lower().endswith(".dwg"):
                         full_p = os.path.join(root, f)
@@ -3158,17 +3468,34 @@ class UnifiedApp(ctk.CTk):
                             mtime = os.path.getmtime(full_p)
                         except Exception:
                             mtime = 0
-                        # Keep newest or first
-                        if clean_key not in dwg_index or mtime > dwg_index[clean_key]["mtime"]:
-                            dwg_index[clean_key] = {
-                                "path": full_p,
-                                "filename": f,
-                                "stem": stem,
-                                "mtime": mtime,
-                                "clean_key": clean_key,
-                            }
 
-        self.dwg_log(f"✅ Indexare completă: {len(dwg_index)} fișiere DWG unice identificate.")
+                        dwg_records.append({
+                            "path": full_p,
+                            "filename": f,
+                            "stem": stem,
+                            "clean_key": clean_key,
+                            "mtime": mtime,
+                            "subfolder": subfolder,
+                            "proj_dir": p_dir,
+                        })
+
+        self.dwg_log(f"✅ Indexare completă: {len(dwg_records)} fișiere DWG identificate în proiect.")
+
+        # ─── Helper de potrivire variații ───
+        def is_dwg_variation(dwg_k, base_k):
+            """
+            Checks if dwg_k is exact match or valid variation of base_k.
+            E.g. base=DSBO2014 matches DSBO2014 (Exact), DSBO2014T, DSBO2014C, DSBO2014L1 (Variations).
+            Does NOT match DSBO20145 (starts with digit after base).
+            """
+            if dwg_k == base_k:
+                return True, "Exact"
+            if dwg_k.startswith(base_k):
+                suffix = dwg_k[len(base_k):]
+                if len(suffix) > 0 and not suffix[0].isdigit():
+                    if re.match(r'^[A-Z0-9]{1,5}$', suffix):
+                        return True, f"Variație ({suffix})"
+            return False, ""
 
         # ─── Pasul 2 & 3: Potrivire PDF <-> DWG și Copiere ───
         self.dwg_log("\n📄 Pasul 2: Analiză și potrivire piese PDF din folderul de desenat...")
@@ -3184,9 +3511,7 @@ class UnifiedApp(ctk.CTk):
 
         found_list = []
         missing_list = []
-
-        # Sort indexed keys by length descending to prioritize longer exact token matches
-        sorted_keys = sorted(dwg_index.keys(), key=len, reverse=True)
+        copied_dest_paths = set()
 
         for idx, pdf_name in enumerate(pdf_files):
             if self._dwg_cancel_requested:
@@ -3198,82 +3523,79 @@ class UnifiedApp(ctk.CTk):
 
             pdf_stem = Path(pdf_name).stem
             pdf_path = os.path.join(pdf_dir, pdf_name)
-            matched_dwg = None
-            match_method = ""
 
-            # ── Metoda A: Nume Fișier PDF ──
-            # 1. Delimiter-split chunks (split by space, underscore, parentheses, brackets, commas, semicolons)
+            # ── Extragere coduri piesă din numele PDF-ului ──
             chunks = re.split(r'[\s_()\[\],;]+', pdf_stem)
             clean_chunks = [re.sub(r'[^A-Za-z0-9]', '', c).upper() for c in chunks if re.sub(r'[^A-Za-z0-9]', '', c)]
-
-            # 2. Part code sequences (e.g. DSBO-21021, PL10-150)
             seqs = re.findall(r'[A-Za-z]+[-_]?\d+', pdf_stem)
             clean_seqs = [re.sub(r'[^A-Za-z0-9]', '', s).upper() for s in seqs if re.sub(r'[^A-Za-z0-9]', '', s)]
-
-            # 3. Whole clean stem
             clean_stem = re.sub(r'[^A-Za-z0-9]', '', pdf_stem).upper()
 
-            # Exact match priority:
-            # First check clean_seqs (part code patterns like DSBO-21021)
+            candidate_keys = []
             for s in clean_seqs:
-                if s in dwg_index:
-                    matched_dwg = dwg_index[s]
-                    match_method = "Nume PDF (Cod piesă extras)"
-                    break
+                if s not in candidate_keys: candidate_keys.append(s)
+            for c in clean_chunks:
+                if c not in candidate_keys: candidate_keys.append(c)
+            if clean_stem not in candidate_keys:
+                candidate_keys.append(clean_stem)
 
-            # Next check clean chunks from delimiters (e.g. 1242_DSB-21008_RevA -> 'DSB21008')
-            if not matched_dwg:
-                for c in clean_chunks:
-                    if c in dwg_index:
-                        matched_dwg = dwg_index[c]
-                        match_method = "Nume PDF (Token exact)"
-                        break
+            matching_for_pdf = []
+            used_records_for_pdf = set()
 
-            # Next check whole clean stem
-            if not matched_dwg and clean_stem in dwg_index:
-                matched_dwg = dwg_index[clean_stem]
-                match_method = "Nume PDF (Cod complet)"
+            # Verificare candidați pe baza numelui PDF
+            for cand in candidate_keys:
+                if len(cand) < 3:
+                    continue
+                for rec in dwg_records:
+                    if rec["path"] in used_records_for_pdf:
+                        continue
+                    is_match, reason = is_dwg_variation(rec["clean_key"], cand)
+                    if is_match:
+                        matching_for_pdf.append((rec, f"Nume PDF: {reason}"))
+                        used_records_for_pdf.add(rec["path"])
 
-            # Substring match on chunks with trailing non-digit check
-            if not matched_dwg:
-                for c in clean_chunks:
-                    if matched_dwg:
-                        break
-                    for k in sorted_keys:
-                        if len(k) < 3:
+            # Fallback Antet PDF dacă nu s-a potrivit nimic
+            if not matching_for_pdf:
+                all_dwg_keys = sorted(list({r["clean_key"] for r in dwg_records}), key=len, reverse=True)
+                header_code = extract_pdf_header_part_code(pdf_path, known_keys=all_dwg_keys)
+                if header_code:
+                    for rec in dwg_records:
+                        if rec["path"] in used_records_for_pdf:
                             continue
-                        pattern = rf'^{re.escape(k)}(?!\d)'
-                        if re.search(pattern, c):
-                            matched_dwg = dwg_index[k]
-                            match_method = "Nume PDF (Prefix token)"
-                            break
+                        is_match, reason = is_dwg_variation(rec["clean_key"], header_code)
+                        if is_match:
+                            matching_for_pdf.append((rec, f"Antet PDF: {reason}"))
+                            used_records_for_pdf.add(rec["path"])
 
-            # ── Metoda B: Fallback Text PDF (pypdf) ──
-            if not matched_dwg:
-                header_code = extract_pdf_header_part_code(pdf_path, known_keys=sorted_keys)
-                if header_code and header_code in dwg_index:
-                    matched_dwg = dwg_index[header_code]
-                    match_method = "Antet PDF (Text fallback)"
+            # Copiere în destinație (cu păstrarea folderului de grosime)
+            if matching_for_pdf:
+                for rec, method_desc in matching_for_pdf:
+                    sub = rec["subfolder"]
+                    if sub:
+                        target_sub_dir = os.path.join(dest_dir, sub)
+                        make_dir_with_permissions(target_sub_dir)
+                        dst_file = os.path.join(target_sub_dir, rec["filename"])
+                    else:
+                        dst_file = os.path.join(dest_dir, rec["filename"])
 
-            # ── Decizie & Copiere ──
-            if matched_dwg:
-                dst_file_path = os.path.join(dest_dir, matched_dwg["filename"])
-                try:
-                    safe_copy(matched_dwg["path"], dst_file_path)
-                    status_str = "Copiat în destinație"
-                except Exception as e:
-                    status_str = f"Eroare copiere: {e}"
+                    try:
+                        safe_copy(rec["path"], dst_file)
+                        copied_dest_paths.add(dst_file)
+                    except Exception as e:
+                        self.dwg_log(f"  ❌ Eroare copiere {rec['filename']}: {e}")
 
-                found_list.append({
-                    "piece_code": matched_dwg["clean_key"],
-                    "pdf_file": pdf_name,
-                    "dwg_file": matched_dwg["filename"],
-                    "source_dir": os.path.dirname(matched_dwg["path"]),
-                    "source_path": matched_dwg["path"],
-                    "dest_path": dst_file_path,
-                    "method": match_method,
-                })
-                self.dwg_log(f"✔ [GĂSIT] {pdf_name}  ➔  {matched_dwg['filename']}  ({match_method})")
+                    found_list.append({
+                        "piece_code": rec["clean_key"],
+                        "pdf_file": pdf_name,
+                        "dwg_file": rec["filename"],
+                        "subfolder": sub or "-",
+                        "source_dir": os.path.dirname(rec["path"]),
+                        "source_path": rec["path"],
+                        "dest_path": dst_file,
+                        "method": method_desc,
+                    })
+                    sub_info = f" [Folder: {sub}]" if sub else ""
+                    self.dwg_log(f"✔ [GĂSIT] {pdf_name}  ➔  {rec['filename']}{sub_info}  ({method_desc})")
             else:
                 candidate = clean_seqs[0] if clean_seqs else (clean_chunks[0] if clean_chunks else clean_stem)
                 missing_list.append({
@@ -3287,13 +3609,13 @@ class UnifiedApp(ctk.CTk):
         if found_list:
             ensure_full_permissions_tree(dest_dir)
 
-        self.dwg_log("\n============================================================")
+        self.dwg_log("\n" + "=" * 60)
         self.dwg_log("🎉 Operațiune finalizată!")
         self.dwg_log(f"• Total piese analizate: {len(found_list) + len(missing_list)}")
-        self.dwg_log(f"• 🟢 Piese cu DWG Găsit și Copiat: {len(found_list)}")
+        self.dwg_log(f"• 🟢 Fișiere DWG Găsite și Copiate: {len(found_list)}")
         self.dwg_log(f"• 🔴 Piese Lipsă (Fără DWG existent): {len(missing_list)}")
         self.dwg_log(f"• Folder Salvare: {dest_dir}")
-        self.dwg_log("============================================================\n")
+        self.dwg_log("=" * 60 + "\n")
 
         self.after(0, self._dwg_on_search_complete, found_list, missing_list, dest_dir, self._dwg_cancel_requested)
 
@@ -3314,7 +3636,7 @@ class UnifiedApp(ctk.CTk):
         for item in found_list:
             self.dwg_found_tree.insert(
                 "", "end",
-                values=(item["piece_code"], item["pdf_file"], item["dwg_file"], item["source_dir"])
+                values=(item["piece_code"], item["pdf_file"], item["dwg_file"], item.get("subfolder", "-"), item["source_dir"])
             )
 
         # Populate Missing Treeview
@@ -3424,7 +3746,7 @@ class UnifiedApp(ctk.CTk):
             # ── Sheet 1: Piese cu DWG Gasit ──
             ws_found = wb.active
             ws_found.title = "Piese cu DWG Gasit"
-            headers_found = ["Nr. Crt.", "Cod Piesă", "Fișier PDF (Desenat)", "Fișier DWG Găsit", "Folder Sursă DWG", "Cale Destinație"]
+            headers_found = ["Nr. Crt.", "Cod Piesă", "Fișier PDF (Desenat)", "Fișier DWG Găsit", "Subfolder / Grosime", "Folder Sursă DWG", "Cale Destinație"]
             ws_found.append(headers_found)
 
             for col_idx in range(1, len(headers_found) + 1):
@@ -3440,6 +3762,7 @@ class UnifiedApp(ctk.CTk):
                     item["piece_code"],
                     item["pdf_file"],
                     item["dwg_file"],
+                    item.get("subfolder", "-"),
                     item["source_dir"],
                     item["dest_path"]
                 ]
@@ -3734,87 +4057,110 @@ class UnifiedApp(ctk.CTk):
 
     def _build_quantity_map(self, excel_path, part_col_name, qty_col_name):
         """
-        Build a dict { normalized_part_name: quantity } from the BOM Excel.
+        Build a dict { normalized_part_name: quantity } from the BOM Excel across ALL sheets.
         Returns an empty dict on failure.
         """
         try:
-            # First, check if explicit columns are given
-            if part_col_name or qty_col_name:
-                df = pd.read_excel(excel_path)
-                part_series = df[part_col_name] if (part_col_name and part_col_name in df.columns) else df.iloc[:, 0]
-                qty_series = df[qty_col_name] if (qty_col_name and qty_col_name in df.columns) else df.iloc[:, 1]
-                
-                result = {}
-                for idx in part_series.index:
-                    pname = str(part_series[idx]).strip()
-                    if not pname or pname.lower() == 'nan': continue
-                    norm = self._normalize_name(pname)
-                    try:
-                        qty = int(float(qty_series[idx]))
-                    except (ValueError, TypeError):
-                        qty = 0
-                    result[norm] = result.get(norm, 0) + qty
-                return result
-
-            # If NO explicit columns, use generic scan to support multi-section layouts
-            df_raw = pd.read_excel(excel_path, header=None)
+            xl = pd.ExcelFile(excel_path)
             result = {}
             qty_keywords = ['qty', 'quantity', 'buc', 'cantitate', 'cant', 'nr', 'count', 'stk', 'anz', 'pcs', 'pieces', 'bucati', 'ramase']
             part_keywords = ['denumire', 'pies', 'part', 'name', 'nume', 'reper']
-            
-            num_cols = df_raw.shape[1]
-            used_cols = set()
-            valid_pairs = []
-            
-            for c in range(num_cols - 1):
-                if c in used_cols or (c+1) in used_cols:
-                    continue
-                
-                valid_rows = 0
-                is_qty_header = False
-                
-                # Check for headers in the first 5 rows
-                for r in range(min(5, df_raw.shape[0])):
-                    val_q_clean = ''.join(ch for ch in str(df_raw.iloc[r, c+1]).lower() if ch.isalpha())
-                    if any(kw in val_q_clean for kw in qty_keywords):
-                        is_qty_header = True
-                        break
-                
-                # Check for data rows
-                for r in range(min(20, df_raw.shape[0])):
-                    p = str(df_raw.iloc[r, c]).strip()
-                    q = df_raw.iloc[r, c+1]
-                    if p and p.lower() != 'nan' and not any(kw in p.lower() for kw in part_keywords + qty_keywords):
-                        try:
-                            int(float(q))
-                            valid_rows += 1
-                        except (ValueError, TypeError):
-                            pass
-                
-                # Valid if it's the first pair (0,1), has a known header, or has at least 1 row of valid data
-                if c == 0 or is_qty_header or valid_rows >= 1:
-                    valid_pairs.append((c, c+1))
-                    used_cols.add(c)
-                    used_cols.add(c+1)
-            
-            for p_idx, q_idx in valid_pairs:
-                for r in range(df_raw.shape[0]):
-                    pname = str(df_raw.iloc[r, p_idx]).strip()
-                    qty_val = df_raw.iloc[r, q_idx]
-                    
-                    if not pname or pname.lower() == 'nan': continue
-                    if any(kw in pname.lower() for kw in part_keywords + qty_keywords): continue
-                    
+
+            for sheet_name in xl.sheet_names:
+                # If explicit columns are given
+                if part_col_name or qty_col_name:
                     try:
-                        qty = int(float(qty_val))
-                    except (ValueError, TypeError):
+                        df = xl.parse(sheet_name)
+                        p_col = part_col_name if (part_col_name and part_col_name in df.columns) else None
+                        q_col = qty_col_name if (qty_col_name and qty_col_name in df.columns) else None
+
+                        if not p_col and not q_col and len(df.columns) >= 2:
+                            for col in df.columns:
+                                c_clean = str(col).lower()
+                                if not p_col and any(kw in c_clean for kw in part_keywords):
+                                    p_col = col
+                                elif not q_col and any(kw in c_clean for kw in qty_keywords):
+                                    q_col = col
+
+                        part_series = df[p_col] if p_col else df.iloc[:, 0]
+                        qty_series = df[q_col] if q_col else (df.iloc[:, 1] if len(df.columns) > 1 else None)
+
+                        if qty_series is not None:
+                            for idx in part_series.index:
+                                pname = str(part_series[idx]).strip()
+                                if not pname or pname.lower() == 'nan':
+                                    continue
+                                if any(kw in pname.lower() for kw in part_keywords + qty_keywords):
+                                    continue
+                                norm = self._normalize_name(pname)
+                                try:
+                                    qty = int(float(qty_series[idx]))
+                                except (ValueError, TypeError):
+                                    qty = 0
+                                result[norm] = result.get(norm, 0) + qty
+                            continue
+                    except Exception:
+                        pass
+
+                # Generic scan on sheet without explicit columns
+                try:
+                    df_raw = xl.parse(sheet_name, header=None)
+                    num_cols = df_raw.shape[1]
+                    if num_cols < 2:
                         continue
-                        
-                    norm = self._normalize_name(pname)
-                    result[norm] = result.get(norm, 0) + qty
-                    
+                    used_cols = set()
+                    valid_pairs = []
+
+                    for c in range(num_cols - 1):
+                        if c in used_cols or (c + 1) in used_cols:
+                            continue
+
+                        valid_rows = 0
+                        is_qty_header = False
+
+                        for r in range(min(5, df_raw.shape[0])):
+                            val_q_clean = ''.join(ch for ch in str(df_raw.iloc[r, c + 1]).lower() if ch.isalpha())
+                            if any(kw in val_q_clean for kw in qty_keywords):
+                                is_qty_header = True
+                                break
+
+                        for r in range(min(20, df_raw.shape[0])):
+                            p = str(df_raw.iloc[r, c]).strip()
+                            q = df_raw.iloc[r, c + 1]
+                            if p and p.lower() != 'nan' and not any(kw in p.lower() for kw in part_keywords + qty_keywords):
+                                try:
+                                    int(float(q))
+                                    valid_rows += 1
+                                except (ValueError, TypeError):
+                                    pass
+
+                        if c == 0 or is_qty_header or valid_rows >= 1:
+                            valid_pairs.append((c, c + 1))
+                            used_cols.add(c)
+                            used_cols.add(c + 1)
+
+                    for p_idx, q_idx in valid_pairs:
+                        for r in range(df_raw.shape[0]):
+                            pname = str(df_raw.iloc[r, p_idx]).strip()
+                            qty_val = df_raw.iloc[r, q_idx]
+
+                            if not pname or pname.lower() == 'nan':
+                                continue
+                            if any(kw in pname.lower() for kw in part_keywords + qty_keywords):
+                                continue
+
+                            try:
+                                qty = int(float(qty_val))
+                            except (ValueError, TypeError):
+                                continue
+
+                            norm = self._normalize_name(pname)
+                            result[norm] = result.get(norm, 0) + qty
+                except Exception:
+                    continue
+
             return result
-            
+
         except Exception as e:
             self.nc_log(f"  Nu s-a putut citi Excel-ul BOM: {e}")
             return {}
@@ -3893,6 +4239,78 @@ class UnifiedApp(ctk.CTk):
             except Exception as e:
                 self.nc_log(f"  Eroare generare raport {cat_name}: {e}")
 
+    def highlight_missing_parts_in_reports(self, folder_path, missing_norms):
+        """
+        Highlight missing part rows in red (FF9999) across all parts reports in folder_path.
+        Maintains 100% of rows, columns, and existing formulas/structure.
+        """
+        if not missing_norms or not os.path.exists(folder_path):
+            return
+        red_fill = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")
+        for root, _, files in os.walk(folder_path):
+            for f in files:
+                f_lower = f.lower()
+                if not f_lower.endswith(".xlsx"):
+                    continue
+                if any(k in f_lower for k in ["status", "dwg", "bom"]):
+                    continue
+                if not f_lower.startswith("raport"):
+                    continue
+                
+                excel_path = os.path.join(root, f)
+                try:
+                    wb = load_workbook(excel_path)
+                    modified = False
+                    for ws in wb.worksheets:
+                        for row in ws.iter_rows():
+                            row_matches = False
+                            for cell in row:
+                                if cell.value is not None:
+                                    val_str = str(cell.value).strip()
+                                    if val_str and self._normalize_name(val_str) in missing_norms:
+                                        row_matches = True
+                                        break
+                            if row_matches:
+                                modified = True
+                                for cell in row:
+                                    if cell.value is not None:
+                                        cell.fill = red_fill
+                    if modified:
+                        safe_save_workbook(wb, excel_path, log_callback=self.log)
+                        self.log(f"  ✅ Repere lipsă evidențiate în: {f}")
+                except Exception as e:
+                    self.log(f"  Avertisment evidențiere {f}: {e}")
+
+    def _get_missing_parts_from_status(self, folder_path):
+        """Find Raport_Status_Extractie.xlsx and return a set of normalized missing part names."""
+        missing = set()
+        search_dirs = [folder_path, os.path.dirname(folder_path)]
+        if hasattr(self, 'nc_source_dir') and self.nc_source_dir.get():
+            search_dirs.append(self.nc_source_dir.get())
+        if hasattr(self, 'dest_dir') and self.dest_dir.get():
+            search_dirs.append(self.dest_dir.get())
+
+        for s_dir in search_dirs:
+            if not s_dir or not os.path.isdir(s_dir):
+                continue
+            status_file = os.path.join(s_dir, "Raport_Status_Extractie.xlsx")
+            if os.path.isfile(status_file):
+                try:
+                    wb = load_workbook(status_file, data_only=True)
+                    ws = wb.active
+                    for row in ws.iter_rows(min_row=2, values_only=True):
+                        if not row or not row[0]:
+                            continue
+                        part_name = str(row[0]).strip()
+                        has_x = any(str(c).strip().upper() == 'X' for c in row[1:] if c is not None)
+                        if has_x:
+                            missing.add(self._normalize_name(part_name))
+                    if missing:
+                        break
+                except Exception:
+                    pass
+        return missing
+
     def write_a4_excel(self, filepath, sheets_data, no_header, no_colors):
         """
         Write an A4-optimized Excel file with multi-section layout for each sheet.
@@ -3945,24 +4363,34 @@ class UnifiedApp(ctk.CTk):
                 sec_start = sec_idx * ROWS_PER_SECTION
                 sec_end = min(sec_start + ROWS_PER_SECTION, total_items)
 
+                missing_norms = self._get_missing_parts_from_status(os.path.dirname(filepath))
+                missing_fill = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")
+
                 for data_idx in range(sec_start, sec_end):
                     row_num = row_offset + 1 + (data_idx - sec_start)
                     item = data[data_idx]
                     use_alt = (data_idx - sec_start) % 2 == 1
+                    is_missing = (not no_colors) and (self._normalize_name(item["Denumire"]) in missing_norms)
 
                     # Denumire
                     cell = ws.cell(row=row_num, column=col_start, value=item["Denumire"])
                     cell.font = data_font
                     cell.border = thin_border
                     cell.alignment = left_align
-                    if use_alt and not no_colors: cell.fill = alt_fill
+                    if is_missing:
+                        cell.fill = missing_fill
+                    elif use_alt and not no_colors:
+                        cell.fill = alt_fill
 
                     # Bucăți
                     cell = ws.cell(row=row_num, column=col_start + 1, value=item["Bucati"])
                     cell.font = data_font
                     cell.border = thin_border
                     cell.alignment = center_align
-                    if use_alt and not no_colors: cell.fill = alt_fill
+                    if is_missing:
+                        cell.fill = missing_fill
+                    elif use_alt and not no_colors:
+                        cell.fill = alt_fill
 
                 # ── Column dimensions ──
                 for w_idx, width in enumerate(col_widths):
@@ -4037,6 +4465,8 @@ class UnifiedApp(ctk.CTk):
                     cell.border = thin_border
                 row_idx += 1
                 
+            missing_norms = self._get_missing_parts_from_status(out_dir)
+            missing_fill = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")
             data = sorted(groups[sheet_name], key=lambda x: x["Denumire"])
             for row_data in data:
                 cell1 = ws.cell(row=row_idx, column=1, value=row_data["Denumire"])
@@ -4044,6 +4474,9 @@ class UnifiedApp(ctk.CTk):
                 cell3 = ws.cell(row=row_idx, column=3, value=row_data["Bucati"])
                 for c in [cell1, cell2, cell3]:
                     c.border = thin_border
+                if not no_colors and self._normalize_name(row_data["Denumire"]) in missing_norms:
+                    for c in [cell1, cell2, cell3]:
+                        c.fill = missing_fill
                 row_idx += 1
                 
             ws.column_dimensions['A'].width = 25
