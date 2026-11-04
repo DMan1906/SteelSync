@@ -385,7 +385,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.6.5"
+APP_VERSION = "1.6.6"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1098,7 +1098,7 @@ class UnifiedApp(ctk.CTk):
         self.pdf_cad_batch_dir = ctk.StringVar()
         self.pdf_cad_dest_dir = ctk.StringVar()
         self.pdf_cad_format = ctk.StringVar(value="DWG (.dwg cu fallback .dxf)")
-        self.pdf_cad_oda_path = ctk.StringVar()
+        self.pdf_cad_oda_path = ctk.StringVar(value=PdfToCadConverter._find_default_oda_exe() or "")
         self.pdf_cad_only_front = ctk.BooleanVar(value=True)
         self.pdf_cad_calibrate = ctk.BooleanVar(value=True)
         self.dwg_results = {"found": [], "missing": []}
@@ -1227,7 +1227,10 @@ class UnifiedApp(ctk.CTk):
             self.pdf_cad_batch_dir.set(s.get("pdf_cad_batch_dir", ""))
             self.pdf_cad_dest_dir.set(s.get("pdf_cad_dest_dir", ""))
             self.pdf_cad_format.set(s.get("pdf_cad_format", "DWG (.dwg cu fallback .dxf)"))
-            self.pdf_cad_oda_path.set(s.get("pdf_cad_oda_path", ""))
+            saved_oda = s.get("pdf_cad_oda_path", "").strip()
+            if not saved_oda or not os.path.isfile(saved_oda):
+                saved_oda = PdfToCadConverter._find_default_oda_exe() or ""
+            self.pdf_cad_oda_path.set(saved_oda)
             self.pdf_cad_only_front.set(s.get("pdf_cad_only_front", True))
             self.pdf_cad_calibrate.set(s.get("pdf_cad_calibrate", True))
 
