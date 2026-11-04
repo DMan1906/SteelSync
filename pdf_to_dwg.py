@@ -378,6 +378,99 @@ class PdfToCadConverter:
         x_brk_right = min(p[4].x for p in pairs)
         return x_brk_left, x_brk_right, pairs, used_indices
 
+    @staticmethod
+    def _fit_circle_3pts(p1, p2, p3):
+        """Calculează centrul și raza cercului care trece prin 3 puncte necoliniare."""
+        x1, y1 = p1
+        x2, y2 = p2
+        x3, y3 = p3
+        D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+        if abs(D) < 1e-7:
+            return None
+        cx = ((x1**2 + y1**2) * (y2 - y3) + (x2**2 + y2**2) * (y3 - y1) + (x3**2 + y3**2) * (y1 - y2)) / D
+        cy = ((x1**2 + y1**2) * (x3 - x2) + (x2**2 + y2**2) * (x1 - x3) + (x3**2 + y3**2) * (x2 - x1)) / D
+        R = math.sqrt((x1 - cx)**2 + (y1 - cy)**2)
+        return cx, cy, R
+
+    @staticmethod
+    def _get_arc_angles(cx, cy, pa, pmid, pb):
+        """Găsește unghiul de start și de sfârșit pentru un arc DXF trasat CCW."""
+        a = math.degrees(math.atan2(pa[1] - cy, pa[0] - cx)) % 360
+        b = math.degrees(math.atan2(pb[1] - cy, pb[0] - cx)) % 360
+        m = math.degrees(math.atan2(pmid[1] - cy, pmid[0] - cx)) % 360
+        sweep_ab = (b - a) % 360
+        sweep_am = (m - a) % 360
+        if 0 < sweep_am < sweep_ab:
+            return a, b
+        else:
+            return b, a
+
+    @classmethod
+    def _detect_fillet_arcs(cls, items, exclude_indices=None):
+        """
+        Identifică arcele de cerc (fillet) reprezentate în PDF prin secvențe
+        de micro-linii tangente și curbe Bezier cubice (l + c + l sau doar c).
+        Găsește centrul real, raza exactă și unghiurile arcului.
+        Returnează: (fillet_arcs, fillet_used_indices)
+        unde fiecare element din fillet_arcs este (cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt).
+        """
+        if exclude_indices is None:
+            exclude_indices = set()
+
+        curves = [(idx, it) for idx, it in enumerate(items) if it[0] == "c"]
+        lines = [(idx, it) for idx, it in enumerate(items) if it[0] == "l"]
+
+        fillet_used_indices = set()
+        fillet_arcs = []
+
+        for c_idx, c_it in curves:
+            if c_idx in exclude_indices:
+                continue
+            p1, p2, p3, p4 = c_it[1], c_it[2], c_it[3], c_it[4]
+
+            # Căutăm linii mici tangente adiacente la capetele curbei (l <= 1.2 pt)
+            adj_p1 = None
+            adj_p4 = None
+            for l_idx, l_it in lines:
+                if l_idx in exclude_indices:
+                    continue
+                lp1, lp2 = l_it[1], l_it[2]
+                l_len = math.hypot(lp1.x - lp2.x, lp1.y - lp2.y)
+                if l_len <= 1.2:
+                    if math.hypot(lp1.x - p1.x, lp1.y - p1.y) < 0.08:
+                        adj_p1 = (l_idx, lp2)
+                    elif math.hypot(lp2.x - p1.x, lp2.y - p1.y) < 0.08:
+                        adj_p1 = (l_idx, lp1)
+                    elif math.hypot(lp1.x - p4.x, lp1.y - p4.y) < 0.08:
+                        adj_p4 = (l_idx, lp2)
+                    elif math.hypot(lp2.x - p4.x, lp2.y - p4.y) < 0.08:
+                        adj_p4 = (l_idx, lp1)
+
+            start_pt = adj_p1[1] if adj_p1 else fitz.Point(p1.x, p1.y)
+            end_pt = adj_p4[1] if adj_p4 else fitz.Point(p4.x, p4.y)
+
+            # Punct median pe curba Bezier la t=0.5
+            t = 0.5
+            bx = (1 - t)**3 * p1.x + 3 * (1 - t)**2 * t * p2.x + 3 * (1 - t) * t**2 * p3.x + t**3 * p4.x
+            by = (1 - t)**3 * p1.y + 3 * (1 - t)**2 * t * p2.y + 3 * (1 - t) * t**2 * p3.y + t**3 * p4.y
+            mid_pt = fitz.Point(bx, by)
+
+            fit = cls._fit_circle_3pts((start_pt.x, start_pt.y), (mid_pt.x, mid_pt.y), (end_pt.x, end_pt.y))
+            if fit:
+                cx_pdf, cy_pdf, r_pdf = fit
+                # Verificăm dacă punctele de control se potrivesc cu cercul cu o eroare < 5%
+                d_p1 = math.hypot(p1.x - cx_pdf, p1.y - cy_pdf)
+                d_p4 = math.hypot(p4.x - cx_pdf, p4.y - cy_pdf)
+                if abs(d_p1 - r_pdf) / r_pdf < 0.05 and abs(d_p4 - r_pdf) / r_pdf < 0.05:
+                    fillet_arcs.append((cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt))
+                    fillet_used_indices.add(c_idx)
+                    if adj_p1:
+                        fillet_used_indices.add(adj_p1[0])
+                    if adj_p4:
+                        fillet_used_indices.add(adj_p4[0])
+
+        return fillet_arcs, fillet_used_indices
+
     def convert_single_pdf(
         self,
         pdf_path,
@@ -436,6 +529,11 @@ class PdfToCadConverter:
             if calibrate_1to1 and target_len and (target_len / drawn_len_mm >= 1.35):
                 view_break_info = self._find_view_break_pairs(items, min_x, max_x)
 
+            # Identificare arce de racordare (fillet) pentru a le exporta ca arce native de cerc DXF (ARC)
+            fillet_arcs, fillet_used_indices = self._detect_fillet_arcs(
+                items, exclude_indices=view_break_info[3] if view_break_info else None
+            )
+
             dxf_doc = ezdxf.new("R2010", setup=True)
             dxf_doc.units = ezdxf.units.MM
             msp = dxf_doc.modelspace()
@@ -466,10 +564,27 @@ class PdfToCadConverter:
                     p_end = pt_to_cad(outer_right)
                     msp.add_line(p_start, p_end, dxfattribs={"layer": "CONTUR_PIESA"})
 
-                # 2. Exportăm restul elementelor geometrice intacte (decupaje, colțuri, găuri, raze)
+                # 2. Adăugăm arcele de racordare (fillet) ca arce native de cerc DXF (ARC)
+                for cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt in fillet_arcs:
+                    c_cad = pt_to_cad(fitz.Point(cx_pdf, cy_pdf))
+                    start_cad = pt_to_cad(start_pt)
+                    end_cad = pt_to_cad(end_pt)
+                    mid_cad = pt_to_cad(mid_pt)
+                    r_cad = math.hypot(start_cad[0] - c_cad[0], start_cad[1] - c_cad[1])
+                    a_start, a_end = self._get_arc_angles(c_cad[0], c_cad[1], start_cad, mid_cad, end_cad)
+                    msp.add_arc(
+                        center=c_cad,
+                        radius=r_cad,
+                        start_angle=a_start,
+                        end_angle=a_end,
+                        dxfattribs={"layer": "CONTUR_PIESA"},
+                    )
+
+                # 3. Exportăm restul elementelor geometrice intacte (decupaje, colțuri, găuri, raze)
+                all_skipped = used_indices | fillet_used_indices
                 for idx, it in enumerate(items):
-                    if idx in used_indices:
-                        continue  # Muchiile longitudinale au fost deja create ca linii continue depline
+                    if idx in all_skipped:
+                        continue  # Muchiile longitudinale și arcele fillet au fost deja create
 
                     cmd = it[0]
                     if cmd == "l":
@@ -513,7 +628,31 @@ class PdfToCadConverter:
                 dim_x_final = drawn_w_pt * scale_final
                 dim_y_final = drawn_h_pt * scale_final
 
-                for it in items:
+                # 1. Adăugăm arcele de racordare (fillet) ca arce native de cerc DXF (ARC)
+                for cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt in fillet_arcs:
+                    cx_cad = (cx_pdf - min_x) * scale_final
+                    cy_cad = (max_y - cy_pdf) * scale_final
+                    sx_cad = (start_pt.x - min_x) * scale_final
+                    sy_cad = (max_y - start_pt.y) * scale_final
+                    ex_cad = (end_pt.x - min_x) * scale_final
+                    ey_cad = (max_y - end_pt.y) * scale_final
+                    mx_cad = (mid_pt.x - min_x) * scale_final
+                    my_cad = (max_y - mid_pt.y) * scale_final
+                    r_cad = math.hypot(sx_cad - cx_cad, sy_cad - cy_cad)
+                    a_start, a_end = self._get_arc_angles(cx_cad, cy_cad, (sx_cad, sy_cad), (mx_cad, my_cad), (ex_cad, ey_cad))
+                    msp.add_arc(
+                        center=(cx_cad, cy_cad),
+                        radius=r_cad,
+                        start_angle=a_start,
+                        end_angle=a_end,
+                        dxfattribs={"layer": "CONTUR_PIESA"},
+                    )
+
+                # 2. Exportăm restul elementelor geometrice intacte
+                for idx, it in enumerate(items):
+                    if idx in fillet_used_indices:
+                        continue
+
                     cmd = it[0]
                     if cmd == "l":
                         p1, p2 = it[1], it[2]
