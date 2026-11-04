@@ -291,6 +291,19 @@ def safe_write_lines(dest_path, lines):
     remove_readonly(path_str)
 
 
+def extract_nc_part_code(nc_path):
+    """Extract piece mark from standard DSTV NC/NC1 file header."""
+    try:
+        with open(nc_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = [f.readline().strip() for _ in range(12)]
+        for line in lines[2:8]:
+            clean = re.sub(r'[^A-Za-z0-9]', '', line).upper()
+            if len(clean) >= 2 and any(ch.isalpha() for ch in clean) and any(ch.isdigit() for ch in clean):
+                return clean
+    except Exception:
+        pass
+    return None
+
 def extract_pdf_header_part_code(pdf_path, known_keys=None):
     """
     Safely extract part code or title block information from PDF using pypdf.
@@ -371,7 +384,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1066,6 +1079,8 @@ class UnifiedApp(ctk.CTk):
         self.dwg_proj_num = ctk.StringVar()
         self.dwg_pdf_dir = ctk.StringVar()
         self.dwg_dest_dir = ctk.StringVar()
+        self.dwg_source_type = ctk.StringVar(value="PDF (.pdf)")
+        self.dwg_target_type = ctk.StringVar(value="DWG (.dwg)")
         self.dwg_results = {"found": [], "missing": []}
         self._dwg_searching = False
         self._dwg_cancel_requested = False
@@ -1180,6 +1195,8 @@ class UnifiedApp(ctk.CTk):
             self.dwg_proj_num.set(s.get("dwg_proj_num", ""))
             self.dwg_pdf_dir.set(s.get("dwg_pdf_dir", ""))
             self.dwg_dest_dir.set(s.get("dwg_dest_dir", ""))
+            self.dwg_source_type.set(s.get("dwg_source_type", "PDF (.pdf)"))
+            self.dwg_target_type.set(s.get("dwg_target_type", "DWG (.dwg)"))
 
             # Restore browse directory memories (Requirement #3)
             self.extractor_source_last_dir = s.get("extractor_source_last_dir", "")
@@ -1296,6 +1313,8 @@ class UnifiedApp(ctk.CTk):
             "dwg_proj_num": self.dwg_proj_num.get(),
             "dwg_pdf_dir": self.dwg_pdf_dir.get(),
             "dwg_dest_dir": self.dwg_dest_dir.get(),
+            "dwg_source_type": self.dwg_source_type.get(),
+            "dwg_target_type": self.dwg_target_type.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
             "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
@@ -3031,7 +3050,7 @@ class UnifiedApp(ctk.CTk):
         self._entry(proj_inner, self.dwg_proj_num, placeholder_text="ex: 1242", width=140).pack(side="left", padx=(0, 10))
         self._label(proj_inner, text="(scanează automat folderele care conțin acest număr de proiect)", font=("Segoe UI", 11), text_color=_TEXT_SEC).pack(side="left")
 
-        # ──── Card 2: Piese PDF & Destinație ────
+        # ──── Card 2: Piese Sursă (PDF / NC / NC1) & Folder Salvare ────
         files_card = self._make_card(container)
         files_card.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         files_card.grid_columnconfigure(0, weight=0)
@@ -3039,17 +3058,46 @@ class UnifiedApp(ctk.CTk):
         files_card.grid_columnconfigure(2, weight=0)
 
         ctk.CTkLabel(
-            files_card, text="📁 Piese de Desenat (PDF) & Folder Salvare",
+            files_card, text="📁 Piese Sursă (PDF / NC) & Salvare Desene",
             font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI
         ).grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
 
-        self._label(files_card, text="Folder Piese (PDF):").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
-        self._entry(files_card, self.dwg_pdf_dir).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
-        self._browse_btn(files_card, self.dwg_browse_pdf_dir).grid(row=1, column=2, padx=(4, 16), pady=4)
+        # Row 1: Source & Target Selectors
+        opt_frame = ctk.CTkFrame(files_card, fg_color="transparent")
+        opt_frame.grid(row=1, column=0, columnspan=3, padx=16, pady=(2, 6), sticky="ew")
 
-        self._label(files_card, text="Folder Destinație:").grid(row=2, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
-        self._entry(files_card, self.dwg_dest_dir, placeholder_text="Opțional: implicit subdirector 'DWG_Gasite' în folderul cu PDF-uri").grid(row=2, column=1, padx=4, pady=(4, 10), sticky="ew")
-        self._browse_btn(files_card, self.dwg_browse_dest_dir).grid(row=2, column=2, padx=(4, 16), pady=(4, 10))
+        self._label(opt_frame, text="Format Piese Sursă:").pack(side="left", padx=(0, 6))
+        self.dwg_source_seg = ctk.CTkSegmentedButton(
+            opt_frame,
+            values=["PDF (.pdf)", "NC / NC1 (.nc, .nc1)", "Auto (Toate)"],
+            variable=self.dwg_source_type,
+            command=self._on_dwg_source_type_change,
+            height=28,
+            font=("Segoe UI", 11, "bold")
+        )
+        self.dwg_source_seg.pack(side="left", padx=(0, 18))
+
+        self._label(opt_frame, text="Caută în Proiect:").pack(side="left", padx=(0, 6))
+        self.dwg_target_seg = ctk.CTkSegmentedButton(
+            opt_frame,
+            values=["DWG (.dwg)", "PDF (.pdf)", "DWG & PDF"],
+            variable=self.dwg_target_type,
+            height=28,
+            font=("Segoe UI", 11, "bold")
+        )
+        self.dwg_target_seg.pack(side="left")
+
+        # Row 2: Folder Piese
+        src_lbl_text = "Folder Piese (NC/NC1):" if "NC" in self.dwg_source_type.get() else ("Folder Piese (PDF / NC):" if "Auto" in self.dwg_source_type.get() else "Folder Piese (PDF):")
+        self.dwg_piese_lbl = self._label(files_card, text=src_lbl_text)
+        self.dwg_piese_lbl.grid(row=2, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(files_card, self.dwg_pdf_dir).grid(row=2, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(files_card, self.dwg_browse_pdf_dir).grid(row=2, column=2, padx=(4, 16), pady=4)
+
+        # Row 3: Folder Destinație
+        self._label(files_card, text="Folder Destinație:").grid(row=3, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
+        self._entry(files_card, self.dwg_dest_dir, placeholder_text="Opțional: implicit subdirector 'Desene_Gasite' în folderul sursă").grid(row=3, column=1, padx=4, pady=(4, 10), sticky="ew")
+        self._browse_btn(files_card, self.dwg_browse_dest_dir).grid(row=3, column=2, padx=(4, 16), pady=(4, 10))
 
         # ──── Action Row ────
         action_box = ctk.CTkFrame(container, fg_color="transparent")
@@ -3059,7 +3107,7 @@ class UnifiedApp(ctk.CTk):
 
         self.dwg_start_btn = ctk.CTkButton(
             action_box,
-            text="▶ Caută și Copiază DWG-uri Existente",
+            text="▶ Caută și Copiază Desene Existente",
             command=self.dwg_start_search,
             fg_color=_GREEN,
             hover_color=_GREEN_HOV,
@@ -3171,8 +3219,8 @@ class UnifiedApp(ctk.CTk):
             selectmode="browse",
         )
         self.dwg_found_tree.heading("piece_code", text="Cod Piesă")
-        self.dwg_found_tree.heading("pdf_file", text="Fișier PDF (Desenat)")
-        self.dwg_found_tree.heading("dwg_file", text="Fișier DWG Găsit")
+        self.dwg_found_tree.heading("pdf_file", text="Fișier Piesă Sursă")
+        self.dwg_found_tree.heading("dwg_file", text="Desen Găsit (Proiect)")
         self.dwg_found_tree.heading("subfolder", text="Subfolder / Grosime")
         self.dwg_found_tree.heading("source_dir", text="Folder Sursă în Proiect")
 
@@ -3205,7 +3253,7 @@ class UnifiedApp(ctk.CTk):
             selectmode="browse",
         )
         self.dwg_missing_tree.heading("piece_code", text="Cod Piesă")
-        self.dwg_missing_tree.heading("pdf_file", text="Fișier PDF (Desenat)")
+        self.dwg_missing_tree.heading("pdf_file", text="Fișier Piesă Sursă")
         self.dwg_missing_tree.heading("status", text="Stare")
 
         self.dwg_missing_tree.column("piece_code", width=180, anchor="w")
@@ -3239,6 +3287,17 @@ class UnifiedApp(ctk.CTk):
 
         # Display initial view
         self.dwg_found_frame.grid(row=0, column=0, sticky="nsew")
+
+    def _on_dwg_source_type_change(self, val=None):
+        val = val or self.dwg_source_type.get()
+        if hasattr(self, "dwg_piese_lbl"):
+            if "NC" in val:
+                self.dwg_piese_lbl.configure(text="Folder Piese (NC/NC1):")
+            elif "Auto" in val:
+                self.dwg_piese_lbl.configure(text="Folder Piese (PDF / NC):")
+            else:
+                self.dwg_piese_lbl.configure(text="Folder Piese (PDF):")
+        self.save_settings()
 
     def dwg_browse_parent_dir(self):
         """Browse root parent directory for projects (uses global directory memory - Requirement #3)."""
@@ -3354,7 +3413,7 @@ class UnifiedApp(ctk.CTk):
             return
 
         if not dest_dir:
-            dest_dir = os.path.join(pdf_dir, "DWG_Gasite")
+            dest_dir = os.path.join(pdf_dir, "Desene_Gasite")
             self.dwg_dest_dir.set(dest_dir)
 
         make_dir_with_permissions(dest_dir)
@@ -3399,13 +3458,35 @@ class UnifiedApp(ctk.CTk):
             self.dwg_log("\n⚠ Solicitare de oprire primită. Se finalizează operațiunea curentă...")
 
     def _dwg_search_worker(self, parent_dir, proj_num, pdf_dir, dest_dir):
-        """Worker thread executing CAD matching & extraction with deep recursion in all subfolders."""
+        """Worker thread executing CAD matching & extraction with configurable source and target formats."""
+        target_choice = getattr(self, "dwg_target_type", None)
+        target_val = target_choice.get() if target_choice else "DWG (.dwg)"
+        target_exts = set()
+        if "DWG" in target_val:
+            target_exts.add(".dwg")
+        if "PDF" in target_val:
+            target_exts.add(".pdf")
+        if not target_exts:
+            target_exts = {".dwg"}
+
+        source_choice = getattr(self, "dwg_source_type", None)
+        source_val = source_choice.get() if source_choice else "PDF (.pdf)"
+        source_exts = set()
+        if "PDF" in source_val:
+            source_exts.add(".pdf")
+        if "NC" in source_val:
+            source_exts.add(".nc")
+            source_exts.add(".nc1")
+        if "Auto" in source_val or not source_exts:
+            source_exts = {".pdf", ".nc", ".nc1"}
+
         self.dwg_log("=" * 60)
-        self.dwg_log(f"🚀 Pornire Căutare DWG-uri Existente (SteelSync v{APP_VERSION})")
+        self.dwg_log(f"🚀 Pornire Căutare Desene Existente (SteelSync v{APP_VERSION})")
         self.dwg_log(f"• Director Mamă: {parent_dir}")
         self.dwg_log(f"• Număr Proiect Căutat: '{proj_num}'")
-        self.dwg_log(f"• Folder Piese PDF: {pdf_dir}")
-        self.dwg_log(f"• Folder Salvare DWG: {dest_dir}")
+        self.dwg_log(f"• Folder Piese Sursă: {pdf_dir} ({', '.join(sorted(source_exts))})")
+        self.dwg_log(f"• Tip Desene Căutate în Proiect: {', '.join(sorted(target_exts))}")
+        self.dwg_log(f"• Folder Salvare Desene: {dest_dir}")
         self.dwg_log("=" * 60 + "\n")
 
         make_dir_with_permissions(dest_dir)
@@ -3439,9 +3520,9 @@ class UnifiedApp(ctk.CTk):
             for p in matched_proj_dirs:
                 self.dwg_log(f"   ↳ {p}")
 
-        # ─── Indexare DWG-uri existente în directoarele găsite (până la capăt) ───
-        self.dwg_log("\n📂 Indexare recursivă completă a fișierelor DWG din toate subfolderele proiectului...")
-        dwg_records = []  # list of dicts: path, filename, stem, clean_key, mtime, subfolder, proj_dir
+        # ─── Indexare Desene existente în directoarele găsite (până la capăt) ───
+        self.dwg_log(f"\n📂 Indexare recursivă a desenelor ({', '.join(sorted(target_exts))}) din toate subfolderele proiectului...")
+        dwg_records = []  # list of dicts: path, filename, stem, ext, clean_key, mtime, subfolder, proj_dir
         generic_folder_names = {'dwg', 'dwgs', 'cad', 'drawings', 'desene', 'model', 'tekla', 'advance steel', 'export', 'fisiere'}
         thickness_regex = re.compile(
             r'^(?:t|pl|p|thk|grosime)?[_\s-]*\d+(?:[\.,]\d+)?[_\s-]*(?:mm)?(?:[_\s-]+[a-z0-9]+)?$|^\d+(?:[\.,]\d+)?$',
@@ -3456,16 +3537,13 @@ class UnifiedApp(ctk.CTk):
             parts = [p.strip() for p in rel.split(os.sep) if p.strip() and p.strip() != '.']
             if not parts:
                 return ""
-            # Check backwards from immediate parent upwards for explicit thickness pattern
             for p in reversed(parts):
                 if p.lower() in generic_folder_names:
                     continue
                 if thickness_regex.match(p):
                     return p
-            # Check immediate parent if not generic
             if parts[-1].lower() not in generic_folder_names:
                 return parts[-1]
-            # Check any non-generic part
             for p in reversed(parts):
                 if p.lower() not in generic_folder_names:
                     return p
@@ -3480,7 +3558,8 @@ class UnifiedApp(ctk.CTk):
                     break
                 scanned_dirs_count += 1
                 for f in files:
-                    if f.lower().endswith(".dwg"):
+                    f_ext = os.path.splitext(f)[1].lower()
+                    if f_ext in target_exts:
                         full_p = os.path.join(root, f)
                         stem = Path(f).stem
                         clean_key = re.sub(r'[^A-Za-z0-9]', '', stem).upper()
@@ -3497,21 +3576,18 @@ class UnifiedApp(ctk.CTk):
                             "path": full_p,
                             "filename": f,
                             "stem": stem,
+                            "ext": f_ext,
                             "clean_key": clean_key,
                             "mtime": mtime,
                             "subfolder": subfolder,
                             "proj_dir": p_dir,
                         })
 
-        self.dwg_log(f"✅ Indexare completă: {len(dwg_records)} fișiere DWG identificate în {scanned_dirs_count} foldere scanate până la capăt.")
+        self.dwg_log(f"✅ Indexare completă: {len(dwg_records)} desene găsite în {scanned_dirs_count} foldere scanate până la capăt.")
 
         # ─── Helper de potrivire variații ───
         def is_dwg_variation(dwg_k, base_k):
-            """
-            Checks if dwg_k is exact match or valid variation of base_k.
-            E.g. base=DSBO2014 matches DSBO2014 (Exact), DSBO2014T, DSBO2014C, DSBO2014L1 (Variations).
-            Does NOT match DSBO20145 (starts with digit after base).
-            """
+            """Checks if dwg_k is exact match or valid variation of base_k."""
             if dwg_k == base_k:
                 return True, "Exact"
             if dwg_k.startswith(base_k):
@@ -3521,44 +3597,45 @@ class UnifiedApp(ctk.CTk):
                         return True, f"Variație ({suffix})"
             return False, ""
 
-        # ─── Pasul 2 & 3: Potrivire PDF <-> DWG și Copiere (inclusiv subfoldere PDF) ───
-        self.dwg_log("\n📄 Pasul 2: Analiză și potrivire piese PDF din toate subfolderele...")
-        pdf_entries = []  # list of (pdf_filename, full_pdf_path)
+        # ─── Pasul 2 & 3: Scanare Piese Sursă și Potrivire cu Desenele ───
+        self.dwg_log(f"\n📄 Pasul 2: Scanare piese ({', '.join(sorted(source_exts))}) din folderul de piese...")
+        src_entries = []  # list of (filename, full_path, ext)
         try:
             for root, dirs, files in os.walk(pdf_dir, followlinks=True):
                 if self._dwg_cancel_requested:
                     break
                 for f in files:
-                    if f.lower().endswith(".pdf"):
-                        pdf_entries.append((f, os.path.join(root, f)))
+                    f_ext = os.path.splitext(f)[1].lower()
+                    if f_ext in source_exts:
+                        src_entries.append((f, os.path.join(root, f), f_ext))
         except Exception as e:
-            self.dwg_log(f"❌ Eroare la citirea folderului cu PDF-uri: {e}")
+            self.dwg_log(f"❌ Eroare la citirea folderului de piese: {e}")
             self.after(0, self._dwg_on_search_complete, [], [], dest_dir, False)
             return
 
-        total_pdfs = len(pdf_entries)
-        self.dwg_log(f"S-au găsit {total_pdfs} fișiere PDF de analizat în toate subfolderele.")
+        total_pieces = len(src_entries)
+        self.dwg_log(f"S-au găsit {total_pieces} fișiere piese sursă de analizat.")
 
         found_list = []
         missing_list = []
         copied_dest_paths = set()
 
-        for idx, (pdf_name, pdf_path) in enumerate(pdf_entries):
+        for idx, (src_name, src_path, src_ext) in enumerate(src_entries):
             if self._dwg_cancel_requested:
                 self.dwg_log("\n🛑 Procesul de căutare a fost întrerupt de utilizator.")
                 break
 
-            progress_val = (idx + 1) / max(1, total_pdfs)
+            progress_val = (idx + 1) / max(1, total_pieces)
             self.after(0, self.dwg_progress_bar.set, progress_val)
 
-            pdf_stem = Path(pdf_name).stem
+            src_stem = Path(src_name).stem
 
-            # ── Extragere coduri piesă din numele PDF-ului ──
-            chunks = re.split(r'[\s_()\[\],;]+', pdf_stem)
+            # ── Extragere coduri piesă din numele fișierului sursă ──
+            chunks = re.split(r'[\s_()\[\],;]+', src_stem)
             clean_chunks = [re.sub(r'[^A-Za-z0-9]', '', c).upper() for c in chunks if re.sub(r'[^A-Za-z0-9]', '', c)]
-            seqs = re.findall(r'[A-Za-z]+[-_]?\d+', pdf_stem)
+            seqs = re.findall(r'[A-Za-z]+[-_]?\d+', src_stem)
             clean_seqs = [re.sub(r'[^A-Za-z0-9]', '', s).upper() for s in seqs if re.sub(r'[^A-Za-z0-9]', '', s)]
-            clean_stem = re.sub(r'[^A-Za-z0-9]', '', pdf_stem).upper()
+            clean_stem = re.sub(r'[^A-Za-z0-9]', '', src_stem).upper()
 
             candidate_keys = []
             for s in clean_seqs:
@@ -3568,37 +3645,43 @@ class UnifiedApp(ctk.CTk):
             if clean_stem not in candidate_keys:
                 candidate_keys.append(clean_stem)
 
-            matching_for_pdf = []
-            used_records_for_pdf = set()
+            # Dacă este fișier NC / NC1, extrage codul piesei din antetul DSTV ca fallback suplimentar
+            if src_ext in ('.nc', '.nc1'):
+                nc_hdr_mark = extract_nc_part_code(src_path)
+                if nc_hdr_mark and nc_hdr_mark not in candidate_keys:
+                    candidate_keys.append(nc_hdr_mark)
 
-            # Verificare candidați pe baza numelui PDF
+            matching_for_piece = []
+            used_records_for_piece = set()
+
+            # Verificare candidați
             for cand in candidate_keys:
-                if len(cand) < 3:
+                if len(cand) < 2:
                     continue
                 for rec in dwg_records:
-                    if rec["path"] in used_records_for_pdf:
+                    if rec["path"] in used_records_for_piece:
                         continue
                     is_match, reason = is_dwg_variation(rec["clean_key"], cand)
                     if is_match:
-                        matching_for_pdf.append((rec, f"Nume PDF: {reason}"))
-                        used_records_for_pdf.add(rec["path"])
+                        matching_for_piece.append((rec, f"Nume Fișier ({src_ext}): {reason}"))
+                        used_records_for_piece.add(rec["path"])
 
-            # Fallback Antet PDF dacă nu s-a potrivit nimic
-            if not matching_for_pdf:
+            # Fallback Antet PDF dacă fișierul sursă este PDF și nu s-a potrivit nimic din nume
+            if not matching_for_piece and src_ext == '.pdf':
                 all_dwg_keys = sorted(list({r["clean_key"] for r in dwg_records}), key=len, reverse=True)
-                header_code = extract_pdf_header_part_code(pdf_path, known_keys=all_dwg_keys)
+                header_code = extract_pdf_header_part_code(src_path, known_keys=all_dwg_keys)
                 if header_code:
                     for rec in dwg_records:
-                        if rec["path"] in used_records_for_pdf:
+                        if rec["path"] in used_records_for_piece:
                             continue
                         is_match, reason = is_dwg_variation(rec["clean_key"], header_code)
                         if is_match:
-                            matching_for_pdf.append((rec, f"Antet PDF: {reason}"))
-                            used_records_for_pdf.add(rec["path"])
+                            matching_for_piece.append((rec, f"Antet PDF: {reason}"))
+                            used_records_for_piece.add(rec["path"])
 
             # Copiere în destinație (cu păstrarea folderului de grosime)
-            if matching_for_pdf:
-                for rec, method_desc in matching_for_pdf:
+            if matching_for_piece:
+                for rec, method_desc in matching_for_piece:
                     sub = rec["subfolder"]
                     if sub:
                         target_sub_dir = os.path.join(dest_dir, sub)
@@ -3615,7 +3698,7 @@ class UnifiedApp(ctk.CTk):
 
                     found_list.append({
                         "piece_code": rec["clean_key"],
-                        "pdf_file": pdf_name,
+                        "pdf_file": src_name,
                         "dwg_file": rec["filename"],
                         "subfolder": sub or "-",
                         "source_dir": os.path.dirname(rec["path"]),
@@ -3624,15 +3707,15 @@ class UnifiedApp(ctk.CTk):
                         "method": method_desc,
                     })
                     sub_info = f" [Folder: {sub}]" if sub else ""
-                    self.dwg_log(f"✔ [GĂSIT] {pdf_name}  ➔  {rec['filename']}{sub_info}  ({method_desc})")
+                    self.dwg_log(f"✔ [GĂSIT] {src_name}  ➔  {rec['filename']}{sub_info}  ({method_desc})")
             else:
                 candidate = clean_seqs[0] if clean_seqs else (clean_chunks[0] if clean_chunks else clean_stem)
                 missing_list.append({
-                    "piece_code": candidate or pdf_stem,
-                    "pdf_file": pdf_name,
-                    "status": "DWG Lipsă (Trebuie desenat)",
+                    "piece_code": candidate or src_stem,
+                    "pdf_file": src_name,
+                    "status": "Desen Lipsă în Proiect",
                 })
-                self.dwg_log(f"✖ [LIPSĂ] {pdf_name}  (Nu există DWG în proiect)")
+                self.dwg_log(f"✖ [LIPSĂ] {src_name}  (Nu există desen în proiect)")
 
         # Permissions check on destination
         if found_list:
@@ -3641,8 +3724,8 @@ class UnifiedApp(ctk.CTk):
         self.dwg_log("\n" + "=" * 60)
         self.dwg_log("🎉 Operațiune finalizată!")
         self.dwg_log(f"• Total piese analizate: {len(found_list) + len(missing_list)}")
-        self.dwg_log(f"• 🟢 Fișiere DWG Găsite și Copiate: {len(found_list)}")
-        self.dwg_log(f"• 🔴 Piese Lipsă (Fără DWG existent): {len(missing_list)}")
+        self.dwg_log(f"• 🟢 Desene Găsite și Copiate: {len(found_list)}")
+        self.dwg_log(f"• 🔴 Piese Fără Desen: {len(missing_list)}")
         self.dwg_log(f"• Folder Salvare: {dest_dir}")
         self.dwg_log("=" * 60 + "\n")
 
@@ -3775,7 +3858,7 @@ class UnifiedApp(ctk.CTk):
             # ── Sheet 1: Piese cu DWG Gasit ──
             ws_found = wb.active
             ws_found.title = "Piese cu DWG Gasit"
-            headers_found = ["Nr. Crt.", "Cod Piesă", "Fișier PDF (Desenat)", "Fișier DWG Găsit", "Subfolder / Grosime", "Folder Sursă DWG", "Cale Destinație"]
+            headers_found = ["Nr. Crt.", "Cod Piesă", "Fișier Piesă Sursă", "Desen Găsit (Proiect)", "Subfolder / Grosime", "Folder Sursă Desen", "Cale Destinație"]
             ws_found.append(headers_found)
 
             for col_idx in range(1, len(headers_found) + 1):
