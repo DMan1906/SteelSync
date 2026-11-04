@@ -384,7 +384,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1053,6 +1053,9 @@ class UnifiedApp(ctk.CTk):
         self.col_name = ctk.StringVar()
         self.extractor_auto_search = ctk.BooleanVar(value=False)
         self.extractor_proj_search = ctk.StringVar()
+        self.extract_assembly_var = ctk.BooleanVar(value=False)
+        self.assembly_excel_file = ctk.StringVar()
+        self.assembly_col_name = ctk.StringVar()
         
         # ── NC Sorter Variables ──
         self.nc_source_folder = ctk.StringVar()
@@ -1134,17 +1137,17 @@ class UnifiedApp(ctk.CTk):
                 pass
         self._geom_save_timer = self.after(200, self._record_normal_geometry)
 
-        # Trigger responsive extension relayout if width changed
+        # Trigger responsive extension relayout if width changed (debounced to avoid Win32 resize stutter)
         curr_w = event.width if event else self.winfo_width()
         last_w = getattr(self, "_last_relayout_w", 0)
-        if abs(curr_w - last_w) >= 15:
+        if abs(curr_w - last_w) >= 20:
             self._last_relayout_w = curr_w
             if getattr(self, "_ext_relayout_timer", None) is not None:
                 try:
                     self.after_cancel(self._ext_relayout_timer)
                 except Exception:
                     pass
-            self._ext_relayout_timer = self.after(25, lambda w=curr_w: self.reposition_extensions(w))
+            self._ext_relayout_timer = self.after(120, lambda w=curr_w: self.reposition_extensions(w))
 
     def _record_normal_geometry(self):
         try:
@@ -1170,6 +1173,9 @@ class UnifiedApp(ctk.CTk):
             self.col_name.set(s.get("col_name", ""))
             self.extractor_auto_search.set(s.get("extractor_auto_search", False))
             self.extractor_proj_search.set(s.get("extractor_proj_search", ""))
+            self.extract_assembly_var.set(s.get("extract_assembly_var", False))
+            self.assembly_excel_file.set(s.get("assembly_excel_file", ""))
+            self.assembly_col_name.set(s.get("assembly_col_name", ""))
             self.duplicate_handling.set(s.get("duplicate_handling", "Keep Newest"))
             self.extract_mode.set(s.get("extract_mode", "Doar Deficit"))
             self.nc_source_folder.set(s.get("nc_source_folder", ""))
@@ -1292,6 +1298,9 @@ class UnifiedApp(ctk.CTk):
             "col_name": self.col_name.get(),
             "extractor_auto_search": self.extractor_auto_search.get(),
             "extractor_proj_search": self.extractor_proj_search.get(),
+            "extract_assembly_var": self.extract_assembly_var.get(),
+            "assembly_excel_file": self.assembly_excel_file.get(),
+            "assembly_col_name": self.assembly_col_name.get(),
             "duplicate_handling": self.duplicate_handling.get(),
             "extract_mode": self.extract_mode.get(),
             "nc_source_folder": self.nc_source_folder.get(),
@@ -1724,11 +1733,20 @@ class UnifiedApp(ctk.CTk):
             fg_color=_CARD_BG,
             border_color=_CARD_BORDER,
             border_width=1,
+            segmented_button_fg_color=_ENTRY_BG,
+            segmented_button_unselected_color=_ENTRY_BG,
+            segmented_button_unselected_hover_color=_CARD_BORDER,
             segmented_button_selected_color=_ACCENT,
             segmented_button_selected_hover_color=_ACCENT_HOV,
+            text_color=_TEXT_PRI,
             command=self._on_tab_changed
         )
         self.tabview.pack(fill="both", expand=True)
+        if hasattr(self.tabview, "_segmented_button"):
+            try:
+                self.tabview._segmented_button.configure(border_width=1)
+            except Exception:
+                pass
 
         # Tab Frames (instantiated in current tab_order)
         self.tab_frames = {}
@@ -1849,7 +1867,41 @@ class UnifiedApp(ctk.CTk):
 
         self._browse_btn(paths_card, self.browse_excel).grid(row=5, column=2, padx=(4, 16), pady=(4, 10))
 
+        # Assembly drawings extraction checkbox (Row 6)
+        self.cb_extract_assembly = ctk.CTkCheckBox(
+            paths_card,
+            text="Extrage și Desenele de Ansamblu din Excel Ansambluri",
+            variable=self.extract_assembly_var,
+            command=self._on_toggle_extract_assembly,
+            font=("Segoe UI", 12),
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            border_color=_CARD_BORDER,
+            text_color=_TEXT_PRI
+        )
+        self.cb_extract_assembly.grid(row=6, column=1, columnspan=2, padx=4, pady=(2, 6), sticky="w")
+
+        # Dynamic Assembly Excel frame (Row 7)
+        self.assembly_frame = ctk.CTkFrame(paths_card, fg_color="transparent")
+        self.assembly_frame.grid_columnconfigure(0, weight=0)
+        self.assembly_frame.grid_columnconfigure(1, weight=1)
+        self.assembly_frame.grid_columnconfigure(2, weight=0)
+
+        self._label(self.assembly_frame, text="Excel Ansambluri:").grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
+        asmb_inner = ctk.CTkFrame(self.assembly_frame, fg_color="transparent")
+        asmb_inner.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+        asmb_inner.grid_columnconfigure(0, weight=1)
+        asmb_inner.grid_columnconfigure(1, weight=0)
+        asmb_inner.grid_columnconfigure(2, weight=0)
+
+        self._entry(asmb_inner, self.assembly_excel_file).grid(row=0, column=0, sticky="ew")
+        self._label(asmb_inner, text="Col:", font=("Segoe UI", 11)).grid(row=0, column=1, padx=(8, 2))
+        self._entry(asmb_inner, self.assembly_col_name, width=80, placeholder_text="auto").grid(row=0, column=2, padx=(0, 0))
+
+        self._browse_btn(self.assembly_frame, self.browse_assembly_excel).grid(row=0, column=2, padx=(4, 0), pady=2)
+
         self._on_toggle_auto_search()
+        self._on_toggle_extract_assembly()
 
         # ──── Extensions card ────
         ext_card = self._make_card(container)
@@ -1862,7 +1914,10 @@ class UnifiedApp(ctk.CTk):
         self.ext_inner_frame = ctk.CTkFrame(ext_card, fg_color="transparent")
         self.ext_inner_frame.pack(fill="x", padx=16, pady=(0, 8))
 
-        # Add controls container inside ext_inner_frame for unified responsive flow
+        # Row frames container for clean horizontal row flow (no grid columns bug)
+        self.ext_row_frames = [ctk.CTkFrame(self.ext_inner_frame, fg_color="transparent") for _ in range(3)]
+
+        # Add controls container for unified responsive flow
         self.ext_add_frame = ctk.CTkFrame(self.ext_inner_frame, fg_color="transparent")
         self.new_ext_entry = ctk.CTkEntry(
             self.ext_add_frame, width=80, height=28, placeholder_text=".ext",
@@ -1978,11 +2033,11 @@ class UnifiedApp(ctk.CTk):
         self.reposition_extensions()
 
     def reposition_extensions(self, target_width=None):
-        """Dynamically flow checkboxes and Add input into available space, wrapping when needed and moving up when space allows."""
-        if not hasattr(self, "ext_inner_frame") or not hasattr(self, "ext_add_frame"):
+        """Dynamically flow checkboxes and Add input into clean row frames, wrapping neatly without grid gaps."""
+        if not hasattr(self, "ext_inner_frame") or not hasattr(self, "ext_add_frame") or not hasattr(self, "ext_row_frames"):
             return
 
-        # Determine available width from window or container
+        # Determine usable width
         if target_width is not None and target_width > 100:
             usable_w = max(250, target_width - 80)
         elif hasattr(self, "ext_card") and self.ext_card.winfo_width() > 100:
@@ -1992,28 +2047,49 @@ class UnifiedApp(ctk.CTk):
         else:
             usable_w = 850
 
-        cur_x = 0
-        row = 0
-        col = 0
-
+        # Build items to pack: checkboxes then ext_add_frame
+        items = []
         for ext in self.available_extensions:
             cb = self.ext_checkboxes.get(ext)
             if cb:
-                w_req = max(cb.winfo_reqwidth(), 42) + 14
-                if cur_x + w_req > usable_w and cur_x > 0:
-                    row += 1
-                    col = 0
-                    cur_x = 0
-                cb.grid(row=row, column=col, padx=(0, 14), pady=3, sticky="w")
-                cur_x += w_req
-                col += 1
+                w = max(cb.winfo_reqwidth(), len(ext) * 8 + 36) + 14
+                items.append((cb, w))
+        add_w = max(self.ext_add_frame.winfo_reqwidth(), 145) + 8
+        items.append((self.ext_add_frame, add_w))
 
-        add_w = max(self.ext_add_frame.winfo_reqwidth(), 135) + 8
-        if cur_x + add_w > usable_w and cur_x > 0:
-            row += 1
-            col = 0
-            cur_x = 0
-        self.ext_add_frame.grid(row=row, column=col, columnspan=2, padx=(0, 6), pady=3, sticky="w")
+        # Compute rows based on usable_w
+        rows = [[]]
+        cur_w = 0
+        for widget, w in items:
+            if cur_w + w > usable_w and cur_w > 0:
+                rows.append([(widget, w)])
+                cur_w = w
+            else:
+                rows[-1].append((widget, w))
+                cur_w += w
+
+        # Optimization: Do nothing if the packing signature has not changed
+        signature = tuple(tuple(id(w) for w, _ in r) for r in rows)
+        if getattr(self, "_last_ext_flow_signature", None) == signature:
+            return
+        self._last_ext_flow_signature = signature
+
+        # Ensure enough row frames exist
+        while len(self.ext_row_frames) < len(rows):
+            rf = ctk.CTkFrame(self.ext_inner_frame, fg_color="transparent")
+            self.ext_row_frames.append(rf)
+
+        # Repack row frames and items
+        for r_idx, r_items in enumerate(rows):
+            rf = self.ext_row_frames[r_idx]
+            rf.pack(fill="x", pady=2, anchor="w")
+            for widget, _ in r_items:
+                widget.pack_forget()
+                widget.pack(in_=rf, side="left", padx=(0, 14), pady=2)
+
+        # Unpack any unused row frames
+        for r_idx in range(len(rows), len(self.ext_row_frames)):
+            self.ext_row_frames[r_idx].pack_forget()
 
     def add_extension(self):
         new_ext = self.new_ext_entry.get().strip().lower()
@@ -2036,6 +2112,268 @@ class UnifiedApp(ctk.CTk):
                 self.lbl_extractor_source.configure(text="Sursă:")
                 self.proj_search_frame.grid_forget()
             self.save_settings()
+
+    def _on_toggle_extract_assembly(self):
+        """Toggle UI visibility of Assembly Excel selector frame."""
+        if hasattr(self, "cb_extract_assembly") and hasattr(self, "assembly_frame"):
+            if self.extract_assembly_var.get():
+                self.assembly_frame.grid(row=7, column=0, columnspan=3, padx=16, pady=(0, 10), sticky="ew")
+            else:
+                self.assembly_frame.grid_forget()
+            self.save_settings()
+
+    def browse_assembly_excel(self):
+        start_dir = self.global_last_dir or self.extractor_source_last_dir or os.getcwd()
+        f = filedialog.askopenfilename(
+            title="Selectează Fișierul Excel cu Ansambluri",
+            initialdir=start_dir,
+            filetypes=[("Excel Files", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")]
+        )
+        if f:
+            self.assembly_excel_file.set(f)
+            self.global_last_dir = str(Path(f).parent)
+            self.save_settings()
+
+    def is_assembly_match(self, filename, asmb_code):
+        """Check if a drawing filename corresponds to asmb_code with hyphen/revision tolerance."""
+        stem = re.sub(r'\.[^.]+$', '', filename)
+        clean_asmb = re.sub(r'[-_\s\.]', '', asmb_code).upper()
+        if not clean_asmb:
+            return False
+        
+        # 1. Exact match with stripped punctuation
+        clean_stem = re.sub(r'[-_\s\.]', '', stem).upper()
+        if clean_stem == clean_asmb:
+            return True
+
+        # 2. Token / chunk match: split by underscore, space, parentheses, brackets
+        chunks = re.split(r'[\s_()\[\],;]+', stem)
+        for c in chunks:
+            clean_c = re.sub(r'[-_\s\.]', '', c).upper()
+            if clean_c == clean_asmb:
+                return True
+
+        # 3. Regex with word-like boundaries allowing hyphens inside asmb
+        asmb_pattern = r'[-_\s]*'.join([re.escape(ch) for ch in clean_asmb])
+        regex = rf'(?:^|[\s_()\[\],;])({asmb_pattern})(?:$|[\s_()\[\],;]|(?![A-Za-z0-9]))'
+        if re.search(regex, stem, re.IGNORECASE):
+            return True
+        return False
+
+    def parse_assembly_excel(self, excel_path, custom_col=""):
+        """Extract unique assembly codes from all sheets of an assembly Excel file."""
+        asmb_codes = []
+        seen = set()
+        
+        try:
+            xl = pd.ExcelFile(excel_path)
+            try:
+                for sheet_name in xl.sheet_names:
+                    try:
+                        df = xl.parse(sheet_name, header=None)
+                    except Exception:
+                        continue
+                    if df.empty or len(df) < 2:
+                        continue
+
+                    header_row_idx = None
+                    asmb_col_idx = None
+
+                    asmb_keywords = ["denumire ansamblu", "cod ansamblu", "ansamblu", "assembly", "marca", "main part", "mark"]
+                    footer_keywords = ["total", "intocmit", "verificat", "aprobat", "greutate", "kg", "data", "semnatura", "buc", "suma"]
+
+                    max_header_scan = min(15, len(df))
+                    for r in range(max_header_scan):
+                        row_vals = [str(x).strip().lower() for x in df.iloc[r].tolist() if pd.notna(x)]
+                        if len(row_vals) < 2:
+                            continue
+
+                        if custom_col:
+                            c_lower = custom_col.lower()
+                            for c_idx in range(len(df.columns)):
+                                val = str(df.iloc[r, c_idx]).strip().lower()
+                                if pd.notna(df.iloc[r, c_idx]) and c_lower in val:
+                                    header_row_idx = r
+                                    asmb_col_idx = c_idx
+                                    break
+                            if asmb_col_idx is not None:
+                                break
+
+                        for c_idx in range(len(df.columns)):
+                            val = str(df.iloc[r, c_idx]).strip().lower()
+                            if pd.isna(df.iloc[r, c_idx]) or not val or val == 'nan':
+                                continue
+                            if 'lista' in val or 'proiect' in val:
+                                continue
+                            for kw in asmb_keywords:
+                                if kw == val or (kw in val and len(val) < 30):
+                                    header_row_idx = r
+                                    asmb_col_idx = c_idx
+                                    break
+                            if asmb_col_idx is not None:
+                                break
+                        if asmb_col_idx is not None:
+                            break
+
+                    if asmb_col_idx is None:
+                        if len(df.columns) >= 2:
+                            asmb_col_idx = 1
+                            header_row_idx = 0
+
+                    start_row = (header_row_idx + 1) if header_row_idx is not None else 1
+                    for r in range(start_row, len(df)):
+                        val = str(df.iloc[r, asmb_col_idx]).strip()
+                        val_lower = val.lower()
+                        
+                        if not val or val_lower in ("nan", "none", "-", "null", "undefined"):
+                            continue
+                        if any(kw in val_lower for kw in footer_keywords):
+                            continue
+                        if any(kw in val_lower for kw in asmb_keywords):
+                            continue
+                        val_clean = val.strip()
+                        if len(val_clean) >= 2 and val_clean not in seen:
+                            seen.add(val_clean)
+                            asmb_codes.append(val_clean)
+            finally:
+                try:
+                    xl.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log(f"Eroare citire Excel Ansambluri: {e}")
+            
+        return asmb_codes
+
+    def extract_assembly_drawings(self, source_path, dest_path, assembly_codes, selected_exts):
+        """Search and extract assembly drawings into a dedicated 'Desene Ansamblu' folder and generate a status report."""
+        dest_asmb_dir = Path(dest_path) / "Desene Ansamblu"
+        dest_asmb_dir.mkdir(parents=True, exist_ok=True)
+        
+        drawing_exts = {ext for ext in selected_exts if ext in ('.pdf', '.dwg', '.dxf', '.step', '.stp')}
+        if not drawing_exts:
+            drawing_exts = {'.pdf', '.dwg'}
+
+        self.log(f"  Căutare desene de ansamblu ({', '.join(sorted(drawing_exts))}) în {source_path}...")
+        
+        all_drawings = []
+        for root, _, files in os.walk(source_path, followlinks=True):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in drawing_exts:
+                    all_drawings.append(Path(root) / f)
+
+        self.log(f"  Total fișiere desene indexate în proiect: {len(all_drawings)}")
+
+        asmb_results = []
+        found_count = 0
+        missing_count = 0
+
+        for asmb_code in assembly_codes:
+            matched_files = []
+            for filepath in all_drawings:
+                if self.is_assembly_match(filepath.name, asmb_code):
+                    matched_files.append(filepath)
+
+            if matched_files:
+                if self.duplicate_handling.get() == "Keep Oldest":
+                    matched_files.sort(key=lambda p: (p.stat().st_mtime, p.name))
+                else:
+                    matched_files.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+                
+                copied_for_asmb = []
+                by_ext = {}
+                for mf in matched_files:
+                    e = mf.suffix.lower()
+                    if e not in by_ext:
+                        by_ext[e] = mf
+
+                for e, target_file in by_ext.items():
+                    dest_file = dest_asmb_dir / target_file.name
+                    try:
+                        shutil.copy2(target_file, dest_file)
+                        copied_for_asmb.append(target_file.name)
+                    except Exception as err:
+                        self.log(f"    Eroare copiere {target_file.name}: {err}")
+
+                found_count += 1
+                asmb_results.append({
+                    "code": asmb_code,
+                    "status": "GĂSIT",
+                    "files": ", ".join(copied_for_asmb),
+                    "source": str(matched_files[0].parent)
+                })
+                self.log(f"  ✔ Ansamblu {asmb_code} -> Găsit: {', '.join(copied_for_asmb)}")
+            else:
+                missing_count += 1
+                asmb_results.append({
+                    "code": asmb_code,
+                    "status": "LIPSĂ",
+                    "files": "-",
+                    "source": "-"
+                })
+                self.log(f"  ❌ Ansamblu {asmb_code} -> LIPSĂ")
+
+        self.log(f"\n  Rezumat Ansambluri: {found_count} găsite, {missing_count} lipsă din {len(assembly_codes)} cerute.")
+
+        # Raport_Status_Ansambluri.xlsx
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Status Ansambluri"
+            
+            hdr_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+            hdr_fill = PatternFill(fill_type="solid", fgColor="1F4068")
+            green_fill = PatternFill(fill_type="solid", fgColor="D4EDDA")
+            green_font = Font(name="Segoe UI", size=10, bold=True, color="155724")
+            red_fill = PatternFill(fill_type="solid", fgColor="FFCCCC")
+            red_font = Font(name="Segoe UI", size=10, bold=True, color="721C24")
+            reg_font = Font(name="Segoe UI", size=10)
+            thin_border = Border(
+                left=Side(style='thin', color='CCCCCC'),
+                right=Side(style='thin', color='CCCCCC'),
+                top=Side(style='thin', color='CCCCCC'),
+                bottom=Side(style='thin', color='CCCCCC')
+            )
+
+            headers = ["Nr. Crt.", "Cod Ansamblu", "Status", "Fișiere Găsite", "Director Sursă"]
+            ws.append(headers)
+            for c_idx in range(1, 6):
+                cell = ws.cell(row=1, column=c_idx)
+                cell.font = hdr_font
+                cell.fill = hdr_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            for idx, item in enumerate(asmb_results, start=1):
+                row_idx = idx + 1
+                is_found = (item["status"] == "GĂSIT")
+                
+                c_num = ws.cell(row=row_idx, column=1, value=idx)
+                c_code = ws.cell(row=row_idx, column=2, value=item["code"])
+                c_status = ws.cell(row=row_idx, column=3, value=item["status"])
+                c_files = ws.cell(row=row_idx, column=4, value=item["files"])
+                c_source = ws.cell(row=row_idx, column=5, value=item["source"])
+
+                c_num.alignment = Alignment(horizontal="center")
+                c_status.alignment = Alignment(horizontal="center")
+                c_status.fill = green_fill if is_found else red_fill
+                c_status.font = green_font if is_found else red_font
+
+                for c in (c_num, c_code, c_files, c_source):
+                    c.font = reg_font
+                for col_idx in range(1, 6):
+                    ws.cell(row=row_idx, column=col_idx).border = thin_border
+
+            for col in ws.columns:
+                max_len = max(len(str(cell.value or '')) for cell in col)
+                col_letter = get_column_letter(col[0].column)
+                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+            report_path = os.path.join(str(dest_asmb_dir), "Raport_Status_Ansambluri.xlsx")
+            safe_save_workbook(wb, report_path, self.log)
+            self.log(f"  📄 Raport generat: {report_path}")
+        except Exception as e:
+            self.log(f"  Eroare generare raport status ansambluri: {e}")
 
     def find_matching_project_folders(self, parent_dir, search_term):
         """Scan parent_dir for directories matching search_term as whole words, traversing all subdirectories."""
@@ -2542,6 +2880,23 @@ class UnifiedApp(ctk.CTk):
                     self.log(f"📊 BOM generat: {bom_path} ({len(bom_data)} piese)")
                 except Exception as e:
                     self.log(f"Eroare generare BOM: {e}")
+
+            # ── Extracție Desene de Ansamblu din Excel Ansambluri ──
+            if self.extract_assembly_var.get() and self.assembly_excel_file.get().strip():
+                self.log("\n── Extracție Desene de Ansamblu ──")
+                asmb_excel = self.assembly_excel_file.get().strip()
+                if os.path.exists(asmb_excel):
+                    asmb_codes = self.parse_assembly_excel(asmb_excel, self.assembly_col_name.get().strip())
+                    self.log(f"  Total ansambluri unice identificate în Excel: {len(asmb_codes)}")
+                    if asmb_codes:
+                        self.extract_assembly_drawings(
+                            source_path=source_path,
+                            dest_path=dest_path,
+                            assembly_codes=asmb_codes,
+                            selected_exts=selected_exts
+                        )
+                else:
+                    self.log(f"  ⚠ Fișierul Excel de ansambluri nu există: {asmb_excel}")
 
             # ── Asigurare permisiuni citire/scriere complete pe întregul folder destinație ──
             self.log("\n🔒 Aplicare permisiuni complete citire/scriere (toate aplicațiile)...")

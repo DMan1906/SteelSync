@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.4.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.4.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.4.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.5.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.5.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.4.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.4.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.5.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,6 +16,15 @@
 
 ## 🚀 Funcționalități
 
+- **📑 Extracție Desene de Ansamblu din Excel Ansambluri (NOU în v1.5.0)**:
+  - Opțiune dedicată în `File Extractor` pentru parsarea automată a fișierelor Excel cu ansambluri (Assembly Part List, ex. `1242 - 48.2 Fiskebrygga A4.xlsx`).
+  - Auto-detecție inteligentă a coloanei de ansamblu (`Denumire ansamblu` / Coloana B), ignorând sub-piesele și rândurile de sumar.
+  - Căutare recursivă cu toleranță la cratimă/revizii și salvare automată în subfolderul dedicat `Destinație/Desene Ansamblu`.
+  - Generare raport detaliat `Raport_Status_Ansambluri.xlsx` cu evidențierea stadiului fiecărui ansamblu (GĂSIT / LIPSĂ).
+- **⚡ Optimizare Redimensionare și UI Fluid (NOU în v1.5.0)**:
+  - Debounce inteligent la resize pentru o experiență 60+ FPS complet lipsită de sacadare/lag la tragerea marginilor ferestrei.
+  - Layout pe rânduri fluid pentru `Extensii Fișiere`: toate extensiile și butonul `+ Add` încap impecabil pe o singură linie și se pliază/depliază natural fără goluri sau butoane tăiate.
+  - Design îmbunătățit al barei de navigare/tab-uri fără artefacte vizuale sau halo-uri gri decalate.
 - **🔍 DWG / Desene Finder (Extins în v1.4.0)** – Identifică și extrage automat desenele tehnice existente (`.dwg` și/sau `.pdf`) într-un arbore de clienți/proiecte:
   - **Suport Piese Sursă Flexibil (NOU în v1.4.0):** Posibilitate de alegere între fișiere piese **PDF (`.pdf`)**, **NC / NC1 (`.nc`, `.nc1`)** sau **Auto (Toate)**. Când ai doar fișiere NC/NC1, programul preia automat denumirile/codurile pieselor din acestea și caută desenele corespunzătoare în proiect.
   - **Format Desen Căutat în Proiect (NOU în v1.4.0):** Posibilitate de selecție între căutarea de **DWG (`.dwg`)**, **PDF (`.pdf`)** sau **Ambele (`.dwg` & `.pdf`)**.
