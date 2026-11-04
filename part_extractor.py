@@ -2869,9 +2869,17 @@ class UnifiedApp(ctk.CTk):
             messagebox.showwarning("Atenție", "Te rog selectează un folder valid cu fișiere NC.")
             return None, None
         
-        nc_files = [f for f in os.listdir(folder) if f.lower().endswith(('.nc', '.nc1'))]
+        nc_files = []
+        for root, dirs, files in os.walk(folder, followlinks=True):
+            if os.path.basename(root).lower() == "modified":
+                continue
+            for f in files:
+                if f.lower().endswith(('.nc', '.nc1')):
+                    rel_p = os.path.relpath(os.path.join(root, f), folder)
+                    nc_files.append(rel_p)
+
         if not nc_files:
-            self.mod_nc_log("⚠ Nu s-au găsit fișiere NC în folderul selectat.")
+            self.mod_nc_log("⚠ Nu s-au găsit fișiere NC în folderul selectat sau în subfolderele acestuia.")
             return None, None
             
         out_folder = folder
@@ -2900,6 +2908,7 @@ class UnifiedApp(ctk.CTk):
         for f in nc_files:
             src_path = os.path.join(self.mod_nc_dir.get(), f)
             dest_path = os.path.join(out_folder, f)
+            make_dir_with_permissions(os.path.dirname(dest_path))
             
             with open(src_path, 'r', encoding='utf-8', errors='ignore') as file:
                 lines = file.readlines()
@@ -2944,7 +2953,8 @@ class UnifiedApp(ctk.CTk):
         for f in nc_files:
             src_path = os.path.join(self.mod_nc_dir.get(), f)
             dest_path = os.path.join(out_folder, f)
-            basename = os.path.splitext(f)[0]
+            make_dir_with_permissions(os.path.dirname(dest_path))
+            basename = os.path.splitext(os.path.basename(f))[0]
             
             qty = self._lookup_quantity(basename, quantity_map)
             
@@ -4170,51 +4180,59 @@ class UnifiedApp(ctk.CTk):
     def _build_quantity_map(self, excel_path, part_col_name, qty_col_name):
         """
         Build a dict { normalized_part_name: quantity } from the BOM Excel across ALL sheets.
+        Handles both explicit columns, standard named tables, and multi-section A4 layouts.
         Returns an empty dict on failure.
         """
         try:
             xl = pd.ExcelFile(excel_path)
             result = {}
-            qty_keywords = ['qty', 'quantity', 'buc', 'cantitate', 'cant', 'nr', 'count', 'stk', 'anz', 'pcs', 'pieces', 'bucati', 'ramase']
-            part_keywords = ['denumire', 'pies', 'part', 'name', 'nume', 'reper']
+            qty_keywords = ['qty', 'quantity', 'buc', 'cantitate', 'cant', 'count', 'stk', 'anz', 'pcs', 'pieces', 'bucati', 'ramase']
+            part_keywords = ['denumire', 'pies', 'part', 'name', 'nume', 'reper', 'poz', 'element', 'mark']
+            nr_keywords = ['nr', 'crt', 'no', 'index', 'item']
 
             for sheet_name in xl.sheet_names:
-                # If explicit columns are given
-                if part_col_name or qty_col_name:
-                    try:
-                        df = xl.parse(sheet_name)
-                        p_col = part_col_name if (part_col_name and part_col_name in df.columns) else None
-                        q_col = qty_col_name if (qty_col_name and qty_col_name in df.columns) else None
+                try:
+                    df = xl.parse(sheet_name)
+                except Exception:
+                    continue
 
-                        if not p_col and not q_col and len(df.columns) >= 2:
-                            for col in df.columns:
-                                c_clean = str(col).lower()
-                                if not p_col and any(kw in c_clean for kw in part_keywords):
-                                    p_col = col
-                                elif not q_col and any(kw in c_clean for kw in qty_keywords):
-                                    q_col = col
+                if df.empty:
+                    continue
 
-                        part_series = df[p_col] if p_col else df.iloc[:, 0]
-                        qty_series = df[q_col] if q_col else (df.iloc[:, 1] if len(df.columns) > 1 else None)
+                p_col = None
+                q_col = None
 
-                        if qty_series is not None:
-                            for idx in part_series.index:
-                                pname = str(part_series[idx]).strip()
-                                if not pname or pname.lower() == 'nan':
-                                    continue
-                                if any(kw in pname.lower() for kw in part_keywords + qty_keywords):
-                                    continue
-                                norm = self._normalize_name(pname)
-                                try:
-                                    qty = int(float(qty_series[idx]))
-                                except (ValueError, TypeError):
-                                    qty = 0
-                                result[norm] = result.get(norm, 0) + qty
+                if part_col_name and part_col_name in df.columns:
+                    p_col = part_col_name
+                if qty_col_name and qty_col_name in df.columns:
+                    q_col = qty_col_name
+
+                # Auto-detect named columns if not explicitly provided
+                if not p_col or not q_col:
+                    for col in df.columns:
+                        c_clean = str(col).lower().strip()
+                        if not p_col:
+                            if any(kw in c_clean for kw in part_keywords) and not any(kw == c_clean for kw in nr_keywords):
+                                p_col = col
+                        if not q_col:
+                            if any(kw in c_clean for kw in qty_keywords):
+                                q_col = col
+
+                # If standard named columns exist, extract directly
+                if p_col and q_col and p_col != q_col:
+                    for idx in df.index:
+                        pname = str(df[p_col][idx]).strip()
+                        if not pname or pname.lower() == 'nan':
                             continue
-                    except Exception:
-                        pass
+                        try:
+                            qty = int(float(df[q_col][idx]))
+                        except (ValueError, TypeError):
+                            continue
+                        norm = self._normalize_name(pname)
+                        result[norm] = result.get(norm, 0) + qty
+                    continue
 
-                # Generic scan on sheet without explicit columns
+                # Fallback: multi-section generic scan for unheadered or complex multi-column sheets
                 try:
                     df_raw = xl.parse(sheet_name, header=None)
                     num_cols = df_raw.shape[1]
@@ -4225,6 +4243,20 @@ class UnifiedApp(ctk.CTk):
 
                     for c in range(num_cols - 1):
                         if c in used_cols or (c + 1) in used_cols:
+                            continue
+
+                        # Filter out pure row-number columns (1, 2, 3...)
+                        c_text_count = 0
+                        c_num_count = 0
+                        for r in range(min(15, df_raw.shape[0])):
+                            v = str(df_raw.iloc[r, c]).strip()
+                            if not v or v.lower() == 'nan':
+                                continue
+                            if any(ch.isalpha() for ch in v):
+                                c_text_count += 1
+                            elif v.isdigit():
+                                c_num_count += 1
+                        if c_num_count > 3 and c_text_count <= 1:
                             continue
 
                         valid_rows = 0
@@ -4239,14 +4271,14 @@ class UnifiedApp(ctk.CTk):
                         for r in range(min(20, df_raw.shape[0])):
                             p = str(df_raw.iloc[r, c]).strip()
                             q = df_raw.iloc[r, c + 1]
-                            if p and p.lower() != 'nan' and not any(kw in p.lower() for kw in part_keywords + qty_keywords):
+                            if p and p.lower() != 'nan' and not any(kw in p.lower() for kw in part_keywords + qty_keywords + nr_keywords):
                                 try:
                                     int(float(q))
                                     valid_rows += 1
                                 except (ValueError, TypeError):
                                     pass
 
-                        if c == 0 or is_qty_header or valid_rows >= 1:
+                        if is_qty_header or valid_rows >= 1:
                             valid_pairs.append((c, c + 1))
                             used_cols.add(c)
                             used_cols.add(c + 1)
@@ -4258,7 +4290,7 @@ class UnifiedApp(ctk.CTk):
 
                             if not pname or pname.lower() == 'nan':
                                 continue
-                            if any(kw in pname.lower() for kw in part_keywords + qty_keywords):
+                            if any(kw in pname.lower() for kw in part_keywords + qty_keywords + nr_keywords):
                                 continue
 
                             try:
