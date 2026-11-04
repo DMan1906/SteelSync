@@ -322,10 +322,47 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.1.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+# ─── Tab Configuration & Metadata ───────────────────────────────────────────
+DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc"]
+TAB_METADATA = {
+    "extractor": {"title": "📄 File Extractor", "icon": "📄"},
+    "nc_sorter": {"title": "🔧 NC Sorter", "icon": "🔧"},
+    "mod_nc": {"title": "📝 Modify NC", "icon": "📝"},
+}
+TAB_NAME_MAP = {
+    "extractor": "extractor",
+    "file extractor": "extractor",
+    "📄 file extractor": "extractor",
+    "nc_sorter": "nc_sorter",
+    "nc sorter": "nc_sorter",
+    "🔧 nc sorter": "nc_sorter",
+    "mod_nc": "mod_nc",
+    "modify nc": "mod_nc",
+    "📝 modify nc": "mod_nc",
+}
+
+class _TabViewCompat:
+    """Backwards-compatibility shim for any legacy references to self.tabview."""
+    def __init__(self, app):
+        self._app = app
+    def set(self, name):
+        norm = str(name).lower().strip()
+        tid = TAB_NAME_MAP.get(norm)
+        if tid:
+            self._app.select_tab(tid)
+            return
+        for tid, meta in TAB_METADATA.items():
+            if norm in meta["title"].lower():
+                self._app.select_tab(tid)
+                return
+    def get(self):
+        return TAB_METADATA.get(self._app.active_tab_id, {}).get("title", "")
+
 
 
 def _is_geometry_visible(geom_str):
@@ -798,7 +835,7 @@ class UnifiedApp(ctk.CTk):
         self.title("⚙ SteelSync Toolkit")
         self._last_normal_geometry = None
         self.geometry("960x860")
-        self.minsize(850, 780)
+        self.minsize(900, 650)
         
         # Set application icon if it exists
         icon_path = resource_path("app_icon.ico")
@@ -849,9 +886,24 @@ class UnifiedApp(ctk.CTk):
         self.ignored_update_version = ""
         self._update_dialog = None
 
+        # ── Directory Browse Memories (Independent per Requirement #3) ──
+        self.extractor_source_last_dir = ""
+        self.global_last_dir = ""
+
+        # ── Tab Ordering & State (Requirement #2) ──
+        self.tab_order = list(DEFAULT_TAB_ORDER)
+        self.active_tab_id = "extractor"
+        self.tab_buttons = {}
+        self._drag_data = None
+
         self.create_widgets()
         self.load_settings()
         self.bind("<Configure>", self._on_window_configure)
+        self.bind("<Control-Left>", lambda e: self.move_active_tab_left())
+        self.bind("<Control-Right>", lambda e: self.move_active_tab_right())
+        self.bind("<Control-Tab>", lambda e: self.cycle_tab_forward())
+        self.bind("<Control-Shift-Tab>", lambda e: self.cycle_tab_backward())
+        self.bind("<Control-ISO_Left_Tab>", lambda e: self.cycle_tab_backward())
 
         # Preload heavy modules (pandas, openpyxl) asynchronously in background
         threading.Thread(target=_preload_heavy_libraries, daemon=True).start()
@@ -907,6 +959,37 @@ class UnifiedApp(ctk.CTk):
             self.mod_nc_excel.set(s.get("mod_nc_excel", ""))
             self.mod_nc_create_subfolder.set(s.get("mod_nc_create_subfolder", True))
 
+            # Restore browse directory memories (Requirement #3)
+            self.extractor_source_last_dir = s.get("extractor_source_last_dir", "")
+            if not self.extractor_source_last_dir:
+                self.extractor_source_last_dir = self.source_dir.get()
+            self.global_last_dir = s.get("global_last_dir", "")
+            if not self.global_last_dir:
+                self.global_last_dir = self.dest_dir.get() or self.nc_source_folder.get()
+
+            # Restore Tab Ordering & Active Tab (Requirement #2)
+            raw_order = s.get("tab_order", [])
+            valid_order = []
+            for item in raw_order:
+                tid = TAB_NAME_MAP.get(str(item).lower().strip(), item)
+                if tid in DEFAULT_TAB_ORDER and tid not in valid_order:
+                    valid_order.append(tid)
+            for tid in DEFAULT_TAB_ORDER:
+                if tid not in valid_order:
+                    valid_order.append(tid)
+            self.tab_order = valid_order
+
+            saved_active = s.get("active_tab_id", "")
+            mapped_active = TAB_NAME_MAP.get(str(saved_active).lower().strip(), saved_active)
+            if mapped_active in self.tab_order:
+                self.active_tab_id = mapped_active
+            else:
+                self.active_tab_id = self.tab_order[0]
+            
+            # Apply loaded tab order & active tab
+            self.repack_tab_buttons()
+            self.select_tab(self.active_tab_id)
+
             # Restore extension selections
             saved_exts = s.get("extensions", {})
             for ext, val in saved_exts.items():
@@ -921,6 +1004,12 @@ class UnifiedApp(ctk.CTk):
             saved_geom = s.get("window_geometry", "")
             if saved_geom and _is_geometry_visible(saved_geom):
                 try:
+                    m = re.match(r'^(\d+)x(\d+)\+?(-?\d+)\+?(-?\d+)$', saved_geom.strip())
+                    if m:
+                        gw, gh, gx, gy = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                        gw = max(gw, 900)
+                        gh = max(gh, 650)
+                        saved_geom = f"{gw}x{gh}+{gx}+{gy}"
                     self.geometry(saved_geom)
                     self._last_normal_geometry = saved_geom
                 except Exception:
@@ -981,6 +1070,10 @@ class UnifiedApp(ctk.CTk):
             "mod_nc_create_subfolder": self.mod_nc_create_subfolder.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
+            "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
+            "global_last_dir": getattr(self, "global_last_dir", ""),
+            "tab_order": getattr(self, "tab_order", list(DEFAULT_TAB_ORDER)),
+            "active_tab_id": getattr(self, "active_tab_id", "extractor"),
         }
         try:
             prepare_destination(SETTINGS_PATH)
@@ -993,9 +1086,13 @@ class UnifiedApp(ctk.CTk):
 
     def toggle_appearance_mode(self):
         ctk.set_appearance_mode(self.appearance_mode_var.get())
+        if hasattr(self, "_update_tab_buttons_style"):
+            self._update_tab_buttons_style()
         self.save_settings()
 
     def on_close(self):
+        if hasattr(self, "_update_tab_buttons_style"):
+            self._update_tab_buttons_style()
         self.save_settings()
         self.destroy()
 
@@ -1082,19 +1179,250 @@ class UnifiedApp(ctk.CTk):
         )
 
     # ══════════════════════════════════════════════════════════════════════
+    #  DIRECTORY BROWSE HELPERS (INDEPENDENT MEMORIES - REQUIREMENT #3)
+    # ══════════════════════════════════════════════════════════════════════
+    def _get_global_initial_dir(self, current_val=""):
+        """Get the initial directory for global browse dialogs (ignoring File Extractor source)."""
+        val = (current_val or "").strip()
+        if val:
+            if os.path.isdir(val):
+                return val
+            elif os.path.isfile(val):
+                return os.path.dirname(val)
+            parent = os.path.dirname(val)
+            if os.path.isdir(parent):
+                return parent
+
+        if getattr(self, "global_last_dir", "") and os.path.isdir(self.global_last_dir):
+            return self.global_last_dir
+        elif getattr(self, "global_last_dir", ""):
+            parent = os.path.dirname(self.global_last_dir)
+            if os.path.isdir(parent):
+                return parent
+
+        return None
+
+    def _set_global_last_dir(self, chosen_path):
+        """Update global last dir memory and persist (ignoring File Extractor source)."""
+        if not chosen_path:
+            return
+        norm = os.path.normpath(chosen_path)
+        if os.path.isdir(norm):
+            self.global_last_dir = norm
+        elif os.path.isfile(norm):
+            self.global_last_dir = os.path.dirname(norm)
+        else:
+            _, ext = os.path.splitext(norm)
+            if ext:
+                self.global_last_dir = os.path.dirname(norm)
+            else:
+                self.global_last_dir = norm
+        self.save_settings()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  TAB MANAGER & REORDERING METHODS (REQUIREMENT #2)
+    # ══════════════════════════════════════════════════════════════════════
+    def init_tab_bar(self):
+        """Initialize tab buttons in the tab bar in current self.tab_order."""
+        self.tab_buttons = {}
+        for tab_id in self.tab_order:
+            meta = TAB_METADATA.get(tab_id, {"title": tab_id})
+            btn = ctk.CTkButton(
+                self.tab_buttons_container,
+                text=meta["title"],
+                font=("Segoe UI", 12),
+                fg_color="transparent",
+                hover_color=_CARD_BORDER,
+                text_color=_TEXT_SEC,
+                corner_radius=8,
+                height=32,
+                width=135,
+                cursor="hand2",
+                command=lambda tid=tab_id: self.select_tab(tid)
+            )
+            self._bind_tab_drag_events(btn, tab_id)
+            self.tab_buttons[tab_id] = btn
+
+        self.repack_tab_buttons()
+        self.select_tab(self.active_tab_id)
+
+    def _bind_tab_drag_events(self, btn, tab_id):
+        """Bind drag-and-drop and context menu to a tab button."""
+        def on_press(event):
+            self.select_tab(tab_id)
+            self._drag_data = {
+                "tab_id": tab_id,
+                "start_x": event.x_root,
+                "moved": False
+            }
+
+        def on_motion(event):
+            if not getattr(self, "_drag_data", None) or self._drag_data.get("tab_id") != tab_id:
+                return
+            idx = self.tab_order.index(tab_id)
+            
+            # Drag right
+            if idx < len(self.tab_order) - 1:
+                next_id = self.tab_order[idx + 1]
+                next_btn = self.tab_buttons.get(next_id)
+                if next_btn:
+                    mid_x = next_btn.winfo_rootx() + (next_btn.winfo_width() // 2)
+                    if event.x_root > mid_x:
+                        self.tab_order[idx], self.tab_order[idx + 1] = self.tab_order[idx + 1], self.tab_order[idx]
+                        self._drag_data["start_x"] = event.x_root
+                        self._drag_data["moved"] = True
+                        self.repack_tab_buttons()
+                        return
+
+            # Drag left
+            if idx > 0:
+                prev_id = self.tab_order[idx - 1]
+                prev_btn = self.tab_buttons.get(prev_id)
+                if prev_btn:
+                    mid_x = prev_btn.winfo_rootx() + (prev_btn.winfo_width() // 2)
+                    if event.x_root < mid_x:
+                        self.tab_order[idx], self.tab_order[idx - 1] = self.tab_order[idx - 1], self.tab_order[idx]
+                        self._drag_data["start_x"] = event.x_root
+                        self._drag_data["moved"] = True
+                        self.repack_tab_buttons()
+                        return
+
+        def on_release(event):
+            if getattr(self, "_drag_data", None) and self._drag_data.get("moved"):
+                self.save_settings()
+            self._drag_data = None
+
+        def on_right_click(event):
+            self.show_tab_context_menu(event, tab_id)
+
+        widgets_to_bind = [btn]
+        if hasattr(btn, "_canvas") and btn._canvas:
+            widgets_to_bind.append(btn._canvas)
+        if hasattr(btn, "_text_label") and btn._text_label:
+            widgets_to_bind.append(btn._text_label)
+
+        for w in widgets_to_bind:
+            try:
+                w.bind("<Button-1>", on_press, add="+")
+                w.bind("<B1-Motion>", on_motion, add="+")
+                w.bind("<ButtonRelease-1>", on_release, add="+")
+                w.bind("<Button-3>", on_right_click, add="+")
+            except Exception:
+                pass
+
+    def repack_tab_buttons(self):
+        """Repack tab buttons in the current self.tab_order without destroying them."""
+        for tab_id in self.tab_order:
+            if tab_id in self.tab_buttons:
+                self.tab_buttons[tab_id].pack_forget()
+        for tab_id in self.tab_order:
+            if tab_id in self.tab_buttons:
+                self.tab_buttons[tab_id].pack(side="left", padx=3, pady=3)
+        self._update_tab_buttons_style()
+
+    def _update_tab_buttons_style(self):
+        """Update styles of tab buttons according to active_tab_id."""
+        for tab_id, btn in self.tab_buttons.items():
+            is_active = (tab_id == self.active_tab_id)
+            if is_active:
+                btn.configure(
+                    fg_color=_ACCENT,
+                    hover_color=_ACCENT_HOV,
+                    text_color="#ffffff",
+                    font=("Segoe UI", 12, "bold")
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    hover_color=_CARD_BORDER,
+                    text_color=_TEXT_SEC,
+                    font=("Segoe UI", 12)
+                )
+
+    def select_tab(self, tab_id):
+        """Switch to tab_id and display its frame."""
+        if tab_id not in self.tab_frames:
+            return
+        self.active_tab_id = tab_id
+        for tid, frame in self.tab_frames.items():
+            if tid == tab_id:
+                frame.grid(row=0, column=0, sticky="nsew")
+            else:
+                frame.grid_forget()
+        self._update_tab_buttons_style()
+        self.save_settings()
+
+    def move_active_tab_left(self):
+        """Move the currently active tab one position to the left."""
+        if self.active_tab_id not in self.tab_order:
+            return
+        idx = self.tab_order.index(self.active_tab_id)
+        if idx > 0:
+            self.tab_order[idx], self.tab_order[idx - 1] = self.tab_order[idx - 1], self.tab_order[idx]
+            self.repack_tab_buttons()
+            self.save_settings()
+
+    def move_active_tab_right(self):
+        """Move the currently active tab one position to the right."""
+        if self.active_tab_id not in self.tab_order:
+            return
+        idx = self.tab_order.index(self.active_tab_id)
+        if idx < len(self.tab_order) - 1:
+            self.tab_order[idx], self.tab_order[idx + 1] = self.tab_order[idx + 1], self.tab_order[idx]
+            self.repack_tab_buttons()
+            self.save_settings()
+
+    def reset_tab_order(self):
+        """Reset tab order to default."""
+        self.tab_order = list(DEFAULT_TAB_ORDER)
+        self.repack_tab_buttons()
+        self.save_settings()
+
+    def show_tab_context_menu(self, event, tab_id):
+        """Show context menu for reordering tabs on right click."""
+        self.select_tab(tab_id)
+        menu = tk.Menu(self, tearoff=0)
+        idx = self.tab_order.index(tab_id)
+        if idx > 0:
+            menu.add_command(label="⬅ Mută la stânga", command=self.move_active_tab_left)
+        else:
+            menu.add_command(label="⬅ Mută la stânga", state="disabled")
+
+        if idx < len(self.tab_order) - 1:
+            menu.add_command(label="➡ Mută la dreapta", command=self.move_active_tab_right)
+        else:
+            menu.add_command(label="➡ Mută la dreapta", state="disabled")
+
+        menu.add_separator()
+        menu.add_command(label="🔄 Resetează ordinea inițială", command=self.reset_tab_order)
+        menu.post(event.x_root, event.y_root)
+
+    def cycle_tab_forward(self):
+        """Ctrl+Tab: switch to next tab."""
+        idx = self.tab_order.index(self.active_tab_id)
+        next_idx = (idx + 1) % len(self.tab_order)
+        self.select_tab(self.tab_order[next_idx])
+
+    def cycle_tab_backward(self):
+        """Ctrl+Shift+Tab: switch to previous tab."""
+        idx = self.tab_order.index(self.active_tab_id)
+        prev_idx = (idx - 1) % len(self.tab_order)
+        self.select_tab(self.tab_order[prev_idx])
+
+    # ══════════════════════════════════════════════════════════════════════
     #  MAIN LAYOUT
     # ══════════════════════════════════════════════════════════════════════
     def create_widgets(self):
         container = ctk.CTkFrame(self, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=18, pady=14)
+        container.pack(fill="both", expand=True, padx=14, pady=10)
         
         top_bar = ctk.CTkFrame(container, fg_color="transparent")
-        top_bar.pack(fill="x", pady=(0, 10))
+        top_bar.pack(fill="x", pady=(0, 6))
         
         title_lbl = ctk.CTkLabel(
             top_bar,
             text="SteelSync Toolkit",
-            font=("Segoe UI", 24, "bold"),
+            font=("Segoe UI", 20, "bold"),
             text_color=_TEXT_PRI,
         )
         title_lbl.pack(side="left")
@@ -1116,23 +1444,101 @@ class UnifiedApp(ctk.CTk):
         self.version_lbl.pack(side="right", padx=(0, 16))
         self.version_lbl.bind("<Button-1>", lambda e: self.start_update_check(manual=True))
 
-        self.tabview = ctk.CTkTabview(container, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1)
-        self.tabview.pack(fill="both", expand=True)
-        
-        self.tab_ext = self.tabview.add("📄 File Extractor")
-        self.tab_nc = self.tabview.add("🔧 NC Sorter")
-        self.tab_mod = self.tabview.add("📝 Modify NC")
-        
+        # ──── Reorderable Tab Bar (Requirement #2) ────
+        self.tab_nav_bar = ctk.CTkFrame(container, fg_color="transparent")
+        self.tab_nav_bar.pack(fill="x", pady=(0, 6))
+
+        # Left side: container with draggable tab buttons
+        self.tab_buttons_container = ctk.CTkFrame(
+            self.tab_nav_bar,
+            fg_color=_CARD_BG,
+            corner_radius=10,
+            border_width=1,
+            border_color=_CARD_BORDER
+        )
+        self.tab_buttons_container.pack(side="left", fill="x", expand=True)
+
+        # Right side: discrete reordering controls
+        self.reorder_controls = ctk.CTkFrame(self.tab_nav_bar, fg_color="transparent")
+        self.reorder_controls.pack(side="right", padx=(10, 0))
+
+        ctk.CTkLabel(
+            self.reorder_controls,
+            text="⇅ Tab:",
+            font=("Segoe UI", 11, "bold"),
+            text_color=_TEXT_SEC
+        ).pack(side="left", padx=(0, 4))
+
+        self.btn_move_left = ctk.CTkButton(
+            self.reorder_controls,
+            text="◀",
+            width=28,
+            height=28,
+            corner_radius=6,
+            fg_color=_CARD_BG,
+            hover_color=_CARD_BORDER,
+            border_width=1,
+            border_color=_CARD_BORDER,
+            text_color=_TEXT_PRI,
+            font=("Segoe UI", 11, "bold"),
+            command=self.move_active_tab_left
+        )
+        self.btn_move_left.pack(side="left", padx=2)
+
+        self.btn_move_right = ctk.CTkButton(
+            self.reorder_controls,
+            text="▶",
+            width=28,
+            height=28,
+            corner_radius=6,
+            fg_color=_CARD_BG,
+            hover_color=_CARD_BORDER,
+            border_width=1,
+            border_color=_CARD_BORDER,
+            text_color=_TEXT_PRI,
+            font=("Segoe UI", 11, "bold"),
+            command=self.move_active_tab_right
+        )
+        self.btn_move_right.pack(side="left", padx=2)
+
+        # ──── Tab Content Container ────
+        self.tab_content_container = ctk.CTkFrame(
+            container,
+            fg_color=_CARD_BG,
+            corner_radius=12,
+            border_width=1,
+            border_color=_CARD_BORDER
+        )
+        self.tab_content_container.pack(fill="both", expand=True)
+        self.tab_content_container.grid_rowconfigure(0, weight=1)
+        self.tab_content_container.grid_columnconfigure(0, weight=1)
+
+        # Tab Frames (preserved in memory)
+        self.tab_ext = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        self.tab_nc = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        self.tab_mod = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+
+        self.tab_frames = {
+            "extractor": self.tab_ext,
+            "nc_sorter": self.tab_nc,
+            "mod_nc": self.tab_mod,
+        }
+
+        # Backwards compatibility shim for self.tabview
+        self.tabview = _TabViewCompat(self)
+
         self.create_extractor_tab()
         self.create_nc_sorter_tab()
         self.create_mod_nc_tab()
+
+        self.init_tab_bar()
 
     # ══════════════════════════════════════════════════════════════════════
     #  EXTRACTOR TAB
     # ══════════════════════════════════════════════════════════════════════
     def create_extractor_tab(self):
         container = ctk.CTkFrame(self.tab_ext, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=10, pady=10)
+        container.pack(fill="both", expand=True, padx=12, pady=8)
         container.grid_columnconfigure(0, weight=1)
         
         subtitle_lbl = ctk.CTkLabel(
@@ -1141,50 +1547,54 @@ class UnifiedApp(ctk.CTk):
             font=("Segoe UI", 12),
             text_color=_TEXT_SEC,
         )
-        subtitle_lbl.grid(row=0, column=0, pady=(0, 10), sticky="w")
+        subtitle_lbl.grid(row=0, column=0, pady=(0, 6), sticky="w")
 
         # ──── Paths card ────
         paths_card = self._make_card(container)
-        paths_card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        paths_card.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        paths_card.grid_columnconfigure(0, weight=0)
         paths_card.grid_columnconfigure(1, weight=1)
+        paths_card.grid_columnconfigure(2, weight=0)
 
         section_lbl = ctk.CTkLabel(paths_card, text="📂 Directoare & Excel", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI)
-        section_lbl.grid(row=0, column=0, columnspan=3, padx=16, pady=(10, 6), sticky="w")
+        section_lbl.grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
 
-        self._label(paths_card, text="Sursă:").grid(row=1, column=0, padx=(16, 6), pady=6, sticky="w")
-        self._entry(paths_card, self.source_dir).grid(row=1, column=1, padx=4, pady=6, sticky="ew")
-        self._browse_btn(paths_card, self.browse_source).grid(row=1, column=2, padx=(4, 16), pady=6)
+        self._label(paths_card, text="Sursă:").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(paths_card, self.source_dir).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(paths_card, self.browse_source).grid(row=1, column=2, padx=(4, 16), pady=4)
 
-        self._label(paths_card, text="Destinație:").grid(row=2, column=0, padx=(16, 6), pady=6, sticky="w")
-        self._entry(paths_card, self.dest_dir).grid(row=2, column=1, padx=4, pady=6, sticky="ew")
-        self._browse_btn(paths_card, self.browse_dest).grid(row=2, column=2, padx=(4, 16), pady=6)
+        self._label(paths_card, text="Destinație:").grid(row=2, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(paths_card, self.dest_dir).grid(row=2, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(paths_card, self.browse_dest).grid(row=2, column=2, padx=(4, 16), pady=4)
 
-        self._label(paths_card, text="Fișier Excel:").grid(row=3, column=0, padx=(16, 6), pady=(6, 14), sticky="w")
+        self._label(paths_card, text="Fișier Excel:").grid(row=3, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
         
         excel_inner = ctk.CTkFrame(paths_card, fg_color="transparent")
-        excel_inner.grid(row=3, column=1, padx=4, pady=(6, 14), sticky="ew")
+        excel_inner.grid(row=3, column=1, padx=4, pady=(4, 10), sticky="ew")
         excel_inner.grid_columnconfigure(0, weight=1)
+        excel_inner.grid_columnconfigure(1, weight=0)
+        excel_inner.grid_columnconfigure(2, weight=0)
 
         self._entry(excel_inner, self.excel_file).grid(row=0, column=0, sticky="ew")
         self._label(excel_inner, text="Col:", font=("Segoe UI", 11)).grid(row=0, column=1, padx=(8, 2))
         self._entry(excel_inner, self.col_name, width=80, placeholder_text="auto").grid(row=0, column=2, padx=(0, 0))
 
-        self._browse_btn(paths_card, self.browse_excel).grid(row=3, column=2, padx=(4, 16), pady=(6, 14))
+        self._browse_btn(paths_card, self.browse_excel).grid(row=3, column=2, padx=(4, 16), pady=(4, 10))
 
         # ──── Extensions card ────
         ext_card = self._make_card(container)
-        ext_card.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        ext_card.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
         section_lbl2 = ctk.CTkLabel(ext_card, text="🔖 Extensii Fișiere", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI)
-        section_lbl2.pack(anchor="w", padx=16, pady=(10, 4))
+        section_lbl2.pack(anchor="w", padx=16, pady=(8, 2))
 
         self.ext_inner_frame = ctk.CTkFrame(ext_card, fg_color="transparent")
-        self.ext_inner_frame.pack(anchor="w", padx=16, pady=(0, 4))
+        self.ext_inner_frame.pack(anchor="w", padx=16, pady=(0, 2))
 
         self.draw_extensions()
 
         add_row = ctk.CTkFrame(ext_card, fg_color="transparent")
-        add_row.pack(anchor="w", padx=16, pady=(0, 10))
+        add_row.pack(anchor="w", padx=16, pady=(0, 8))
         self.new_ext_entry = ctk.CTkEntry(
             add_row, width=90, placeholder_text=".ext",
             fg_color=_ENTRY_BG, border_color=_CARD_BORDER,
@@ -1200,12 +1610,12 @@ class UnifiedApp(ctk.CTk):
 
         # ──── Settings row ────
         settings_card = self._make_card(container)
-        settings_card.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        settings_card.grid(row=3, column=0, sticky="ew", pady=(0, 8))
 
         section_lbl3 = ctk.CTkLabel(settings_card, text="⚙ Setări", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI)
-        section_lbl3.pack(side="left", padx=16, pady=10)
+        section_lbl3.pack(side="left", padx=16, pady=8)
 
-        self._label(settings_card, text="Duplicate:").pack(side="left", padx=(20, 6), pady=10)
+        self._label(settings_card, text="Duplicate:").pack(side="left", padx=(16, 6), pady=8)
         ctk.CTkOptionMenu(
             settings_card,
             variable=self.duplicate_handling,
@@ -1219,9 +1629,9 @@ class UnifiedApp(ctk.CTk):
             font=("Segoe UI", 13),
             corner_radius=8,
             width=130,
-        ).pack(side="left", padx=(0, 10), pady=10)
+        ).pack(side="left", padx=(0, 10), pady=8)
         
-        self._label(settings_card, text="Extracție:").pack(side="left", padx=(10, 6), pady=10)
+        self._label(settings_card, text="Extracție:").pack(side="left", padx=(10, 6), pady=8)
         ctk.CTkOptionMenu(
             settings_card,
             variable=self.extract_mode,
@@ -1235,7 +1645,7 @@ class UnifiedApp(ctk.CTk):
             font=("Segoe UI", 13),
             corner_radius=8,
             width=130,
-        ).pack(side="left", padx=(0, 16), pady=10)
+        ).pack(side="left", padx=(0, 16), pady=8)
 
         # ──── Start & Progress ────
         self.start_btn = ctk.CTkButton(
@@ -1245,28 +1655,28 @@ class UnifiedApp(ctk.CTk):
             fg_color=_GREEN,
             hover_color=_GREEN_HOV,
             text_color="#0b0f19",
-            height=40,
-            corner_radius=12,
-            font=("Segoe UI", 16, "bold"),
+            height=38,
+            corner_radius=10,
+            font=("Segoe UI", 15, "bold"),
         )
-        self.start_btn.grid(row=4, column=0, pady=(4, 8), sticky="ew")
+        self.start_btn.grid(row=4, column=0, pady=(2, 4), sticky="ew")
 
         self.progress_bar = ctk.CTkProgressBar(
-            container, progress_color=_ACCENT, fg_color=_ENTRY_BG, corner_radius=6, height=8
+            container, progress_color=_ACCENT, fg_color=_ENTRY_BG, corner_radius=6, height=6
         )
-        self.progress_bar.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        self.progress_bar.grid(row=5, column=0, sticky="ew", pady=(0, 4))
         self.progress_bar.set(0)
 
         # ──── Log terminal ────
         log_card = self._make_card(container)
         log_card.grid(row=6, column=0, sticky="nsew", pady=(0, 0))
-        container.grid_rowconfigure(6, weight=1)
+        container.grid_rowconfigure(6, weight=1, minsize=100)
 
         self.log_box = ctk.CTkTextbox(
             log_card, state="disabled", font=("Cascadia Code", 12),
             fg_color=_LOG_BG, text_color="#a3e635", corner_radius=8, border_width=0
         )
-        self.log_box.pack(fill="both", expand=True, padx=10, pady=10)
+        self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
 
     def draw_extensions(self):
         for widget in self.ext_inner_frame.winfo_children():
@@ -1300,19 +1710,38 @@ class UnifiedApp(ctk.CTk):
             self.new_ext_entry.delete(0, 'end')
 
     def browse_source(self):
-        folder = filedialog.askdirectory()
+        """Browse source folder exclusively for File Extractor (Requirement #3)."""
+        curr = self.source_dir.get().strip()
+        initial = None
+        if curr and os.path.isdir(curr):
+            initial = curr
+        elif getattr(self, "extractor_source_last_dir", "") and os.path.isdir(self.extractor_source_last_dir):
+            initial = self.extractor_source_last_dir
+
+        folder = filedialog.askdirectory(title="Selectare Director Sursă (File Extractor)", initialdir=initial)
         if folder:
-            self.source_dir.set(folder)
+            norm = os.path.normpath(folder)
+            self.source_dir.set(norm)
+            self.extractor_source_last_dir = norm
+            self.save_settings()
 
     def browse_dest(self):
-        folder = filedialog.askdirectory()
+        """Browse destination folder (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.dest_dir.get())
+        folder = filedialog.askdirectory(title="Selectare Director Destinație", initialdir=initial)
         if folder:
-            self.dest_dir.set(folder)
+            norm = os.path.normpath(folder)
+            self.dest_dir.set(norm)
+            self._set_global_last_dir(norm)
 
     def browse_excel(self):
-        file = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+        """Browse Excel file (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.excel_file.get())
+        file = filedialog.askopenfilename(title="Selectare Fișier Excel", initialdir=initial, filetypes=[("Excel files", "*.xlsx *.xls")])
         if file:
-            self.excel_file.set(file)
+            norm = os.path.normpath(file)
+            self.excel_file.set(norm)
+            self._set_global_last_dir(norm)
 
     def log(self, message):
         self.after(0, self._insert_log, message)
@@ -1361,6 +1790,8 @@ class UnifiedApp(ctk.CTk):
             messagebox.showerror("Eroare", "Selectați cel puțin o extensie")
             return
 
+        if hasattr(self, "_update_tab_buttons_style"):
+            self._update_tab_buttons_style()
         self.save_settings()
         self.start_btn.configure(state="disabled")
         self.set_progress(0)
@@ -1701,7 +2132,7 @@ class UnifiedApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════
     def create_nc_sorter_tab(self):
         container = ctk.CTkFrame(self.tab_nc, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=10, pady=10)
+        container.pack(fill="both", expand=True, padx=12, pady=8)
         container.grid_columnconfigure(0, weight=1)
         
         subtitle_lbl = ctk.CTkLabel(
@@ -1710,36 +2141,40 @@ class UnifiedApp(ctk.CTk):
             font=("Segoe UI", 12),
             text_color=_TEXT_SEC,
         )
-        subtitle_lbl.grid(row=0, column=0, pady=(0, 8), sticky="w")
+        subtitle_lbl.grid(row=0, column=0, pady=(0, 6), sticky="w")
 
         # ──── Source Folder Card ────
         paths_card = self._make_card(container)
         paths_card.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        paths_card.grid_columnconfigure(0, weight=0)
         paths_card.grid_columnconfigure(1, weight=1)
+        paths_card.grid_columnconfigure(2, weight=0)
 
         ctk.CTkLabel(paths_card, text="📂 Director Sursă", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).grid(
-            row=0, column=0, columnspan=3, padx=16, pady=(10, 6), sticky="w")
+            row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
 
-        self._label(paths_card, text="Sursă:").grid(row=1, column=0, padx=(16, 6), pady=(6, 14), sticky="w")
-        self._entry(paths_card, self.nc_source_folder).grid(row=1, column=1, padx=4, pady=(6, 14), sticky="ew")
-        self._browse_btn(paths_card, self.nc_browse_source).grid(row=1, column=2, padx=(4, 16), pady=(6, 14))
+        self._label(paths_card, text="Sursă:").grid(row=1, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
+        self._entry(paths_card, self.nc_source_folder).grid(row=1, column=1, padx=4, pady=(4, 10), sticky="ew")
+        self._browse_btn(paths_card, self.nc_browse_source).grid(row=1, column=2, padx=(4, 16), pady=(4, 10))
 
         # ──── Excel / BOM Card (Optional) ────
         excel_card = self._make_card(container)
         excel_card.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        excel_card.grid_columnconfigure(0, weight=0)
         excel_card.grid_columnconfigure(1, weight=1)
+        excel_card.grid_columnconfigure(2, weight=0)
 
         excel_header_frame = ctk.CTkFrame(excel_card, fg_color="transparent")
-        excel_header_frame.grid(row=0, column=0, columnspan=3, padx=16, pady=(10, 2), sticky="w")
+        excel_header_frame.grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 2), sticky="w")
         ctk.CTkLabel(excel_header_frame, text="📊 Excel / BOM", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).pack(side="left")
         ctk.CTkLabel(excel_header_frame, text="  (opțional — pentru raportul cu nr. bucăți)", font=("Segoe UI", 11), text_color=_ORANGE).pack(side="left")
 
-        self._label(excel_card, text="Excel:").grid(row=1, column=0, padx=(16, 6), pady=5, sticky="w")
-        self._entry(excel_card, self.nc_excel_file).grid(row=1, column=1, padx=4, pady=5, sticky="ew")
-        self._browse_btn(excel_card, self.nc_browse_excel).grid(row=1, column=2, padx=(4, 16), pady=5)
+        self._label(excel_card, text="Excel:").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(excel_card, self.nc_excel_file).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(excel_card, self.nc_browse_excel).grid(row=1, column=2, padx=(4, 16), pady=4)
 
         col_frame = ctk.CTkFrame(excel_card, fg_color="transparent")
-        col_frame.grid(row=2, column=0, columnspan=3, padx=16, pady=(2, 12), sticky="w")
+        col_frame.grid(row=2, column=0, columnspan=3, padx=16, pady=(2, 8), sticky="w")
         
         self._label(col_frame, text="Col. Piese:", font=("Segoe UI", 11)).pack(side="left", padx=(0, 4))
         self._entry(col_frame, self.nc_part_col, width=100, placeholder_text="auto").pack(side="left", padx=(0, 16))
@@ -1751,36 +2186,38 @@ class UnifiedApp(ctk.CTk):
         settings_card.grid(row=3, column=0, sticky="ew", pady=(0, 8))
 
         ctk.CTkLabel(settings_card, text="⚙ Setări Sortare", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).pack(
-            anchor="w", padx=16, pady=(10, 6))
+            anchor="w", padx=16, pady=(8, 4))
 
         # Action row
         action_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
-        action_frame.pack(anchor="w", padx=16, pady=(0, 6))
+        action_frame.pack(anchor="w", padx=16, pady=(0, 4))
         self._label(action_frame, text="Acțiune:").pack(side="left", padx=(0, 10))
         ctk.CTkRadioButton(action_frame, text="Copiază fișiere", variable=self.nc_action_var, value="Copy",
                            fg_color=_ACCENT, hover_color=_ACCENT_HOV, text_color=_TEXT_PRI).pack(side="left", padx=(0, 16))
         ctk.CTkRadioButton(action_frame, text="Mută fișiere", variable=self.nc_action_var, value="Move",
                            fg_color=_ACCENT, hover_color=_ACCENT_HOV, text_color=_TEXT_PRI).pack(side="left")
 
-        # Options – each on its own row for clarity
+        # Options – 2 balanced columns
         opt_container = ctk.CTkFrame(settings_card, fg_color="transparent")
-        opt_container.pack(anchor="w", padx=16, pady=(4, 12))
+        opt_container.pack(fill="x", padx=16, pady=(2, 8))
+        opt_container.grid_columnconfigure(0, weight=1)
+        opt_container.grid_columnconfigure(1, weight=1)
 
         ctk.CTkCheckBox(opt_container, text="Sortare profile Laminat la Cald / Rece", variable=self.nc_opt_hot_cold,
                         fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
-                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).pack(anchor="w", pady=3)
+                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).grid(row=0, column=0, sticky="w", pady=2)
         ctk.CTkCheckBox(opt_container, text="Separare Profile de Țevi", variable=self.nc_opt_separate_tubes,
                         fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
-                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).pack(anchor="w", pady=3)
+                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).grid(row=1, column=0, sticky="w", pady=2)
         ctk.CTkCheckBox(opt_container, text="Validare Geometrică (Erori 3D)", variable=self.nc_opt_verify_geometry,
                         fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
-                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).pack(anchor="w", pady=3)
+                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).grid(row=2, column=0, sticky="w", pady=2)
         ctk.CTkCheckBox(opt_container, text="Fără antet (header) în rapoarte Excel", variable=self.nc_opt_no_header,
                         fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
-                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).pack(anchor="w", pady=3)
+                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).grid(row=0, column=1, sticky="w", pady=2, padx=(10, 0))
         ctk.CTkCheckBox(opt_container, text="Fără culori în rapoarte Excel", variable=self.nc_opt_no_colors,
                         fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
-                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).pack(anchor="w", pady=3)
+                        text_color=_TEXT_PRI, font=("Segoe UI", 12)).grid(row=1, column=1, sticky="w", pady=2, padx=(10, 0))
 
         # ──── Start & Progress ────
         self.nc_start_btn = ctk.CTkButton(
@@ -1790,38 +2227,46 @@ class UnifiedApp(ctk.CTk):
             fg_color=_GREEN,
             hover_color=_GREEN_HOV,
             text_color="#0b0f19",
-            height=40,
-            corner_radius=12,
-            font=("Segoe UI", 16, "bold"),
+            height=38,
+            corner_radius=10,
+            font=("Segoe UI", 15, "bold"),
         )
-        self.nc_start_btn.grid(row=4, column=0, pady=(4, 8), sticky="ew")
+        self.nc_start_btn.grid(row=4, column=0, pady=(2, 4), sticky="ew")
 
         self.nc_progress_bar = ctk.CTkProgressBar(
-            container, progress_color=_ACCENT, fg_color=_ENTRY_BG, corner_radius=6, height=8
+            container, progress_color=_ACCENT, fg_color=_ENTRY_BG, corner_radius=6, height=6
         )
-        self.nc_progress_bar.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        self.nc_progress_bar.grid(row=5, column=0, sticky="ew", pady=(0, 4))
         self.nc_progress_bar.set(0)
 
         # ──── Log terminal ────
         log_card = self._make_card(container)
         log_card.grid(row=6, column=0, sticky="nsew", pady=(0, 0))
-        container.grid_rowconfigure(6, weight=1)
+        container.grid_rowconfigure(6, weight=1, minsize=100)
 
         self.nc_log_box = ctk.CTkTextbox(
             log_card, state="disabled", font=("Cascadia Code", 12),
             fg_color=_LOG_BG, text_color="#a3e635", corner_radius=8, border_width=0
         )
-        self.nc_log_box.pack(fill="both", expand=True, padx=10, pady=10)
+        self.nc_log_box.pack(fill="both", expand=True, padx=8, pady=8)
 
     def nc_browse_source(self):
-        folder = filedialog.askdirectory(title="Selectare Director Sursă")
+        """Browse source folder for NC Sorter (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.nc_source_folder.get())
+        folder = filedialog.askdirectory(title="Selectare Director Sursă", initialdir=initial)
         if folder:
-            self.nc_source_folder.set(folder)
+            norm = os.path.normpath(folder)
+            self.nc_source_folder.set(norm)
+            self._set_global_last_dir(norm)
 
     def nc_browse_excel(self):
-        file = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
+        """Browse BOM Excel for NC Sorter (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.nc_excel_file.get())
+        file = filedialog.askopenfilename(title="Selectare Fișier Excel BOM", initialdir=initial, filetypes=[("Excel files", "*.xlsx *.xls")])
         if file:
-            self.nc_excel_file.set(file)
+            norm = os.path.normpath(file)
+            self.nc_excel_file.set(norm)
+            self._set_global_last_dir(file)
 
     def nc_log(self, message):
         self.after(0, self._nc_insert_log, message)
@@ -1841,6 +2286,8 @@ class UnifiedApp(ctk.CTk):
             messagebox.showerror("Eroare", "Directorul sursă nu există.")
             return
 
+        if hasattr(self, "_update_tab_buttons_style"):
+            self._update_tab_buttons_style()
         self.save_settings()
         self.nc_start_btn.configure(state="disabled")
         self.nc_progress_bar.set(0)
@@ -1887,7 +2334,7 @@ class UnifiedApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════
     def create_mod_nc_tab(self):
         container = ctk.CTkFrame(self.tab_mod, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=10, pady=10)
+        container.pack(fill="both", expand=True, padx=12, pady=8)
         container.grid_columnconfigure(0, weight=1)
 
         subtitle_lbl = ctk.CTkLabel(
@@ -1896,72 +2343,91 @@ class UnifiedApp(ctk.CTk):
             font=("Segoe UI", 12),
             text_color=_TEXT_SEC,
         )
-        subtitle_lbl.grid(row=0, column=0, pady=(0, 10), sticky="w")
+        subtitle_lbl.grid(row=0, column=0, pady=(0, 6), sticky="w")
 
         # ──── Settings Card ────
         settings_card = self._make_card(container)
-        settings_card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        settings_card.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        settings_card.grid_columnconfigure(0, weight=0)
         settings_card.grid_columnconfigure(1, weight=1)
+        settings_card.grid_columnconfigure(2, weight=0)
 
-        ctk.CTkLabel(settings_card, text="⚙ Setări Globale", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, padx=16, pady=(10, 6), sticky="w")
+        ctk.CTkLabel(settings_card, text="⚙ Setări Globale", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
         
-        self._label(settings_card, text="Folder NC:").grid(row=1, column=0, padx=(16, 6), pady=6, sticky="w")
-        self._entry(settings_card, self.mod_nc_dir).grid(row=1, column=1, padx=4, pady=6, sticky="ew")
-        self._browse_btn(settings_card, self.mod_nc_browse_dir).grid(row=1, column=2, padx=(4, 16), pady=6)
+        self._label(settings_card, text="Folder NC:").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(settings_card, self.mod_nc_dir).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(settings_card, self.mod_nc_browse_dir).grid(row=1, column=2, padx=(4, 16), pady=4)
 
         cb_subfolder = ctk.CTkCheckBox(settings_card, text="Creează subfolder 'Modified' (copiază fișierele)", variable=self.mod_nc_create_subfolder)
-        cb_subfolder.grid(row=2, column=1, padx=4, pady=(6, 14), sticky="w")
+        cb_subfolder.grid(row=2, column=1, padx=4, pady=(4, 10), sticky="w")
 
         # ──── Actions Card ────
         actions_card = self._make_card(container)
-        actions_card.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        actions_card.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        actions_card.grid_columnconfigure(0, weight=0)
         actions_card.grid_columnconfigure(1, weight=1)
+        actions_card.grid_columnconfigure(2, weight=0)
 
         # A. Text Replace
-        ctk.CTkLabel(actions_card, text="A. Înlocuire Text", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, padx=16, pady=(10, 6), sticky="w")
+        ctk.CTkLabel(actions_card, text="A. Înlocuire Text", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
         
-        self._label(actions_card, text="Caută:").grid(row=1, column=0, padx=(16, 6), pady=6, sticky="w")
-        self._entry(actions_card, self.mod_nc_find).grid(row=1, column=1, padx=4, pady=6, sticky="ew")
-        self._label(actions_card, text="Înlocuiește:").grid(row=2, column=0, padx=(16, 6), pady=6, sticky="w")
-        self._entry(actions_card, self.mod_nc_replace).grid(row=2, column=1, padx=4, pady=6, sticky="ew")
-        btn_replace = ctk.CTkButton(actions_card, text="Înlocuiește Text", command=self.mod_nc_replace_text)
-        btn_replace.grid(row=1, column=2, rowspan=2, padx=(4, 16), pady=6)
+        self._label(actions_card, text="Caută:").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(actions_card, self.mod_nc_find).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self._label(actions_card, text="Înlocuiește:").grid(row=2, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(actions_card, self.mod_nc_replace).grid(row=2, column=1, padx=4, pady=4, sticky="ew")
+        btn_replace = ctk.CTkButton(actions_card, text="Înlocuiește Text", width=120, height=32, font=("Segoe UI", 12, "bold"), command=self.mod_nc_replace_text)
+        btn_replace.grid(row=1, column=2, rowspan=2, padx=(4, 16), pady=4)
 
         # B. Rectify Number
-        ctk.CTkLabel(actions_card, text="B. Rectificare Cantități din Excel", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).grid(row=3, column=0, columnspan=3, padx=16, pady=(10, 6), sticky="w")
-        self._label(actions_card, text="Fișier Excel:").grid(row=4, column=0, padx=(16, 6), pady=6, sticky="w")
-        self._entry(actions_card, self.mod_nc_excel).grid(row=4, column=1, padx=4, pady=6, sticky="ew")
-        self._browse_btn(actions_card, self.mod_nc_browse_excel).grid(row=4, column=2, padx=(4, 16), pady=6)
-        btn_rectify = ctk.CTkButton(actions_card, text="Rectifică Număr", command=self.mod_nc_rectify_qty)
-        btn_rectify.grid(row=5, column=1, padx=4, pady=(6, 14), sticky="w")
+        ctk.CTkLabel(actions_card, text="B. Rectificare Cantități din Excel", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI).grid(row=3, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
+        self._label(actions_card, text="Fișier Excel:").grid(row=4, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(actions_card, self.mod_nc_excel).grid(row=4, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(actions_card, self.mod_nc_browse_excel).grid(row=4, column=2, padx=(4, 16), pady=4)
+        btn_rectify = ctk.CTkButton(actions_card, text="Rectifică Număr", width=120, height=32, font=("Segoe UI", 12, "bold"), command=self.mod_nc_rectify_qty)
+        btn_rectify.grid(row=5, column=1, padx=4, pady=(4, 10), sticky="w")
 
-        # ──── Log box ────
+        # ──── Log terminal ────
+        log_card = self._make_card(container)
+        log_card.grid(row=3, column=0, sticky="nsew", pady=(0, 0))
+        container.grid_rowconfigure(3, weight=1, minsize=100)
+
         self.mod_nc_log_box = ctk.CTkTextbox(
-            container,
-            fg_color=_ENTRY_BG,
-            text_color=_TEXT_PRI,
-            border_color=_CARD_BORDER,
-            border_width=1,
+            log_card,
+            state="disabled",
+            fg_color=_LOG_BG,
+            text_color="#a3e635",
             corner_radius=8,
-            font=("Consolas", 12),
+            border_width=0,
+            font=("Cascadia Code", 12),
         )
-        self.mod_nc_log_box.grid(row=3, column=0, sticky="nsew", pady=(0, 0))
-        container.grid_rowconfigure(3, weight=1)
+        self.mod_nc_log_box.pack(fill="both", expand=True, padx=8, pady=8)
 
     def mod_nc_browse_dir(self):
-        d = filedialog.askdirectory(title="Selectează folderul cu fișiere NC")
+        """Browse NC folder for Modify NC (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.mod_nc_dir.get())
+        d = filedialog.askdirectory(title="Selectează folderul cu fișiere NC", initialdir=initial)
         if d:
-            self.mod_nc_dir.set(d)
+            norm = os.path.normpath(d)
+            self.mod_nc_dir.set(norm)
+            self._set_global_last_dir(norm)
 
     def mod_nc_browse_excel(self):
-        f = filedialog.askopenfilename(title="Selectează fișierul Excel cu cantități", filetypes=[("Excel", "*.xlsx *.xls")])
+        """Browse quantities Excel for Modify NC (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.mod_nc_excel.get())
+        f = filedialog.askopenfilename(title="Selectează fișierul Excel cu cantități", initialdir=initial, filetypes=[("Excel", "*.xlsx *.xls")])
         if f:
-            self.mod_nc_excel.set(f)
+            norm = os.path.normpath(f)
+            self.mod_nc_excel.set(norm)
+            self._set_global_last_dir(norm)
 
     def mod_nc_log(self, msg):
+        self.after(0, self._mod_nc_insert_log, msg)
+
+    def _mod_nc_insert_log(self, msg):
+        self.mod_nc_log_box.configure(state="normal")
         self.mod_nc_log_box.insert("end", msg + "\n")
         self.mod_nc_log_box.see("end")
-        self.update()
+        self.mod_nc_log_box.configure(state="disabled")
 
     def _mod_nc_get_files(self):
         folder = self.mod_nc_dir.get()
