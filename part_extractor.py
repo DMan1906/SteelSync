@@ -3,6 +3,7 @@ import re
 import shutil
 import threading
 import tkinter as tk
+from pdf_to_dwg import PdfToCadConverter
 from tkinter import filedialog, messagebox, ttk
 # pyrefly: ignore [missing-import]
 import customtkinter as ctk
@@ -384,18 +385,19 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # ─── Tab Configuration & Metadata ───────────────────────────────────────────
-DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder"]
+DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder", "pdf_to_dwg"]
 TAB_METADATA = {
     "extractor": {"title": "📄 File Extractor", "icon": "📄"},
     "nc_sorter": {"title": "🔧 NC Sorter", "icon": "🔧"},
     "mod_nc": {"title": "📝 Modify NC", "icon": "📝"},
     "dwg_finder": {"title": "🔍 DWG Finder", "icon": "🔍"},
+    "pdf_to_dwg": {"title": "📐 PDF to DWG", "icon": "📐"},
 }
 TAB_NAME_MAP = {
     "extractor": "extractor",
@@ -412,6 +414,11 @@ TAB_NAME_MAP = {
     "🔍 dwg finder": "dwg_finder",
     "cautare dwg": "dwg_finder",
     "căutare dwg": "dwg_finder",
+    "pdf_to_dwg": "pdf_to_dwg",
+    "pdf to dwg": "pdf_to_dwg",
+    "📐 pdf to dwg": "pdf_to_dwg",
+    "pdf2dwg": "pdf_to_dwg",
+    "cad generator": "pdf_to_dwg",
 }
 
 class _TabViewCompat:
@@ -1084,6 +1091,16 @@ class UnifiedApp(ctk.CTk):
         self.dwg_dest_dir = ctk.StringVar()
         self.dwg_source_type = ctk.StringVar(value="PDF (.pdf)")
         self.dwg_target_type = ctk.StringVar(value="DWG (.dwg)")
+
+        # ── PDF to DWG Variables ──
+        self.pdf_cad_mode = ctk.StringVar(value="Folder Întreg (Batch)")
+        self.pdf_cad_single_file = ctk.StringVar()
+        self.pdf_cad_batch_dir = ctk.StringVar()
+        self.pdf_cad_dest_dir = ctk.StringVar()
+        self.pdf_cad_format = ctk.StringVar(value="DWG (.dwg cu fallback .dxf)")
+        self.pdf_cad_oda_path = ctk.StringVar()
+        self.pdf_cad_only_front = ctk.BooleanVar(value=True)
+        self.pdf_cad_calibrate = ctk.BooleanVar(value=True)
         self.dwg_results = {"found": [], "missing": []}
         self._dwg_searching = False
         self._dwg_cancel_requested = False
@@ -1203,6 +1220,16 @@ class UnifiedApp(ctk.CTk):
             self.dwg_dest_dir.set(s.get("dwg_dest_dir", ""))
             self.dwg_source_type.set(s.get("dwg_source_type", "PDF (.pdf)"))
             self.dwg_target_type.set(s.get("dwg_target_type", "DWG (.dwg)"))
+
+            # PDF to DWG settings
+            self.pdf_cad_mode.set(s.get("pdf_cad_mode", "Folder Întreg (Batch)"))
+            self.pdf_cad_single_file.set(s.get("pdf_cad_single_file", ""))
+            self.pdf_cad_batch_dir.set(s.get("pdf_cad_batch_dir", ""))
+            self.pdf_cad_dest_dir.set(s.get("pdf_cad_dest_dir", ""))
+            self.pdf_cad_format.set(s.get("pdf_cad_format", "DWG (.dwg cu fallback .dxf)"))
+            self.pdf_cad_oda_path.set(s.get("pdf_cad_oda_path", ""))
+            self.pdf_cad_only_front.set(s.get("pdf_cad_only_front", True))
+            self.pdf_cad_calibrate.set(s.get("pdf_cad_calibrate", True))
 
             # Restore browse directory memories (Requirement #3)
             self.extractor_source_last_dir = s.get("extractor_source_last_dir", "")
@@ -1324,6 +1351,14 @@ class UnifiedApp(ctk.CTk):
             "dwg_dest_dir": self.dwg_dest_dir.get(),
             "dwg_source_type": self.dwg_source_type.get(),
             "dwg_target_type": self.dwg_target_type.get(),
+            "pdf_cad_mode": self.pdf_cad_mode.get(),
+            "pdf_cad_single_file": self.pdf_cad_single_file.get(),
+            "pdf_cad_batch_dir": self.pdf_cad_batch_dir.get(),
+            "pdf_cad_dest_dir": self.pdf_cad_dest_dir.get(),
+            "pdf_cad_format": self.pdf_cad_format.get(),
+            "pdf_cad_oda_path": self.pdf_cad_oda_path.get(),
+            "pdf_cad_only_front": self.pdf_cad_only_front.get(),
+            "pdf_cad_calibrate": self.pdf_cad_calibrate.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
             "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
@@ -1759,6 +1794,7 @@ class UnifiedApp(ctk.CTk):
         self.tab_nc = self.tab_frames["nc_sorter"]
         self.tab_mod = self.tab_frames["mod_nc"]
         self.tab_dwg = self.tab_frames["dwg_finder"]
+        self.tab_pdf_cad = self.tab_frames["pdf_to_dwg"]
 
         # Backwards-compatibility wrapper for any self.tabview.set calls
         _orig_tabview_set = self.tabview.set
@@ -1774,6 +1810,7 @@ class UnifiedApp(ctk.CTk):
         self.create_nc_sorter_tab()
         self.create_mod_nc_tab()
         self.create_dwg_finder_tab()
+        self.create_pdf_to_dwg_tab()
 
         self._setup_tabview_drag_and_drop()
 
@@ -2376,11 +2413,15 @@ class UnifiedApp(ctk.CTk):
         except Exception as e:
             self.log(f"  Eroare generare raport status ansambluri: {e}")
 
-    def find_matching_project_folders(self, parent_dir, search_term, max_depth=3):
+    def find_matching_project_folders(self, parent_dir, search_term, progress_callback=None):
         """
-        Scan parent_dir shallowly for project directories matching search_term as whole words.
-        Structure: FOLDER MAMA -> CLIENT -> PROIECT -> (does NOT search inside project files/subfolders).
+        Scan parent_dir strictly following the hierarchy:
+        FOLDER MAMA -> CLIENT -> PROIECT -> FISIERE PROIECT.
+        Searches ONLY for the project directory name and NEVER descends inside the project folder itself.
         """
+        if not parent_dir or not os.path.isdir(parent_dir):
+            return []
+
         tokens = [t.strip() for t in re.split(r'[\s\-_\.,\(\)\[\]]+', search_term) if t.strip()]
         if not tokens:
             return []
@@ -2395,42 +2436,45 @@ class UnifiedApp(ctk.CTk):
         matches = []
         parent_base = os.path.basename(parent_dir.rstrip('/\\'))
         if parent_base and match_name(parent_base):
-            matches.append(parent_dir)
+            return [parent_dir]
+
+        # Level 1: Direct children of parent_dir (Clients or direct Projects)
+        client_dirs = []
+        try:
+            with os.scandir(parent_dir) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if match_name(entry.name):
+                                matches.append(entry.path)
+                            else:
+                                client_dirs.append((entry.name, entry.path))
+                    except (PermissionError, OSError):
+                        continue
+        except (PermissionError, OSError) as e:
+            if progress_callback:
+                progress_callback(f"Eroare accesare folder mamă: {e}")
             return matches
 
-        # BFS shallow traversal (Level 0: Parent -> Level 1: Client -> Level 2: Project)
-        queue = [(parent_dir, 0)]
-        visited = set()
-
-        while queue:
-            curr_dir, depth = queue.pop(0)
-            norm_curr = os.path.normpath(curr_dir).lower()
-            if norm_curr in visited:
-                continue
-            visited.add(norm_curr)
+        # Level 2: Direct children of client folders (Projects)
+        total_clients = len(client_dirs)
+        for idx, (client_name, client_path) in enumerate(client_dirs, 1):
+            if progress_callback and (idx % 5 == 0 or idx == 1 or idx == total_clients):
+                progress_callback(f"Verificare client ({idx}/{total_clients}): {client_name}...")
 
             try:
-                with os.scandir(curr_dir) as it:
-                    subdirs = []
-                    for entry in it:
+                with os.scandir(client_path) as it:
+                    for proj_entry in it:
                         try:
-                            # Only check directories, skip all files instantly
-                            if entry.is_dir(follow_symlinks=False):
-                                subdirs.append((entry.name, entry.path))
+                            # IMPORTANT: Check directory name ONLY! NEVER scan inside proj_entry!
+                            if proj_entry.is_dir(follow_symlinks=False):
+                                if match_name(proj_entry.name):
+                                    if proj_entry.path not in matches:
+                                        matches.append(proj_entry.path)
                         except (PermissionError, OSError):
                             continue
             except (PermissionError, OSError):
                 continue
-
-            for name, path in subdirs:
-                if match_name(name):
-                    # Found project folder! DO NOT descend inside it!
-                    if path not in matches:
-                        matches.append(path)
-                else:
-                    # Descend only if depth allows (never descend beyond project level)
-                    if depth + 1 < max_depth:
-                        queue.append((path, depth + 1))
 
         return matches
 
@@ -2493,7 +2537,9 @@ class UnifiedApp(ctk.CTk):
 
         def _worker():
             try:
-                matches = self.find_matching_project_folders(parent_dir, search_term)
+                def _prog(msg):
+                    self.after(0, lambda m=msg: self.log(f"  {m}"))
+                matches = self.find_matching_project_folders(parent_dir, search_term, progress_callback=_prog)
             except Exception as e:
                 matches = []
                 self.log(f"Eroare căutare proiect: {e}")
@@ -3713,6 +3759,22 @@ class UnifiedApp(ctk.CTk):
         missing_hsb.grid(row=1, column=0, sticky="ew")
         self.dwg_missing_tree.bind("<Double-1>", self._on_missing_tree_double_click)
 
+        # Action bar under missing parts: generate DWG directly from PDF
+        missing_action_bar = ctk.CTkFrame(self.dwg_missing_frame, fg_color="transparent")
+        missing_action_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 2))
+
+        self.btn_gen_missing_dwg = ctk.CTkButton(
+            missing_action_bar,
+            text="⚡ Generează DWG pentru Piesele Lipsă (din PDF)",
+            font=("Segoe UI", 12, "bold"),
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            height=32,
+            corner_radius=8,
+            command=self.generate_dwg_for_missing_parts
+        )
+        self.btn_gen_missing_dwg.pack(side="left", padx=2)
+
         # View 3: Execution Log Terminal
         self.dwg_log_frame = ctk.CTkFrame(self.dwg_views_container, fg_color="transparent")
         self.dwg_log_frame.grid_rowconfigure(0, weight=1)
@@ -4376,6 +4438,339 @@ class UnifiedApp(ctk.CTk):
             messagebox.showinfo("Succes", f"Raportul Excel a fost salvat cu succes:\n{save_path}")
         except Exception as e:
             messagebox.showerror("Eroare", f"Nu s-a putut salva raportul Excel:\n{e}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  PDF TO CAD (DWG / DXF) GENERATOR
+    # ══════════════════════════════════════════════════════════════════════
+    def generate_dwg_for_missing_parts(self):
+        """Generate DWG/DXF files directly for missing parts identified in DWG Finder."""
+        items = self.dwg_missing_tree.get_children()
+        if not items:
+            messagebox.showinfo("Info", "Nu există piese lipsă în listă pentru a genera DWG-uri.")
+            return
+
+        missing_pdfs = []
+        pdf_dir = self.dwg_pdf_dir.get().strip()
+
+        for item_id in items:
+            vals = self.dwg_missing_tree.item(item_id, "values")
+            if vals and len(vals) >= 2:
+                pdf_name = vals[1]
+                if pdf_dir and os.path.isdir(pdf_dir):
+                    candidate = os.path.join(pdf_dir, pdf_name)
+                    if os.path.isfile(candidate):
+                        missing_pdfs.append(candidate)
+
+        if not missing_pdfs:
+            messagebox.showwarning("Atenție", "Nu s-au putut localiza fișierele PDF sursă pe disc în folderul specificat.")
+            return
+
+        dest_dir = self.dwg_dest_dir.get().strip()
+        if not dest_dir:
+            dest_dir = os.path.join(pdf_dir, "DWG_Gasite") if pdf_dir else os.getcwd()
+
+        os.makedirs(dest_dir, exist_ok=True)
+        self.dwg_change_view("log")
+        self.dwg_log(f"\n🚀 Generare automată CAD pentru {len(missing_pdfs)} piese lipsă din PDF...")
+
+        def _worker():
+            converter = PdfToCadConverter(oda_path=self.pdf_cad_oda_path.get().strip())
+            fmt = "dwg" if "dwg" in self.dwg_target_type.get().lower() else "dxf"
+            succ, fail, res = converter.convert_batch(
+                pdf_paths=missing_pdfs,
+                output_dir=dest_dir,
+                output_format=fmt,
+                only_front_view=True,
+                calibrate_1to1=True,
+                progress_callback=None,
+                log_callback=lambda m: self.after(0, lambda msg=m: self.dwg_log(msg))
+            )
+            def _done():
+                self.dwg_log(f"\n✅ Generare CAD finalizată: {succ} create cu succes, {fail} eșuate.")
+                messagebox.showinfo(
+                    "Generare CAD Finalizată",
+                    f"Au fost generate {succ} fișiere CAD pentru piesele lipsă în:\n{dest_dir}"
+                )
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def create_pdf_to_dwg_tab(self):
+        """Construct the UI for PDF to DWG/DXF 1:1 Generator tab."""
+        parent = self.tab_pdf_cad
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(3, weight=1)
+
+        # ── Card 1: Header / Description ──
+        hdr_card = ctk.CTkFrame(parent, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        hdr_card.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 8))
+        hdr_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(hdr_card, text="📐", font=("Segoe UI Emoji", 26)).grid(row=0, column=0, rowspan=2, padx=(16, 12), pady=10)
+        ctk.CTkLabel(hdr_card, text="PDF to DWG Generator (Geometrie 1:1 Fără Cote)", font=("Segoe UI", 15, "bold"), text_color=_TEXT_PRI).grid(row=0, column=1, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(
+            hdr_card,
+            text="Generează fișiere DWG/DXF conținând DOAR conturul piesei (fără cote, fără texte, fără cartuș), calibrate la scară reală 1:1 (mm).",
+            font=("Segoe UI", 11),
+            text_color=_TEXT_SEC,
+            wraplength=700,
+            justify="left"
+        ).grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+        # ── Card 2: Configuration Inputs ──
+        cfg_card = ctk.CTkFrame(parent, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        cfg_card.grid(row=1, column=0, sticky="ew", padx=16, pady=4)
+        cfg_card.grid_columnconfigure(1, weight=1)
+
+        # Row 0: Mode selection (Batch vs Single)
+        ctk.CTkLabel(cfg_card, text="Mod de Lucru:", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w", padx=14, pady=8)
+        self.pdf_cad_mode_seg = ctk.CTkSegmentedButton(
+            cfg_card,
+            values=["Folder Întreg (Batch)", "Fișier Unic (Single)"],
+            variable=self.pdf_cad_mode,
+            command=self._on_pdf_cad_mode_change,
+            selected_color=_ACCENT,
+            selected_hover_color=_ACCENT_HOV
+        )
+        self.pdf_cad_mode_seg.grid(row=0, column=1, sticky="w", padx=8, pady=8)
+
+        # Row 1: Source File / Folder
+        self.pdf_cad_src_lbl = ctk.CTkLabel(cfg_card, text="Folder PDF-uri:", font=("Segoe UI", 12))
+        self.pdf_cad_src_lbl.grid(row=1, column=0, sticky="w", padx=14, pady=6)
+
+        self.pdf_cad_src_entry = ctk.CTkEntry(cfg_card, textvariable=self.pdf_cad_batch_dir, height=32, corner_radius=6)
+        self.pdf_cad_src_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+
+        self.pdf_cad_src_btn = ctk.CTkButton(
+            cfg_card,
+            text="📁 Browse",
+            width=90,
+            height=32,
+            corner_radius=6,
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            command=self.browse_pdf_cad_source
+        )
+        self.pdf_cad_src_btn.grid(row=1, column=2, padx=(0, 14), pady=6)
+
+        # Row 2: Destination Folder
+        ctk.CTkLabel(cfg_card, text="Folder Destinație:", font=("Segoe UI", 12)).grid(row=2, column=0, sticky="w", padx=14, pady=6)
+        self.pdf_cad_dest_entry = ctk.CTkEntry(cfg_card, textvariable=self.pdf_cad_dest_dir, placeholder_text="Implicit: subfolder CAD_1to1 în folderul sursă", height=32, corner_radius=6)
+        self.pdf_cad_dest_entry.grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+
+        ctk.CTkButton(
+            cfg_card,
+            text="📁 Browse",
+            width=90,
+            height=32,
+            corner_radius=6,
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            command=self.browse_pdf_cad_dest
+        ).grid(row=2, column=2, padx=(0, 14), pady=6)
+
+        # Row 3: Format & Options
+        ctk.CTkLabel(cfg_card, text="Format Export:", font=("Segoe UI", 12)).grid(row=3, column=0, sticky="w", padx=14, pady=6)
+
+        fmt_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
+        fmt_frame.grid(row=3, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+
+        self.pdf_cad_fmt_opt = ctk.CTkOptionMenu(
+            fmt_frame,
+            values=["DWG (.dwg cu fallback .dxf)", "DXF (.dxf R2010)", "DWG Direct (necesită ODA)"],
+            variable=self.pdf_cad_format,
+            width=230,
+            height=30,
+            corner_radius=6
+        )
+        self.pdf_cad_fmt_opt.pack(side="left", padx=(0, 12))
+
+        ctk.CTkCheckBox(fmt_frame, text="Doar Vederea Principală (Front)", variable=self.pdf_cad_only_front).pack(side="left", padx=8)
+        ctk.CTkCheckBox(fmt_frame, text="Calibrare Automată 1:1 din Stykkliste", variable=self.pdf_cad_calibrate).pack(side="left", padx=8)
+
+        # Row 4: ODA Converter Configuration (Collapsible or optional)
+        oda_frame = ctk.CTkFrame(cfg_card, fg_color="#182335", corner_radius=6)
+        oda_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=14, pady=(6, 12))
+        oda_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(oda_frame, text="ODA File Converter (opțional pentru DWG nativ):", font=("Segoe UI", 11)).grid(row=0, column=0, sticky="w", padx=10, pady=6)
+        ctk.CTkEntry(oda_frame, textvariable=self.pdf_cad_oda_path, placeholder_text="Cale ODAFileConverter.exe (detectat automat dacă e instalat)", height=28, corner_radius=4).grid(row=0, column=1, sticky="ew", padx=8, pady=6)
+        ctk.CTkButton(oda_frame, text="📁 Browse", width=70, height=28, corner_radius=4, command=self.browse_pdf_cad_oda).grid(row=0, column=2, padx=4, pady=6)
+        ctk.CTkButton(oda_frame, text="🔍 Test ODA", width=75, height=28, corner_radius=4, command=self.test_oda_installation).grid(row=0, column=3, padx=(4, 10), pady=6)
+
+        # ── Card 3: Action & Progress ──
+        act_card = ctk.CTkFrame(parent, fg_color="transparent")
+        act_card.grid(row=2, column=0, sticky="ew", padx=16, pady=4)
+        act_card.grid_columnconfigure(0, weight=1)
+
+        self.btn_start_pdf_cad = ctk.CTkButton(
+            act_card,
+            text="🚀 Generează Fișiere CAD (DWG / DXF)",
+            font=("Segoe UI", 13, "bold"),
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            height=38,
+            corner_radius=8,
+            command=self.start_pdf_to_cad_process
+        )
+        self.btn_start_pdf_cad.pack(fill="x", pady=(2, 6))
+
+        self.pdf_cad_progress = ctk.CTkProgressBar(act_card, height=10, corner_radius=5)
+        self.pdf_cad_progress.pack(fill="x", pady=2)
+        self.pdf_cad_progress.set(0)
+
+        # ── Card 4: Terminal Log ──
+        log_frame = ctk.CTkFrame(parent, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        log_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(4, 12))
+        log_frame.grid_rowconfigure(0, weight=1)
+        log_frame.grid_columnconfigure(0, weight=1)
+
+        self.pdf_cad_log_box = ctk.CTkTextbox(
+            log_frame,
+            font=("Cascadia Code", 11),
+            fg_color=_LOG_BG,
+            text_color="#a3e635",
+            corner_radius=8
+        )
+        self.pdf_cad_log_box.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        # Update initial mode visibility
+        self._on_pdf_cad_mode_change()
+
+    def _on_pdf_cad_mode_change(self, val=None):
+        mode = self.pdf_cad_mode.get()
+        is_single = "single" in mode.lower()
+        if is_single:
+            self.pdf_cad_src_lbl.configure(text="Fișier PDF:")
+            self.pdf_cad_src_entry.configure(textvariable=self.pdf_cad_single_file)
+        else:
+            self.pdf_cad_src_lbl.configure(text="Folder PDF-uri:")
+            self.pdf_cad_src_entry.configure(textvariable=self.pdf_cad_batch_dir)
+
+    def browse_pdf_cad_source(self):
+        mode = self.pdf_cad_mode.get()
+        is_single = "single" in mode.lower()
+        if is_single:
+            f = filedialog.askopenfilename(
+                title="Selectează Fișier Desen PDF",
+                filetypes=[("Fișiere PDF", "*.pdf"), ("Toate Fișierele", "*.*")],
+                initialdir=getattr(self, "global_last_dir", None)
+            )
+            if f:
+                self.pdf_cad_single_file.set(f)
+                self._set_global_last_dir(f)
+        else:
+            d = filedialog.askdirectory(
+                title="Selectează Folderul cu Desene PDF",
+                initialdir=getattr(self, "global_last_dir", None)
+            )
+            if d:
+                self.pdf_cad_batch_dir.set(d)
+                self._set_global_last_dir(d)
+
+    def browse_pdf_cad_dest(self):
+        d = filedialog.askdirectory(
+            title="Selectează Folderul Destinație pentru CAD",
+            initialdir=getattr(self, "global_last_dir", None)
+        )
+        if d:
+            self.pdf_cad_dest_dir.set(d)
+            self._set_global_last_dir(d)
+
+    def browse_pdf_cad_oda(self):
+        f = filedialog.askopenfilename(
+            title="Selectează Executabilul ODAFileConverter.exe",
+            filetypes=[("Executabil ODA", "ODAFileConverter.exe"), ("Aplicații", "*.exe")]
+        )
+        if f:
+            self.pdf_cad_oda_path.set(f)
+
+    def test_oda_installation(self):
+        oda_path = self.pdf_cad_oda_path.get().strip() or None
+        converter = PdfToCadConverter(oda_path=oda_path)
+        if converter.has_oda():
+            messagebox.showinfo("Status ODA", "✅ ODA File Converter este configurat și funcțional! Puteți genera direct fișiere .DWG native.")
+        else:
+            messagebox.showwarning(
+                "Status ODA",
+                "⚠ ODA File Converter nu a fost detectat.\n\nAplicația va genera fișiere .DXF 1:1 native (compatibile cu orice versiune de AutoCAD/CAD).\n\nDacă doriți salvarea directă ca .DWG nativ, instalați 'ODA File Converter'."
+            )
+
+    def pdf_cad_log(self, msg):
+        if hasattr(self, "pdf_cad_log_box"):
+            self.pdf_cad_log_box.insert("end", msg + "\n")
+            self.pdf_cad_log_box.see("end")
+
+    def start_pdf_to_cad_process(self):
+        """Handler for generating CAD files asynchronously."""
+        if not PdfToCadConverter.is_available():
+            messagebox.showerror("Eroare", "Librăriile 'pymupdf' și 'ezdxf' nu sunt disponibile.")
+            return
+
+        mode = self.pdf_cad_mode.get()
+        is_single = "single" in mode.lower()
+
+        if is_single:
+            single_f = self.pdf_cad_single_file.get().strip()
+            if not single_f or not os.path.isfile(single_f):
+                messagebox.showerror("Eroare", "Te rog selectează un fișier PDF valid.")
+                return
+            target_files = [single_f]
+            dest_dir = self.pdf_cad_dest_dir.get().strip() or os.path.join(os.path.dirname(single_f), "CAD_1to1")
+        else:
+            batch_d = self.pdf_cad_batch_dir.get().strip()
+            if not batch_d or not os.path.isdir(batch_d):
+                messagebox.showerror("Eroare", "Te rog selectează un folder valid cu fișiere PDF.")
+                return
+            target_files = [
+                os.path.join(batch_d, f)
+                for f in sorted(os.listdir(batch_d))
+                if f.lower().endswith(".pdf") and os.path.isfile(os.path.join(batch_d, f))
+            ]
+            if not target_files:
+                messagebox.showwarning("Atenție", "Nu s-au găsit fișiere .pdf în folderul selectat.")
+                return
+            dest_dir = self.pdf_cad_dest_dir.get().strip() or os.path.join(batch_d, "CAD_1to1")
+
+        os.makedirs(dest_dir, exist_ok=True)
+        raw_fmt = self.pdf_cad_format.get().lower()
+        export_fmt = "dxf" if "dxf" in raw_fmt else "dwg"
+        only_front = self.pdf_cad_only_front.get()
+        calibrate = self.pdf_cad_calibrate.get()
+        oda_path = self.pdf_cad_oda_path.get().strip()
+
+        self.btn_start_pdf_cad.configure(state="disabled", text="⏳ Generare în curs...")
+        self.pdf_cad_progress.set(0)
+        self.pdf_cad_log_box.delete("1.0", "end")
+        self.pdf_cad_log(f"🚀 Începere conversie CAD ({len(target_files)} fișiere)...")
+        self.pdf_cad_log(f"📁 Destinație: {dest_dir}\n")
+
+        def _worker():
+            converter = PdfToCadConverter(oda_path=oda_path)
+            succ, fail, res = converter.convert_batch(
+                pdf_paths=target_files,
+                output_dir=dest_dir,
+                output_format=export_fmt,
+                only_front_view=only_front,
+                calibrate_1to1=calibrate,
+                progress_callback=lambda p: self.after(0, lambda val=p: self.pdf_cad_progress.set(val)),
+                log_callback=lambda m: self.after(0, lambda msg=m: self.pdf_cad_log(msg))
+            )
+            self.after(0, lambda: self._on_pdf_cad_process_complete(succ, fail, dest_dir))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_pdf_cad_process_complete(self, succ, fail, dest_dir):
+        self.btn_start_pdf_cad.configure(state="normal", text="🚀 Generează Fișiere CAD (DWG / DXF)")
+        self.pdf_cad_progress.set(1.0)
+        self.pdf_cad_log(f"\n{'='*50}")
+        self.pdf_cad_log(f"✅ Conversie finalizată: {succ} fișiere generate cu succes, {fail} eșuate.")
+        self.pdf_cad_log(f"📁 Director rezultate: {dest_dir}")
+        messagebox.showinfo(
+            "Conversie Finalizată",
+            f"Procesul de generare CAD a fost finalizat!\n\nSucces: {succ} fișiere\nEșuate: {fail}\n\nLocație: {dest_dir}"
+        )
+
 
     # ══════════════════════════════════════════════════════════════════════
     #  NC SORTING LOGIC

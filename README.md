@@ -1,13 +1,13 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.5.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.1/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.5.1)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.6.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.6.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.6.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.5.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.1/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.6.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.6.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
-**SteelSync Toolkit** este o aplicație desktop completă pentru industria construcțiilor metalice: căutare și extragere DWG-uri, sortarea și prelucrarea fișierelor NC/NC1 (FICEP, Voortman etc.) și managementul desenelor tehnice.
+**SteelSync Toolkit** este o aplicație desktop completă pentru industria construcțiilor metalice: generare CAD 1:1 din desene PDF (fără cote), căutare și extragere DWG-uri, sortarea și prelucrarea fișierelor NC/NC1 (FICEP, Voortman etc.) și managementul desenelor tehnice.
 
 ## 📦 Descărcare și Rulare
 1. Mergi la secțiunea **[Releases](https://github.com/DMan1906/SteelSync/releases)** din bara laterală dreapta (sau click pe butonul de mai sus).
@@ -16,21 +16,28 @@
 
 ## 🚀 Funcționalități
 
-- **⚡ Căutare Asincronă și Rapidă a Folderului de Proiect (NOU în v1.5.1)**:
-  - Căutarea după `Nr. / Denumire Proiect` rulează complet asincron pe un thread dedicat de fundal, eliminând complet blocarea/înghețarea interfeței grafice pe drive-uri de rețea (`Q:\...`).
-  - Scanare inteligentă pe structura specifică `Folder Mamă -> Client -> Proiect`: localizează directorul proiectului fără a scana inutil în interiorul fișierelor de proiect, oferind rezultate aproape instantanee.
+- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (NOU în v1.6.0)**:
+  - Modul dedicat și tab nou în aplicație: convertește automat desenele tehnice de execuție PDF în fișiere CAD (`.dwg` / `.dxf`) la scară reală **1:1 (milimetri)**.
+  - **Filtrare Geometrie Pură:** Elimină automat toate cotele, liniile de cotă, săgețile, textele, simbolurile de secțiune și cartușul desenului, păstrând doar conturul piesei și decupajele interioare.
+  - **Calibrare Automată:** Extrage automat metadatele din tabelul `STYKKLISTE` (dimensiuni nominale profil/lungime, scară) și calibrează geometria la milimetru, mutând colțul stânga-jos în originea CAD `(0, 0)`.
+  - Suport **Single (Fișier Unic)** și **Batch (Folder Întreg de PDF-uri)**.
+  - **Generare DWG directă din `DWG Finder`:** Piesele identificate ca lipsă pot fi transformate direct în DWG-uri curate printr-un singur click pe butonul `⚡ Generează DWG pentru Piesele Lipsă (din PDF)`.
+  - Suport nativ pentru `.dxf` (R2010, compatibil cu orice versiune de AutoCAD/CAD) și export `.dwg` nativ prin integrare directă cu ODA File Converter.
+- **⚡ Căutare Rapidă și Sigură a Folderului de Proiect (v1.6.0)**:
+  - Căutarea după `Nr. / Denumire Proiect` rulează complet asincron pe un thread dedicat de fundal, eliminând orice înghețare a interfeței pe drive-uri de rețea (`Q:\...`).
+  - Scanare inteligentă pe structura specifică `Folder Mamă -> Client -> Proiect`: localizează directorul proiectului fără a intra niciodată în interiorul fișierelor sau subfolderelor de proiect, oferind rezultate aproape instantanee.
 - **📑 Extracție Desene de Ansamblu din Excel Ansambluri (v1.5.0)**:
   - Opțiune dedicată în `File Extractor` pentru parsarea automată a fișierelor Excel cu ansambluri (Assembly Part List, ex. `1242 - 48.2 Fiskebrygga A4.xlsx`).
   - Auto-detecție inteligentă a coloanei de ansamblu (`Denumire ansamblu` / Coloana B), ignorând sub-piesele și rândurile de sumar.
   - Căutare recursivă cu toleranță la cratimă/revizii și salvare automată în subfolderul dedicat `Destinație/Desene Ansamblu`.
   - Generare raport detaliat `Raport_Status_Ansambluri.xlsx` cu evidențierea stadiului fiecărui ansamblu (GĂSIT / LIPSĂ).
-- **⚡ Optimizare Redimensionare și UI Fluid (NOU în v1.5.0)**:
+- **⚡ Optimizare Redimensionare și UI Fluid**:
   - Debounce inteligent la resize pentru o experiență 60+ FPS complet lipsită de sacadare/lag la tragerea marginilor ferestrei.
   - Layout pe rânduri fluid pentru `Extensii Fișiere`: toate extensiile și butonul `+ Add` încap impecabil pe o singură linie și se pliază/depliază natural fără goluri sau butoane tăiate.
   - Design îmbunătățit al barei de navigare/tab-uri fără artefacte vizuale sau halo-uri gri decalate.
-- **🔍 DWG / Desene Finder (Extins în v1.4.0)** – Identifică și extrage automat desenele tehnice existente (`.dwg` și/sau `.pdf`) într-un arbore de clienți/proiecte:
-  - **Suport Piese Sursă Flexibil (NOU în v1.4.0):** Posibilitate de alegere între fișiere piese **PDF (`.pdf`)**, **NC / NC1 (`.nc`, `.nc1`)** sau **Auto (Toate)**. Când ai doar fișiere NC/NC1, programul preia automat denumirile/codurile pieselor din acestea și caută desenele corespunzătoare în proiect.
-  - **Format Desen Căutat în Proiect (NOU în v1.4.0):** Posibilitate de selecție între căutarea de **DWG (`.dwg`)**, **PDF (`.pdf`)** sau **Ambele (`.dwg` & `.pdf`)**.
+- **🔍 DWG / Desene Finder** – Identifică și extrage automat desenele tehnice existente (`.dwg` și/sau `.pdf`) într-un arbore de clienți/proiecte:
+  - **Suport Piese Sursă Flexibil:** Posibilitate de alegere între fișiere piese **PDF (`.pdf`)**, **NC / NC1 (`.nc`, `.nc1`)** sau **Auto (Toate)**. Când ai doar fișiere NC/NC1, programul preia automat denumirile/codurile pieselor din acestea și caută desenele corespunzătoare în proiect.
+  - **Format Desen Căutat în Proiect:** Posibilitate de selecție între căutarea de **DWG (`.dwg`)**, **PDF (`.pdf`)** sau **Ambele (`.dwg` & `.pdf`)**.
   - **Păstrare subfoldere de grosimi:** Recunoaște și organizează automat fișierele în subfoldere de grosimi identice cu cele din proiect (`t10`, `t5`, `10`, `PL12` etc.).
   - **Suport complet pentru variații piese:** Trage automat toate variațiile aceluiași cod de piesă (ex: pentru `DSBO2014`, extrage `DSBO2014`, `DSBO2014T`, `DSBO2014C`, `DSBO2014L1`, excluzând fals-pozitivele numerice precum `DSBO20145`).
   - **Scanare recursivă completă:** Parcurge toate subdirectoarele până la capăt (`followlinks=True`), fără limite arbitrare de adâncime.
@@ -42,27 +49,8 @@
 - **Sistem Auto-Update inteligent** – Verifică automat versiunile noi din GitHub Release la pornire (fără blocaje, 100% silențios când ești offline). Actualizare cu un singur click fără pierderea portabilității.
 - **Reordonare Tab-uri Floating prin Drag & Drop** – Tab-urile își păstrează estetica nativă flotantă (floating pills) și pot fi reordonate direct prin Drag & Drop cu mouse-ul (sau prin click-dreapta / scurtături). Ordinea preferată se salvează automat și este reținută la repornire.
 - **Memorii Independente pentru Browse** – Câmpul `Sursă` din `File Extractor` are memorie proprie izolată (`extractor_source_last_dir`), în timp ce toate celelalte butoane `Browse` partajează o memorie globală independentă (`global_last_dir`).
-- **Design Complet Responsiv & Randare Ultra-Fluidă** – Fără sacadări la redimensionarea ferestrei (motor optimizat de randare nativă și debouncing). Elementele din cardul de extensii se adaptează dinamic și urcă pe rândurile superioare când au spațiu disponibil, iar câmpurile de input se extind proporțional (`minsize: 900x650`).
 - **File Extractor** – Caută și copiază fișierele unui proiect pe baza unei liste Excel (BOM).
 - **NC Sorter** – Sortează fișierele .nc/.nc1 în foldere după tipul profilului:
   - PLĂCI (S235, S355, Z35, INOX, ALUMINIU)
   - PROFILE (HEA, HEB, IPE, UPN etc.)
   - BARE
-  - CHESON (HSQEN, HSQ)
-  - ȚEVI / T-URI / ȘINE
-- **Modify NC** – Înlocuire text în masă în fișierele NC, ajustare automată a cantităților.
-
-## 🏷️ Versiune curentă
-
-**v1.4.0**
-
-## 📖 Ghid Dezvoltare și Reguli Versionare
-Pentru ghidul complet de update și convențiile SemVer (`x.y.z`) dedicate dezvoltatorilor și agenților AI, consultă [AGENTS.md](AGENTS.md).
-
-## Build
-
-Aplicația este compilată cu PyInstaller:
-
-```powershell
-python -m PyInstaller SteelSync.spec --noconfirm
-```
