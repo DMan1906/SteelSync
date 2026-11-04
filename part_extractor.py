@@ -3,7 +3,7 @@ import re
 import shutil
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 # pyrefly: ignore [missing-import]
 import customtkinter as ctk
 from pathlib import Path
@@ -286,6 +286,50 @@ def safe_write_lines(dest_path, lines):
     remove_readonly(path_str)
 
 
+def extract_pdf_header_part_code(pdf_path, known_keys=None):
+    """
+    Safely extract part code or title block information from PDF using pypdf.
+    Looks for headers like 'STYKKLISTE FOR <COD>', 'POS <COD>', etc.
+    """
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(str(pdf_path))
+        if not reader.pages:
+            return None
+        for page in reader.pages[:2]:
+            text = page.extract_text() or ""
+            if not text:
+                continue
+            
+            m = re.search(r'STYKKLISTE\s+FOR\s+([A-Za-z0-9\-_]+)', text, re.IGNORECASE)
+            if m:
+                clean = re.sub(r'[^A-Za-z0-9]', '', m.group(1)).upper()
+                if clean:
+                    return clean
+            
+            m = re.search(r'\bPOS\.?\s*[:\-]?\s*([A-Za-z0-9\-_]+)', text, re.IGNORECASE)
+            if m:
+                clean = re.sub(r'[^A-Za-z0-9]', '', m.group(1)).upper()
+                if clean:
+                    return clean
+
+            m = re.search(r'(?:TEGNINGSNUMMER|TEGN\.?\s*NR\.?|DRAWING\s*NO\.?)\s*[:\-]?\s*([A-Za-z0-9\-_]+)', text, re.IGNORECASE)
+            if m:
+                clean = re.sub(r'[^A-Za-z0-9]', '', m.group(1)).upper()
+                if clean:
+                    return clean
+                    
+            if known_keys:
+                clean_text = re.sub(r'[^A-Za-z0-9]', '', text).upper()
+                for k in sorted(known_keys, key=len, reverse=True):
+                    pattern = rf'(?<![A-Za-z0-9]){re.escape(k)}(?!\d)'
+                    if re.search(pattern, clean_text):
+                        return k
+    except Exception:
+        pass
+    return None
+
+
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
     if hasattr(sys, '_MEIPASS'):
@@ -322,17 +366,18 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.2.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # ─── Tab Configuration & Metadata ───────────────────────────────────────────
-DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc"]
+DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder"]
 TAB_METADATA = {
     "extractor": {"title": "📄 File Extractor", "icon": "📄"},
     "nc_sorter": {"title": "🔧 NC Sorter", "icon": "🔧"},
     "mod_nc": {"title": "📝 Modify NC", "icon": "📝"},
+    "dwg_finder": {"title": "🔍 DWG Finder", "icon": "🔍"},
 }
 TAB_NAME_MAP = {
     "extractor": "extractor",
@@ -344,6 +389,11 @@ TAB_NAME_MAP = {
     "mod_nc": "mod_nc",
     "modify nc": "mod_nc",
     "📝 modify nc": "mod_nc",
+    "dwg_finder": "dwg_finder",
+    "dwg finder": "dwg_finder",
+    "🔍 dwg finder": "dwg_finder",
+    "cautare dwg": "dwg_finder",
+    "căutare dwg": "dwg_finder",
 }
 
 class _TabViewCompat:
@@ -878,6 +928,15 @@ class UnifiedApp(ctk.CTk):
         self.mod_nc_excel = ctk.StringVar()
         self.mod_nc_create_subfolder = ctk.BooleanVar(value=True)
 
+        # ── DWG Finder Variables ──
+        self.dwg_parent_dir = ctk.StringVar()
+        self.dwg_proj_num = ctk.StringVar()
+        self.dwg_pdf_dir = ctk.StringVar()
+        self.dwg_dest_dir = ctk.StringVar()
+        self.dwg_results = {"found": [], "missing": []}
+        self._dwg_searching = False
+        self._dwg_cancel_requested = False
+
         # ── Extension tracking ──
         self.available_extensions = ['.nc', '.pdf', '.dwg', '.dxf', '.step', '.stp']
         self.extension_vars = {}
@@ -980,6 +1039,12 @@ class UnifiedApp(ctk.CTk):
             self.mod_nc_replace.set(s.get("mod_nc_replace", ""))
             self.mod_nc_excel.set(s.get("mod_nc_excel", ""))
             self.mod_nc_create_subfolder.set(s.get("mod_nc_create_subfolder", True))
+
+            # DWG Finder settings
+            self.dwg_parent_dir.set(s.get("dwg_parent_dir", ""))
+            self.dwg_proj_num.set(s.get("dwg_proj_num", ""))
+            self.dwg_pdf_dir.set(s.get("dwg_pdf_dir", ""))
+            self.dwg_dest_dir.set(s.get("dwg_dest_dir", ""))
 
             # Restore browse directory memories (Requirement #3)
             self.extractor_source_last_dir = s.get("extractor_source_last_dir", "")
@@ -1090,6 +1155,10 @@ class UnifiedApp(ctk.CTk):
             "mod_nc_replace": self.mod_nc_replace.get(),
             "mod_nc_excel": self.mod_nc_excel.get(),
             "mod_nc_create_subfolder": self.mod_nc_create_subfolder.get(),
+            "dwg_parent_dir": self.dwg_parent_dir.get(),
+            "dwg_proj_num": self.dwg_proj_num.get(),
+            "dwg_pdf_dir": self.dwg_pdf_dir.get(),
+            "dwg_dest_dir": self.dwg_dest_dir.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
             "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
@@ -1110,6 +1179,8 @@ class UnifiedApp(ctk.CTk):
         ctk.set_appearance_mode(self.appearance_mode_var.get())
         if hasattr(self, "_update_tab_buttons_style"):
             self._update_tab_buttons_style()
+        if hasattr(self, "_setup_treeview_styles"):
+            self._setup_treeview_styles()
         self.save_settings()
 
     def on_close(self):
@@ -1513,6 +1584,7 @@ class UnifiedApp(ctk.CTk):
         self.tab_ext = self.tab_frames["extractor"]
         self.tab_nc = self.tab_frames["nc_sorter"]
         self.tab_mod = self.tab_frames["mod_nc"]
+        self.tab_dwg = self.tab_frames["dwg_finder"]
 
         # Backwards-compatibility wrapper for any self.tabview.set calls
         _orig_tabview_set = self.tabview.set
@@ -1527,6 +1599,7 @@ class UnifiedApp(ctk.CTk):
         self.create_extractor_tab()
         self.create_nc_sorter_tab()
         self.create_mod_nc_tab()
+        self.create_dwg_finder_tab()
 
         self._setup_tabview_drag_and_drop()
 
@@ -2581,6 +2654,849 @@ class UnifiedApp(ctk.CTk):
         ensure_full_permissions_tree(out_folder)
         self.mod_nc_log("🔒 Permisiuni asigurate: Toate aplicațiile au acces complet (citire/scriere).")
         self.mod_nc_log(f"Proces finalizat. {modified_count} fișiere modificate.\n")
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  DWG FINDER TAB & METHODS
+    # ══════════════════════════════════════════════════════════════════════
+    def _setup_treeview_styles(self):
+        """Configure ttk Treeview styles to integrate smoothly with Dark / Light appearance."""
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        is_dark = (self.appearance_mode_var.get() == "Dark")
+        bg_tree = "#0d1b2a" if is_dark else "#ffffff"
+        fg_tree = "#e0e0e0" if is_dark else "#1c1c1e"
+        hdr_bg = "#16213e" if is_dark else "#e5e5ea"
+        hdr_fg = "#00b4d8" if is_dark else "#005bb5"
+        sel_bg = "#007aff"
+
+        style.configure(
+            "DWG.Treeview",
+            background=bg_tree,
+            foreground=fg_tree,
+            fieldbackground=bg_tree,
+            font=("Segoe UI", 10),
+            rowheight=26,
+            borderwidth=0,
+        )
+        style.configure(
+            "DWG.Treeview.Heading",
+            background=hdr_bg,
+            foreground=hdr_fg,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+        )
+        style.map(
+            "DWG.Treeview",
+            background=[("selected", sel_bg)],
+            foreground=[("selected", "#ffffff")]
+        )
+        style.map(
+            "DWG.Treeview.Heading",
+            background=[("active", hdr_bg)],
+            foreground=[("active", hdr_fg)]
+        )
+
+    def create_dwg_finder_tab(self):
+        """Construct the layout for the DWG Finder tab."""
+        self._setup_treeview_styles()
+
+        container = ctk.CTkFrame(self.tab_dwg, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=12, pady=8)
+        container.grid_columnconfigure(0, weight=1)
+        container.grid_rowconfigure(5, weight=1)
+
+        subtitle_lbl = ctk.CTkLabel(
+            container,
+            text="Caută și extrage desene DWG existente în arborele de proiecte pe baza pieselor PDF",
+            font=("Segoe UI", 12),
+            text_color=_TEXT_SEC,
+        )
+        subtitle_lbl.grid(row=0, column=0, pady=(0, 6), sticky="w")
+
+        # ──── Card 1: Director Mamă & Proiect ────
+        proj_card = self._make_card(container)
+        proj_card.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        proj_card.grid_columnconfigure(0, weight=0)
+        proj_card.grid_columnconfigure(1, weight=1)
+        proj_card.grid_columnconfigure(2, weight=0)
+
+        ctk.CTkLabel(
+            proj_card, text="🏢 Director Mamă & Număr Proiect",
+            font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI
+        ).grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
+
+        self._label(proj_card, text="Director Mamă:").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(proj_card, self.dwg_parent_dir).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(proj_card, self.dwg_browse_parent_dir).grid(row=1, column=2, padx=(4, 16), pady=4)
+
+        self._label(proj_card, text="Număr Proiect:").grid(row=2, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
+        proj_inner = ctk.CTkFrame(proj_card, fg_color="transparent")
+        proj_inner.grid(row=2, column=1, columnspan=2, padx=4, pady=(4, 10), sticky="w")
+        self._entry(proj_inner, self.dwg_proj_num, placeholder_text="ex: 1242", width=140).pack(side="left", padx=(0, 10))
+        self._label(proj_inner, text="(scanează automat folderele care conțin acest număr de proiect)", font=("Segoe UI", 11), text_color=_TEXT_SEC).pack(side="left")
+
+        # ──── Card 2: Piese PDF & Destinație ────
+        files_card = self._make_card(container)
+        files_card.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        files_card.grid_columnconfigure(0, weight=0)
+        files_card.grid_columnconfigure(1, weight=1)
+        files_card.grid_columnconfigure(2, weight=0)
+
+        ctk.CTkLabel(
+            files_card, text="📁 Piese de Desenat (PDF) & Folder Salvare",
+            font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI
+        ).grid(row=0, column=0, columnspan=3, padx=16, pady=(8, 4), sticky="w")
+
+        self._label(files_card, text="Folder Piese (PDF):").grid(row=1, column=0, padx=(16, 6), pady=4, sticky="w")
+        self._entry(files_card, self.dwg_pdf_dir).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+        self._browse_btn(files_card, self.dwg_browse_pdf_dir).grid(row=1, column=2, padx=(4, 16), pady=4)
+
+        self._label(files_card, text="Folder Destinație:").grid(row=2, column=0, padx=(16, 6), pady=(4, 10), sticky="w")
+        self._entry(files_card, self.dwg_dest_dir, placeholder_text="Opțional: implicit subdirector 'DWG_Gasite' în folderul cu PDF-uri").grid(row=2, column=1, padx=4, pady=(4, 10), sticky="ew")
+        self._browse_btn(files_card, self.dwg_browse_dest_dir).grid(row=2, column=2, padx=(4, 16), pady=(4, 10))
+
+        # ──── Action Row ────
+        action_box = ctk.CTkFrame(container, fg_color="transparent")
+        action_box.grid(row=3, column=0, sticky="ew", pady=(2, 4))
+        action_box.grid_columnconfigure(0, weight=1)
+        action_box.grid_columnconfigure(1, weight=0)
+
+        self.dwg_start_btn = ctk.CTkButton(
+            action_box,
+            text="▶ Caută și Copiază DWG-uri Existente",
+            command=self.dwg_start_search,
+            fg_color=_GREEN,
+            hover_color=_GREEN_HOV,
+            text_color="#0b0f19",
+            height=38,
+            corner_radius=10,
+            font=("Segoe UI", 15, "bold"),
+        )
+        self.dwg_start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        self.dwg_cancel_btn = ctk.CTkButton(
+            action_box,
+            text="⏹ Oprește",
+            command=self.dwg_cancel_search,
+            fg_color=_ENTRY_BG,
+            hover_color=_DANGER,
+            text_color=_TEXT_PRI,
+            width=100,
+            height=38,
+            corner_radius=10,
+            font=("Segoe UI", 13, "bold"),
+            state="disabled",
+        )
+        self.dwg_cancel_btn.grid(row=0, column=1, sticky="e")
+
+        # Progress bar & Status label
+        self.dwg_progress_bar = ctk.CTkProgressBar(
+            container, progress_color=_ACCENT, fg_color=_ENTRY_BG, corner_radius=6, height=6
+        )
+        self.dwg_progress_bar.grid(row=4, column=0, sticky="ew", pady=(0, 4))
+        self.dwg_progress_bar.set(0)
+
+        # ──── Card 3: Results & Logs (Expands vertically) ────
+        results_card = self._make_card(container)
+        results_card.grid(row=5, column=0, sticky="nsew", pady=(0, 0))
+
+        # Top Bar inside Results Card
+        res_hdr = ctk.CTkFrame(results_card, fg_color="transparent")
+        res_hdr.pack(fill="x", padx=10, pady=(8, 6))
+
+        self.dwg_view_seg = ctk.CTkSegmentedButton(
+            res_hdr,
+            values=["🟢 Găsite (0)", "🔴 Lipsă (0)", "📜 Jurnal"],
+            command=self.dwg_change_view,
+            font=("Segoe UI", 12, "bold"),
+        )
+        self.dwg_view_seg.pack(side="left")
+        self.dwg_view_seg.set("🟢 Găsite (0)")
+
+        self.dwg_open_dest_btn = ctk.CTkButton(
+            res_hdr,
+            text="📂 Deschide Destinația",
+            width=140,
+            height=30,
+            fg_color=_ENTRY_BG,
+            hover_color=_ACCENT,
+            text_color=_TEXT_PRI,
+            font=("Segoe UI", 11, "bold"),
+            command=self.dwg_open_destination,
+            state="disabled",
+        )
+        self.dwg_open_dest_btn.pack(side="right", padx=(6, 0))
+
+        self.dwg_export_excel_btn = ctk.CTkButton(
+            res_hdr,
+            text="📊 Export Excel",
+            width=120,
+            height=30,
+            fg_color=_ENTRY_BG,
+            hover_color=_GREEN,
+            text_color=_TEXT_PRI,
+            font=("Segoe UI", 11, "bold"),
+            command=self.dwg_export_excel_report,
+            state="disabled",
+        )
+        self.dwg_export_excel_btn.pack(side="right", padx=(6, 0))
+
+        self.dwg_copy_missing_btn = ctk.CTkButton(
+            res_hdr,
+            text="📋 Copiază Piesele Lipsă",
+            width=160,
+            height=30,
+            fg_color=_ENTRY_BG,
+            hover_color=_ORANGE,
+            text_color=_TEXT_PRI,
+            font=("Segoe UI", 11, "bold"),
+            command=self.dwg_copy_missing_pieces,
+            state="disabled",
+        )
+        self.dwg_copy_missing_btn.pack(side="right")
+
+        # Container for views
+        self.dwg_views_container = ctk.CTkFrame(results_card, fg_color="transparent")
+        self.dwg_views_container.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.dwg_views_container.grid_rowconfigure(0, weight=1)
+        self.dwg_views_container.grid_columnconfigure(0, weight=1)
+
+        # View 1: Found DWGs Table
+        self.dwg_found_frame = ctk.CTkFrame(self.dwg_views_container, fg_color="transparent")
+        self.dwg_found_frame.grid_rowconfigure(0, weight=1)
+        self.dwg_found_frame.grid_columnconfigure(0, weight=1)
+
+        found_cols = ("piece_code", "pdf_file", "dwg_file", "source_dir")
+        self.dwg_found_tree = ttk.Treeview(
+            self.dwg_found_frame,
+            columns=found_cols,
+            show="headings",
+            style="DWG.Treeview",
+            selectmode="browse",
+        )
+        self.dwg_found_tree.heading("piece_code", text="Cod Piesă")
+        self.dwg_found_tree.heading("pdf_file", text="Fișier PDF (Desenat)")
+        self.dwg_found_tree.heading("dwg_file", text="Fișier DWG Găsit")
+        self.dwg_found_tree.heading("source_dir", text="Folder Sursă în Proiect")
+
+        self.dwg_found_tree.column("piece_code", width=140, anchor="w")
+        self.dwg_found_tree.column("pdf_file", width=220, anchor="w")
+        self.dwg_found_tree.column("dwg_file", width=200, anchor="w")
+        self.dwg_found_tree.column("source_dir", width=360, anchor="w")
+
+        found_vsb = ttk.Scrollbar(self.dwg_found_frame, orient="vertical", command=self.dwg_found_tree.yview)
+        found_hsb = ttk.Scrollbar(self.dwg_found_frame, orient="horizontal", command=self.dwg_found_tree.xview)
+        self.dwg_found_tree.configure(yscrollcommand=found_vsb.set, xscrollcommand=found_hsb.set)
+
+        self.dwg_found_tree.grid(row=0, column=0, sticky="nsew")
+        found_vsb.grid(row=0, column=1, sticky="ns")
+        found_hsb.grid(row=1, column=0, sticky="ew")
+        self.dwg_found_tree.bind("<Double-1>", self._on_found_tree_double_click)
+
+        # View 2: Missing Parts Table
+        self.dwg_missing_frame = ctk.CTkFrame(self.dwg_views_container, fg_color="transparent")
+        self.dwg_missing_frame.grid_rowconfigure(0, weight=1)
+        self.dwg_missing_frame.grid_columnconfigure(0, weight=1)
+
+        missing_cols = ("piece_code", "pdf_file", "status")
+        self.dwg_missing_tree = ttk.Treeview(
+            self.dwg_missing_frame,
+            columns=missing_cols,
+            show="headings",
+            style="DWG.Treeview",
+            selectmode="browse",
+        )
+        self.dwg_missing_tree.heading("piece_code", text="Cod Piesă")
+        self.dwg_missing_tree.heading("pdf_file", text="Fișier PDF (Desenat)")
+        self.dwg_missing_tree.heading("status", text="Stare")
+
+        self.dwg_missing_tree.column("piece_code", width=180, anchor="w")
+        self.dwg_missing_tree.column("pdf_file", width=300, anchor="w")
+        self.dwg_missing_tree.column("status", width=350, anchor="w")
+
+        missing_vsb = ttk.Scrollbar(self.dwg_missing_frame, orient="vertical", command=self.dwg_missing_tree.yview)
+        missing_hsb = ttk.Scrollbar(self.dwg_missing_frame, orient="horizontal", command=self.dwg_missing_tree.xview)
+        self.dwg_missing_tree.configure(yscrollcommand=missing_vsb.set, xscrollcommand=missing_hsb.set)
+
+        self.dwg_missing_tree.grid(row=0, column=0, sticky="nsew")
+        missing_vsb.grid(row=0, column=1, sticky="ns")
+        missing_hsb.grid(row=1, column=0, sticky="ew")
+        self.dwg_missing_tree.bind("<Double-1>", self._on_missing_tree_double_click)
+
+        # View 3: Execution Log Terminal
+        self.dwg_log_frame = ctk.CTkFrame(self.dwg_views_container, fg_color="transparent")
+        self.dwg_log_frame.grid_rowconfigure(0, weight=1)
+        self.dwg_log_frame.grid_columnconfigure(0, weight=1)
+
+        self.dwg_log_box = ctk.CTkTextbox(
+            self.dwg_log_frame,
+            state="disabled",
+            font=("Cascadia Code", 12),
+            fg_color=_LOG_BG,
+            text_color="#a3e635",
+            corner_radius=8,
+            border_width=0,
+        )
+        self.dwg_log_box.grid(row=0, column=0, sticky="nsew")
+
+        # Display initial view
+        self.dwg_found_frame.grid(row=0, column=0, sticky="nsew")
+
+    def dwg_browse_parent_dir(self):
+        """Browse root parent directory for projects (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.dwg_parent_dir.get())
+        d = filedialog.askdirectory(title="Selectează Directorul Mamă al Proiectelor", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_parent_dir.set(norm)
+            self._set_global_last_dir(norm)
+
+    def dwg_browse_pdf_dir(self):
+        """Browse folder with part PDF files to be drawn (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.dwg_pdf_dir.get())
+        d = filedialog.askdirectory(title="Selectează Folderul cu Piese de Desenat (PDF)", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_pdf_dir.set(norm)
+            self._set_global_last_dir(norm)
+
+    def dwg_browse_dest_dir(self):
+        """Browse destination folder for found DWGs (uses global directory memory - Requirement #3)."""
+        initial = self._get_global_initial_dir(self.dwg_dest_dir.get())
+        d = filedialog.askdirectory(title="Selectează Folderul Destinație pentru DWG-uri Găsite", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_dest_dir.set(norm)
+            self._set_global_last_dir(norm)
+
+    def dwg_change_view(self, val=None):
+        """Switch between Found, Missing, and Log views."""
+        val = val or self.dwg_view_seg.get()
+        self.dwg_found_frame.grid_forget()
+        self.dwg_missing_frame.grid_forget()
+        self.dwg_log_frame.grid_forget()
+
+        if "Găsite" in val or "Gasite" in val:
+            self.dwg_found_frame.grid(row=0, column=0, sticky="nsew")
+        elif "Lipsă" in val or "Lipsa" in val:
+            self.dwg_missing_frame.grid(row=0, column=0, sticky="nsew")
+        else:
+            self.dwg_log_frame.grid(row=0, column=0, sticky="nsew")
+
+    def dwg_log(self, msg):
+        """Thread-safe logging method for DWG Finder."""
+        self.after(0, self._dwg_insert_log, msg)
+
+    def _dwg_insert_log(self, msg):
+        self.dwg_log_box.configure(state="normal")
+        self.dwg_log_box.insert("end", str(msg) + "\n")
+        self.dwg_log_box.see("end")
+        self.dwg_log_box.configure(state="disabled")
+
+    def _on_found_tree_double_click(self, event):
+        """Open or reveal found DWG file on double click."""
+        sel = self.dwg_found_tree.selection()
+        if not sel:
+            return
+        vals = self.dwg_found_tree.item(sel[0], "values")
+        if vals and len(vals) >= 4:
+            dwg_file = vals[2]
+            dest_dir = self.dwg_dest_dir.get().strip() or os.path.join(self.dwg_pdf_dir.get().strip(), "DWG_Gasite")
+            target_path = os.path.join(dest_dir, dwg_file)
+            if not os.path.exists(target_path):
+                target_path = os.path.join(vals[3], dwg_file)
+            if os.path.exists(target_path):
+                try:
+                    os.startfile(target_path)
+                except Exception as e:
+                    messagebox.showerror("Eroare", f"Nu s-a putut deschide fișierul:\n{e}")
+
+    def _on_missing_tree_double_click(self, event):
+        """Open missing part PDF file on double click."""
+        sel = self.dwg_missing_tree.selection()
+        if not sel:
+            return
+        vals = self.dwg_missing_tree.item(sel[0], "values")
+        if vals and len(vals) >= 2:
+            pdf_file = vals[1]
+            pdf_dir = self.dwg_pdf_dir.get().strip()
+            target_path = os.path.join(pdf_dir, pdf_file)
+            if os.path.exists(target_path):
+                try:
+                    os.startfile(target_path)
+                except Exception as e:
+                    messagebox.showerror("Eroare", f"Nu s-a putut deschide fișierul:\n{e}")
+
+    def dwg_start_search(self):
+        """Validate inputs and launch background worker thread for DWG extraction."""
+        if getattr(self, "_dwg_searching", False):
+            return
+
+        parent_dir = self.dwg_parent_dir.get().strip()
+        proj_num = self.dwg_proj_num.get().strip()
+        pdf_dir = self.dwg_pdf_dir.get().strip()
+        dest_dir = self.dwg_dest_dir.get().strip()
+
+        if not parent_dir or not os.path.exists(parent_dir):
+            messagebox.showwarning("Atenție", "Te rog selectează un Director Mamă valid pentru proiecte.")
+            return
+
+        if not proj_num:
+            messagebox.showwarning("Atenție", "Te rog introdu Numărul Proiectului (ex: 1242).")
+            return
+
+        if not pdf_dir or not os.path.exists(pdf_dir):
+            messagebox.showwarning("Atenție", "Te rog selectează Folderul cu piese de desenat (PDF).")
+            return
+
+        if not dest_dir:
+            dest_dir = os.path.join(pdf_dir, "DWG_Gasite")
+            self.dwg_dest_dir.set(dest_dir)
+
+        make_dir_with_permissions(dest_dir)
+
+        # Clear UI state
+        self._dwg_searching = True
+        self._dwg_cancel_requested = False
+        self.dwg_start_btn.configure(state="disabled")
+        self.dwg_cancel_btn.configure(state="normal")
+        self.dwg_open_dest_btn.configure(state="disabled")
+        self.dwg_export_excel_btn.configure(state="disabled")
+        self.dwg_copy_missing_btn.configure(state="disabled")
+        self.dwg_progress_bar.set(0)
+
+        # Clear previous items
+        for item in self.dwg_found_tree.get_children():
+            self.dwg_found_tree.delete(item)
+        for item in self.dwg_missing_tree.get_children():
+            self.dwg_missing_tree.delete(item)
+
+        self.dwg_log_box.configure(state="normal")
+        self.dwg_log_box.delete("1.0", "end")
+        self.dwg_log_box.configure(state="disabled")
+
+        # Switch view to Log during execution
+        self.dwg_view_seg.set("📜 Jurnal")
+        self.dwg_change_view("📜 Jurnal")
+
+        self.save_settings()
+
+        threading.Thread(
+            target=self._dwg_search_worker,
+            args=(parent_dir, proj_num, pdf_dir, dest_dir),
+            daemon=True
+        ).start()
+
+    def dwg_cancel_search(self):
+        """Request cooperative cancellation of DWG Finder worker thread."""
+        if getattr(self, "_dwg_searching", False):
+            self._dwg_cancel_requested = True
+            self.dwg_cancel_btn.configure(state="disabled")
+            self.dwg_log("\n⚠ Solicitare de oprire primită. Se finalizează operațiunea curentă...")
+
+    def _dwg_search_worker(self, parent_dir, proj_num, pdf_dir, dest_dir):
+        """Worker thread executing the 3-step CAD matching & extraction algorithm."""
+        self.dwg_log(f"============================================================")
+        self.dwg_log(f"🚀 Pornire Căutare DWG-uri Existente (SteelSync v{APP_VERSION})")
+        self.dwg_log(f"• Director Mamă: {parent_dir}")
+        self.dwg_log(f"• Număr Proiect Căutat: '{proj_num}'")
+        self.dwg_log(f"• Folder Piese PDF: {pdf_dir}")
+        self.dwg_log(f"• Folder Salvare DWG: {dest_dir}")
+        self.dwg_log(f"============================================================\n")
+
+        make_dir_with_permissions(dest_dir)
+
+        # ─── Pasul 1: Localizarea Folderelor de Proiect în Directorul Mamă ───
+        self.dwg_log("🔍 Pasul 1: Scanare directoare proiect în Directorul Mamă...")
+        proj_pattern = re.compile(rf'(?<!\d){re.escape(proj_num)}(?!\d)', re.IGNORECASE)
+        matched_proj_dirs = []
+
+        # If parent_dir itself contains project number:
+        if proj_pattern.search(os.path.basename(parent_dir)):
+            matched_proj_dirs.append(parent_dir)
+        else:
+            for root, dirs, files in os.walk(parent_dir):
+                if self._dwg_cancel_requested:
+                    break
+                to_remove = []
+                for d in dirs:
+                    if proj_pattern.search(d):
+                        matched_proj_dirs.append(os.path.join(root, d))
+                        to_remove.append(d)
+                for d in to_remove:
+                    dirs.remove(d)
+
+        if not matched_proj_dirs:
+            self.dwg_log(f"⚠ Nu s-a găsit niciun folder care să conțină numărul '{proj_num}' în directorul mamă.")
+        else:
+            self.dwg_log(f"✅ S-au identificat {len(matched_proj_dirs)} directoare de proiect asociate:")
+            for p in matched_proj_dirs:
+                self.dwg_log(f"   ↳ {p}")
+
+        # ─── Indexare DWG-uri existente în directoarele găsite ───
+        self.dwg_log("\n📂 Indexare fișiere DWG din directoarele proiectului...")
+        dwg_index = {}  # clean_key -> dict(path, filename, stem, mtime)
+
+        for p_dir in matched_proj_dirs:
+            if self._dwg_cancel_requested:
+                break
+            for root, dirs, files in os.walk(p_dir):
+                if self._dwg_cancel_requested:
+                    break
+                for f in files:
+                    if f.lower().endswith(".dwg"):
+                        full_p = os.path.join(root, f)
+                        stem = Path(f).stem
+                        clean_key = re.sub(r'[^A-Za-z0-9]', '', stem).upper()
+                        if not clean_key:
+                            continue
+                        try:
+                            mtime = os.path.getmtime(full_p)
+                        except Exception:
+                            mtime = 0
+                        # Keep newest or first
+                        if clean_key not in dwg_index or mtime > dwg_index[clean_key]["mtime"]:
+                            dwg_index[clean_key] = {
+                                "path": full_p,
+                                "filename": f,
+                                "stem": stem,
+                                "mtime": mtime,
+                                "clean_key": clean_key,
+                            }
+
+        self.dwg_log(f"✅ Indexare completă: {len(dwg_index)} fișiere DWG unice identificate.")
+
+        # ─── Pasul 2 & 3: Potrivire PDF <-> DWG și Copiere ───
+        self.dwg_log("\n📄 Pasul 2: Analiză și potrivire piese PDF din folderul de desenat...")
+        try:
+            pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith(".pdf")]
+        except Exception as e:
+            self.dwg_log(f"❌ Eroare la citirea folderului cu PDF-uri: {e}")
+            self.after(0, self._dwg_on_search_complete, [], [], dest_dir, False)
+            return
+
+        total_pdfs = len(pdf_files)
+        self.dwg_log(f"S-au găsit {total_pdfs} fișiere PDF de analizat.")
+
+        found_list = []
+        missing_list = []
+
+        # Sort indexed keys by length descending to prioritize longer exact token matches
+        sorted_keys = sorted(dwg_index.keys(), key=len, reverse=True)
+
+        for idx, pdf_name in enumerate(pdf_files):
+            if self._dwg_cancel_requested:
+                self.dwg_log("\n🛑 Procesul de căutare a fost întrerupt de utilizator.")
+                break
+
+            progress_val = (idx + 1) / max(1, total_pdfs)
+            self.after(0, self.dwg_progress_bar.set, progress_val)
+
+            pdf_stem = Path(pdf_name).stem
+            pdf_path = os.path.join(pdf_dir, pdf_name)
+            matched_dwg = None
+            match_method = ""
+
+            # ── Metoda A: Nume Fișier PDF ──
+            # 1. Delimiter-split chunks (split by space, underscore, parentheses, brackets, commas, semicolons)
+            chunks = re.split(r'[\s_()\[\],;]+', pdf_stem)
+            clean_chunks = [re.sub(r'[^A-Za-z0-9]', '', c).upper() for c in chunks if re.sub(r'[^A-Za-z0-9]', '', c)]
+
+            # 2. Part code sequences (e.g. DSBO-21021, PL10-150)
+            seqs = re.findall(r'[A-Za-z]+[-_]?\d+', pdf_stem)
+            clean_seqs = [re.sub(r'[^A-Za-z0-9]', '', s).upper() for s in seqs if re.sub(r'[^A-Za-z0-9]', '', s)]
+
+            # 3. Whole clean stem
+            clean_stem = re.sub(r'[^A-Za-z0-9]', '', pdf_stem).upper()
+
+            # Exact match priority:
+            # First check clean_seqs (part code patterns like DSBO-21021)
+            for s in clean_seqs:
+                if s in dwg_index:
+                    matched_dwg = dwg_index[s]
+                    match_method = "Nume PDF (Cod piesă extras)"
+                    break
+
+            # Next check clean chunks from delimiters (e.g. 1242_DSB-21008_RevA -> 'DSB21008')
+            if not matched_dwg:
+                for c in clean_chunks:
+                    if c in dwg_index:
+                        matched_dwg = dwg_index[c]
+                        match_method = "Nume PDF (Token exact)"
+                        break
+
+            # Next check whole clean stem
+            if not matched_dwg and clean_stem in dwg_index:
+                matched_dwg = dwg_index[clean_stem]
+                match_method = "Nume PDF (Cod complet)"
+
+            # Substring match on chunks with trailing non-digit check
+            if not matched_dwg:
+                for c in clean_chunks:
+                    if matched_dwg:
+                        break
+                    for k in sorted_keys:
+                        if len(k) < 3:
+                            continue
+                        pattern = rf'^{re.escape(k)}(?!\d)'
+                        if re.search(pattern, c):
+                            matched_dwg = dwg_index[k]
+                            match_method = "Nume PDF (Prefix token)"
+                            break
+
+            # ── Metoda B: Fallback Text PDF (pypdf) ──
+            if not matched_dwg:
+                header_code = extract_pdf_header_part_code(pdf_path, known_keys=sorted_keys)
+                if header_code and header_code in dwg_index:
+                    matched_dwg = dwg_index[header_code]
+                    match_method = "Antet PDF (Text fallback)"
+
+            # ── Decizie & Copiere ──
+            if matched_dwg:
+                dst_file_path = os.path.join(dest_dir, matched_dwg["filename"])
+                try:
+                    safe_copy(matched_dwg["path"], dst_file_path)
+                    status_str = "Copiat în destinație"
+                except Exception as e:
+                    status_str = f"Eroare copiere: {e}"
+
+                found_list.append({
+                    "piece_code": matched_dwg["clean_key"],
+                    "pdf_file": pdf_name,
+                    "dwg_file": matched_dwg["filename"],
+                    "source_dir": os.path.dirname(matched_dwg["path"]),
+                    "source_path": matched_dwg["path"],
+                    "dest_path": dst_file_path,
+                    "method": match_method,
+                })
+                self.dwg_log(f"✔ [GĂSIT] {pdf_name}  ➔  {matched_dwg['filename']}  ({match_method})")
+            else:
+                candidate = clean_seqs[0] if clean_seqs else (clean_chunks[0] if clean_chunks else clean_stem)
+                missing_list.append({
+                    "piece_code": candidate or pdf_stem,
+                    "pdf_file": pdf_name,
+                    "status": "DWG Lipsă (Trebuie desenat)",
+                })
+                self.dwg_log(f"✖ [LIPSĂ] {pdf_name}  (Nu există DWG în proiect)")
+
+        # Permissions check on destination
+        if found_list:
+            ensure_full_permissions_tree(dest_dir)
+
+        self.dwg_log("\n============================================================")
+        self.dwg_log("🎉 Operațiune finalizată!")
+        self.dwg_log(f"• Total piese analizate: {len(found_list) + len(missing_list)}")
+        self.dwg_log(f"• 🟢 Piese cu DWG Găsit și Copiat: {len(found_list)}")
+        self.dwg_log(f"• 🔴 Piese Lipsă (Fără DWG existent): {len(missing_list)}")
+        self.dwg_log(f"• Folder Salvare: {dest_dir}")
+        self.dwg_log("============================================================\n")
+
+        self.after(0, self._dwg_on_search_complete, found_list, missing_list, dest_dir, self._dwg_cancel_requested)
+
+    def _dwg_on_search_complete(self, found_list, missing_list, dest_dir, was_cancelled):
+        """Update GUI after DWG search finishes."""
+        self._dwg_searching = False
+        self._dwg_cancel_requested = False
+        self.dwg_start_btn.configure(state="normal")
+        self.dwg_cancel_btn.configure(state="disabled")
+
+        self.dwg_results = {"found": found_list, "missing": missing_list}
+
+        # Update button labels with counts
+        seg_values = [f"🟢 Găsite ({len(found_list)})", f"🔴 Lipsă ({len(missing_list)})", "📜 Jurnal"]
+        self.dwg_view_seg.configure(values=seg_values)
+
+        # Populate Found Treeview
+        for item in found_list:
+            self.dwg_found_tree.insert(
+                "", "end",
+                values=(item["piece_code"], item["pdf_file"], item["dwg_file"], item["source_dir"])
+            )
+
+        # Populate Missing Treeview
+        for item in missing_list:
+            self.dwg_missing_tree.insert(
+                "", "end",
+                values=(item["piece_code"], item["pdf_file"], item["status"])
+            )
+
+        # Enable action buttons if results exist
+        if found_list or os.path.exists(dest_dir):
+            self.dwg_open_dest_btn.configure(state="normal")
+        if found_list or missing_list:
+            self.dwg_export_excel_btn.configure(state="normal")
+        if missing_list:
+            self.dwg_copy_missing_btn.configure(state="normal")
+
+        # Automatically switch to Found if found, else Missing
+        if found_list:
+            self.dwg_view_seg.set(seg_values[0])
+            self.dwg_change_view(seg_values[0])
+        elif missing_list:
+            self.dwg_view_seg.set(seg_values[1])
+            self.dwg_change_view(seg_values[1])
+
+        if was_cancelled:
+            messagebox.showinfo("Căutare Oprită", f"Operațiunea a fost întreruptă.\nS-au extras {len(found_list)} fișiere DWG.")
+        else:
+            messagebox.showinfo(
+                "Căutare Finalizată",
+                f"Proces finalizat cu succes!\n\n"
+                f"🟢 Piese cu DWG Găsit: {len(found_list)}\n"
+                f"🔴 Piese Lipsă (Necesită desenare): {len(missing_list)}\n\n"
+                f"Fișierele DWG găsite au fost copiate în:\n{dest_dir}"
+            )
+
+    def dwg_open_destination(self):
+        """Open the DWG destination folder in Windows Explorer."""
+        dest_dir = self.dwg_dest_dir.get().strip() or os.path.join(self.dwg_pdf_dir.get().strip(), "DWG_Gasite")
+        if dest_dir and os.path.exists(dest_dir):
+            try:
+                os.startfile(dest_dir)
+            except Exception as e:
+                messagebox.showerror("Eroare", f"Nu s-a putut deschide folderul:\n{e}")
+        else:
+            messagebox.showwarning("Atenție", "Folderul destinație nu există încă.")
+
+    def dwg_copy_missing_pieces(self):
+        """Copy the list of missing parts to the Windows clipboard."""
+        missing = self.dwg_results.get("missing", [])
+        if not missing:
+            messagebox.showinfo("Informație", "Nu există piese lipsă de copiat.")
+            return
+
+        lines = [item["piece_code"] for item in missing if item.get("piece_code")]
+        clipboard_txt = "\n".join(lines)
+
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(clipboard_txt)
+            messagebox.showinfo(
+                "Copiat în Clipboard",
+                f"Au fost copiate {len(lines)} coduri de piese lipsă în clipboard.\nLe poți insera direct în Excel sau trimite spre desenare."
+            )
+        except Exception as e:
+            messagebox.showerror("Eroare", f"Nu s-a putut copia în clipboard:\n{e}")
+
+    def dwg_export_excel_report(self):
+        """Generate and export a styled Excel report for found and missing DWGs."""
+        found = self.dwg_results.get("found", [])
+        missing = self.dwg_results.get("missing", [])
+
+        if not found and not missing:
+            messagebox.showinfo("Informație", "Nu există date pentru export. Rulați mai întâi căutarea.")
+            return
+
+        proj_num = self.dwg_proj_num.get().strip() or "Proiect"
+        dest_dir = self.dwg_dest_dir.get().strip() or self.dwg_pdf_dir.get().strip()
+        initial_dir = self._get_global_initial_dir(dest_dir)
+        default_file = f"Raport_DWG_Proiect_{proj_num}.xlsx"
+
+        save_path = filedialog.asksaveasfilename(
+            title="Salvare Raport Excel Căutare DWG",
+            initialdir=initial_dir,
+            initialfile=default_file,
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")]
+        )
+        if not save_path:
+            return
+
+        try:
+            wb = Workbook()
+
+            # Styling
+            thin_side = Side(style='thin', color='BFBFBF')
+            thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+            header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
+            data_font = Font(name="Segoe UI", size=10)
+            center_align = Alignment(horizontal='center', vertical='center')
+            left_align = Alignment(horizontal='left', vertical='center')
+
+            green_header = PatternFill(start_color="107C41", end_color="107C41", fill_type="solid")
+            red_header = PatternFill(start_color="C53929", end_color="C53929", fill_type="solid")
+            alt_fill = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
+
+            # ── Sheet 1: Piese cu DWG Gasit ──
+            ws_found = wb.active
+            ws_found.title = "Piese cu DWG Gasit"
+            headers_found = ["Nr. Crt.", "Cod Piesă", "Fișier PDF (Desenat)", "Fișier DWG Găsit", "Folder Sursă DWG", "Cale Destinație"]
+            ws_found.append(headers_found)
+
+            for col_idx in range(1, len(headers_found) + 1):
+                cell = ws_found.cell(row=1, column=col_idx)
+                cell.font = header_font
+                cell.fill = green_header
+                cell.alignment = center_align
+                cell.border = thin_border
+
+            for row_idx, item in enumerate(found, start=2):
+                row_data = [
+                    row_idx - 1,
+                    item["piece_code"],
+                    item["pdf_file"],
+                    item["dwg_file"],
+                    item["source_dir"],
+                    item["dest_path"]
+                ]
+                ws_found.append(row_data)
+                fill_to_apply = alt_fill if row_idx % 2 == 0 else PatternFill()
+                for col_idx in range(1, len(row_data) + 1):
+                    c = ws_found.cell(row=row_idx, column=col_idx)
+                    c.font = data_font
+                    c.border = thin_border
+                    if fill_to_apply.fill_type:
+                        c.fill = fill_to_apply
+                    c.alignment = center_align if col_idx in [1, 2] else left_align
+
+            for col in ws_found.columns:
+                max_len = max(len(str(cell.value or '')) for cell in col)
+                col_letter = get_column_letter(col[0].column)
+                ws_found.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+            # ── Sheet 2: Piese Fara DWG (Lipsa) ──
+            ws_missing = wb.create_sheet(title="Piese Fara DWG (Lipsa)")
+            headers_missing = ["Nr. Crt.", "Cod Piesă", "Fișier PDF (Desenat)", "Stare / Necesitate"]
+            ws_missing.append(headers_missing)
+
+            for col_idx in range(1, len(headers_missing) + 1):
+                cell = ws_missing.cell(row=1, column=col_idx)
+                cell.font = header_font
+                cell.fill = red_header
+                cell.alignment = center_align
+                cell.border = thin_border
+
+            for row_idx, item in enumerate(missing, start=2):
+                row_data = [
+                    row_idx - 1,
+                    item["piece_code"],
+                    item["pdf_file"],
+                    item["status"]
+                ]
+                ws_missing.append(row_data)
+                fill_to_apply = alt_fill if row_idx % 2 == 0 else PatternFill()
+                for col_idx in range(1, len(row_data) + 1):
+                    c = ws_missing.cell(row=row_idx, column=col_idx)
+                    c.font = data_font
+                    c.border = thin_border
+                    if fill_to_apply.fill_type:
+                        c.fill = fill_to_apply
+                    c.alignment = center_align if col_idx in [1, 2] else left_align
+
+            for col in ws_missing.columns:
+                max_len = max(len(str(cell.value or '')) for cell in col)
+                col_letter = get_column_letter(col[0].column)
+                ws_missing.column_dimensions[col_letter].width = max(max_len + 3, 14)
+
+            safe_save_workbook(wb, save_path)
+            self._set_global_last_dir(save_path)
+            messagebox.showinfo("Succes", f"Raportul Excel a fost salvat cu succes:\n{save_path}")
+        except Exception as e:
+            messagebox.showerror("Eroare", f"Nu s-a putut salva raportul Excel:\n{e}")
 
     # ══════════════════════════════════════════════════════════════════════
     #  NC SORTING LOGIC
