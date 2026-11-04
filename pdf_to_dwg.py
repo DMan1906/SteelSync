@@ -329,30 +329,54 @@ class PdfToCadConverter:
         return items, bbox
 
     @staticmethod
-    def _find_view_break(lines, min_x, max_x):
+    def _find_view_break_pairs(items, min_x, max_x):
         """
         Detectează dacă vederea este scurtată de Tekla (view shortening break)
-        prin căutarea capetelor moarte (dead ends) coliniare din zona centrală a piesei.
+        și localizează perechile de segmente orizontale tăiate peste linia de ruptură.
+        Returnează: (x_brk_left, x_brk_right, break_pairs, used_indices) sau None
         """
-        vertex_count = defaultdict(int)
-        for it in lines:
-            if it[0] == "l":
-                k1 = (round(it[1].x * 2) / 2, round(it[1].y * 2) / 2)
-                k2 = (round(it[2].x * 2) / 2, round(it[2].y * 2) / 2)
-                vertex_count[k1] += 1
-                vertex_count[k2] += 1
-
         w = max_x - min_x
-        # Capete moarte strict în zona centrală (între 20% și 80% din lățimea vederii)
-        dead_ends = [p for p, count in vertex_count.items() if count == 1 and min_x + 0.2 * w < p[0] < max_x - 0.2 * w]
-        if not dead_ends:
+        h_lines = []
+        for idx, it in enumerate(items):
+            if it[0] == "l" and abs(it[1].y - it[2].y) < 0.25:
+                h_lines.append((idx, it))
+
+        pairs = []
+        used_indices = set()
+        for i, (idx1, l1) in enumerate(h_lines):
+            if idx1 in used_indices:
+                continue
+            p1a, p1b = l1[1], l1[2]
+            l1_min_x, l1_max_x = min(p1a.x, p1b.x), max(p1a.x, p1b.x)
+            l1_y = (p1a.y + p1b.y) / 2.0
+
+            # Căutăm segmentul din stânga (capătul interior este în zona centrală)
+            if min_x + 0.15 * w < l1_max_x < max_x - 0.15 * w:
+                for j, (idx2, l2) in enumerate(h_lines):
+                    if idx2 in used_indices or idx1 == idx2:
+                        continue
+                    p2a, p2b = l2[1], l2[2]
+                    l2_min_x, l2_max_x = min(p2a.x, p2b.x), max(p2a.x, p2b.x)
+                    l2_y = (p2a.y + p2b.y) / 2.0
+
+                    if abs(l1_y - l2_y) < 0.3:
+                        gap = l2_min_x - l1_max_x
+                        if 3.0 <= gap <= 40.0:
+                            outer_left = p1a if p1a.x < p1b.x else p1b
+                            inner_left = p1b if p1a.x < p1b.x else p1a
+                            inner_right = p2a if p2a.x < p2b.x else p2b
+                            outer_right = p2b if p2a.x < p2b.x else p2a
+                            pairs.append((idx1, idx2, outer_left, inner_left, inner_right, outer_right))
+                            used_indices.add(idx1)
+                            used_indices.add(idx2)
+                            break
+
+        if not pairs:
             return None
 
-        xs = sorted(set(p[0] for p in dead_ends))
-        # O ruptură de scurtare are exact 2 coordonate X apropiate (gap de 4-30 pt)
-        if len(xs) == 2 and 4.0 <= (xs[1] - xs[0]) <= 30.0:
-            return xs[0], xs[1], dead_ends
-        return None
+        x_brk_left = max(p[3].x for p in pairs)
+        x_brk_right = min(p[4].x for p in pairs)
+        return x_brk_left, x_brk_right, pairs, used_indices
 
     def convert_single_pdf(
         self,
@@ -410,7 +434,7 @@ class PdfToCadConverter:
             # Verificare dacă este o vedere scurtată grafic (Tekla view shortening)
             view_break_info = None
             if calibrate_1to1 and target_len and (target_len / drawn_len_mm >= 1.35):
-                view_break_info = self._find_view_break(items, min_x, max_x)
+                view_break_info = self._find_view_break_pairs(items, min_x, max_x)
 
             dxf_doc = ezdxf.new("R2010", setup=True)
             dxf_doc.units = ezdxf.units.MM
@@ -419,9 +443,9 @@ class PdfToCadConverter:
 
             if view_break_info is not None:
                 # ── Caz 1: Vedere Scurtată (Tekla View Shortening) ──
-                # Păstrăm toate detaliile/decupajele de la capete la scara reală 1:1,
-                # și extindem strict porțiunea de mijloc la lungimea nominală.
-                x_brk_left, x_brk_right, dead_ends = view_break_info
+                # Unim direct segmentele tăiate într-o singură linie continuă din capăt în capăt,
+                # eliminând golurile, decuplările și liniile fragmentate.
+                x_brk_left, x_brk_right, break_pairs, used_indices = view_break_info
 
                 left_mm = (x_brk_left - min_x) * base_scale_factor
                 right_mm = (max_x - x_brk_right) * base_scale_factor
@@ -433,10 +457,20 @@ class PdfToCadConverter:
                     else:
                         xc = left_mm + delta_gap_mm + (pt.x - x_brk_right) * base_scale_factor
                     yc = (max_y - pt.y) * base_scale_factor
-                    return (xc, yc)
+                    return (float(xc), float(yc))
 
-                # Export elemente geometrice originale (fără modificări la decupaje/colțuri)
-                for it in items:
+                # 1. Conectăm direct capetele exterioare ale fiecărei muchii tăiate într-o singură linie continuă
+                for pair in break_pairs:
+                    outer_left, outer_right = pair[2], pair[5]
+                    p_start = pt_to_cad(outer_left)
+                    p_end = pt_to_cad(outer_right)
+                    msp.add_line(p_start, p_end, dxfattribs={"layer": "CONTUR_PIESA"})
+
+                # 2. Exportăm restul elementelor geometrice intacte (decupaje, colțuri, găuri, raze)
+                for idx, it in enumerate(items):
+                    if idx in used_indices:
+                        continue  # Muchiile longitudinale au fost deja create ca linii continue depline
+
                     cmd = it[0]
                     if cmd == "l":
                         p1 = pt_to_cad(it[1])
@@ -461,16 +495,6 @@ class PdfToCadConverter:
                         p2 = pt_to_cad(fitz.Point(r.x1, r.y1))
                         p3 = pt_to_cad(fitz.Point(r.x0, r.y1))
                         msp.add_lwpolyline([p0, p1, p2, p3, p0], dxfattribs={"layer": "CONTUR_PIESA"})
-
-                # Conectăm strict liniile de contur peste golul de scurtare
-                by_y = defaultdict(list)
-                for p in dead_ends:
-                    by_y[p[1]].append(p[0])
-
-                for y_val, xs in by_y.items():
-                    if len(xs) == 2:
-                        yc = (max_y - y_val) * base_scale_factor
-                        msp.add_line((left_mm, yc), (left_mm + delta_gap_mm, yc), dxfattribs={"layer": "CONTUR_PIESA"})
 
                 dim_x_final = target_len
                 dim_y_final = drawn_h_pt * base_scale_factor
@@ -528,7 +552,16 @@ class PdfToCadConverter:
             dxf_path = os.path.join(output_dir, dxf_filename)
             dwg_path = os.path.join(output_dir, dwg_filename)
 
-            dxf_doc.saveas(dxf_path)
+            try:
+                dxf_doc.saveas(dxf_path)
+            except PermissionError:
+                # Dacă fișierul original este deschis în AutoCAD / alt program, salvăm temporar cu sufix _nou
+                fallback_dxf = os.path.join(output_dir, f"{clean_name}_nou.dxf")
+                try:
+                    dxf_doc.saveas(fallback_dxf)
+                    dxf_path = fallback_dxf
+                except Exception:
+                    return False, None, f"Fișierul '{dxf_filename}' este deschis în alt program (ex. AutoCAD). Închideți fișierul și reîncercați."
 
             output_format_lower = str(output_format).lower().strip()
             saved_paths = []
