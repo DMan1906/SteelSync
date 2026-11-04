@@ -322,7 +322,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -890,11 +890,11 @@ class UnifiedApp(ctk.CTk):
         self.extractor_source_last_dir = ""
         self.global_last_dir = ""
 
-        # ── Tab Ordering & State (Requirement #2) ──
+        # ── Tab Ordering & State (Requirement #2 with Drag & Drop) ──
         self.tab_order = list(DEFAULT_TAB_ORDER)
         self.active_tab_id = "extractor"
-        self.tab_buttons = {}
         self._drag_data = None
+        self._load_saved_tab_order()
 
         self.create_widgets()
         self.load_settings()
@@ -987,7 +987,7 @@ class UnifiedApp(ctk.CTk):
                 self.active_tab_id = self.tab_order[0]
             
             # Apply loaded tab order & active tab
-            self.repack_tab_buttons()
+            self.apply_tab_order()
             self.select_tab(self.active_tab_id)
 
             # Restore extension selections
@@ -1220,137 +1220,162 @@ class UnifiedApp(ctk.CTk):
         self.save_settings()
 
     # ══════════════════════════════════════════════════════════════════════
-    #  TAB MANAGER & REORDERING METHODS (REQUIREMENT #2)
+    #  TAB MANAGER & REORDERING METHODS (REQUIREMENT #2 WITH DRAG & DROP)
     # ══════════════════════════════════════════════════════════════════════
-    def init_tab_bar(self):
-        """Initialize tab buttons in the tab bar in current self.tab_order."""
-        self.tab_buttons = {}
-        for tab_id in self.tab_order:
-            meta = TAB_METADATA.get(tab_id, {"title": tab_id})
-            btn = ctk.CTkButton(
-                self.tab_buttons_container,
-                text=meta["title"],
-                font=("Segoe UI", 12),
-                fg_color="transparent",
-                hover_color=_CARD_BORDER,
-                text_color=_TEXT_SEC,
-                corner_radius=8,
-                height=32,
-                width=135,
-                cursor="hand2",
-                command=lambda tid=tab_id: self.select_tab(tid)
-            )
-            self._bind_tab_drag_events(btn, tab_id)
-            self.tab_buttons[tab_id] = btn
+    def _load_saved_tab_order(self):
+        """Pre-load tab order from settings before widgets are constructed."""
+        try:
+            if os.path.exists(SETTINGS_PATH):
+                with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                    s = json.load(f)
+                raw_order = s.get("tab_order", [])
+                valid_order = []
+                for item in raw_order:
+                    tid = TAB_NAME_MAP.get(str(item).lower().strip(), item)
+                    if tid in DEFAULT_TAB_ORDER and tid not in valid_order:
+                        valid_order.append(tid)
+                for tid in DEFAULT_TAB_ORDER:
+                    if tid not in valid_order:
+                        valid_order.append(tid)
+                self.tab_order = valid_order
 
-        self.repack_tab_buttons()
-        self.select_tab(self.active_tab_id)
+                saved_active = s.get("active_tab_id", "")
+                mapped_active = TAB_NAME_MAP.get(str(saved_active).lower().strip(), saved_active)
+                if mapped_active in self.tab_order:
+                    self.active_tab_id = mapped_active
+                else:
+                    self.active_tab_id = self.tab_order[0]
+        except Exception:
+            pass
 
-    def _bind_tab_drag_events(self, btn, tab_id):
-        """Bind drag-and-drop and context menu to a tab button."""
-        def on_press(event):
-            self.select_tab(tab_id)
+    def _setup_tabview_drag_and_drop(self):
+        """Enable intuitive in-place drag-and-drop reordering directly on the floating tabs."""
+        if not hasattr(self, "tabview") or not hasattr(self.tabview, "_segmented_button"):
+            return
+        sb = self.tabview._segmented_button
+        title_to_id = {meta["title"]: tid for tid, meta in TAB_METADATA.items()}
+
+        def on_press(event, tab_title):
             self._drag_data = {
-                "tab_id": tab_id,
+                "title": tab_title,
                 "start_x": event.x_root,
-                "moved": False
+                "swapped": False,
             }
-
-        def on_motion(event):
-            if not getattr(self, "_drag_data", None) or self._drag_data.get("tab_id") != tab_id:
-                return
-            idx = self.tab_order.index(tab_id)
-            
-            # Drag right
-            if idx < len(self.tab_order) - 1:
-                next_id = self.tab_order[idx + 1]
-                next_btn = self.tab_buttons.get(next_id)
-                if next_btn:
-                    mid_x = next_btn.winfo_rootx() + (next_btn.winfo_width() // 2)
-                    if event.x_root > mid_x:
-                        self.tab_order[idx], self.tab_order[idx + 1] = self.tab_order[idx + 1], self.tab_order[idx]
-                        self._drag_data["start_x"] = event.x_root
-                        self._drag_data["moved"] = True
-                        self.repack_tab_buttons()
-                        return
-
-            # Drag left
-            if idx > 0:
-                prev_id = self.tab_order[idx - 1]
-                prev_btn = self.tab_buttons.get(prev_id)
-                if prev_btn:
-                    mid_x = prev_btn.winfo_rootx() + (prev_btn.winfo_width() // 2)
-                    if event.x_root < mid_x:
-                        self.tab_order[idx], self.tab_order[idx - 1] = self.tab_order[idx - 1], self.tab_order[idx]
-                        self._drag_data["start_x"] = event.x_root
-                        self._drag_data["moved"] = True
-                        self.repack_tab_buttons()
-                        return
-
-        def on_release(event):
-            if getattr(self, "_drag_data", None) and self._drag_data.get("moved"):
-                self.save_settings()
-            self._drag_data = None
-
-        def on_right_click(event):
-            self.show_tab_context_menu(event, tab_id)
-
-        widgets_to_bind = [btn]
-        if hasattr(btn, "_canvas") and btn._canvas:
-            widgets_to_bind.append(btn._canvas)
-        if hasattr(btn, "_text_label") and btn._text_label:
-            widgets_to_bind.append(btn._text_label)
-
-        for w in widgets_to_bind:
             try:
-                w.bind("<Button-1>", on_press, add="+")
-                w.bind("<B1-Motion>", on_motion, add="+")
-                w.bind("<ButtonRelease-1>", on_release, add="+")
-                w.bind("<Button-3>", on_right_click, add="+")
+                self.tabview.set(tab_title)
+                tid = title_to_id.get(tab_title)
+                if tid:
+                    self.active_tab_id = tid
             except Exception:
                 pass
 
-    def repack_tab_buttons(self):
-        """Repack tab buttons in the current self.tab_order without destroying them."""
-        for tab_id in self.tab_order:
-            if tab_id in self.tab_buttons:
-                self.tab_buttons[tab_id].pack_forget()
-        for tab_id in self.tab_order:
-            if tab_id in self.tab_buttons:
-                self.tab_buttons[tab_id].pack(side="left", padx=3, pady=3)
-        self._update_tab_buttons_style()
+        def on_motion(event):
+            if not getattr(self, "_drag_data", None):
+                return
+            tab_title = self._drag_data.get("title")
+            if not tab_title or tab_title not in sb._value_list:
+                return
 
-    def _update_tab_buttons_style(self):
-        """Update styles of tab buttons according to active_tab_id."""
-        for tab_id, btn in self.tab_buttons.items():
-            is_active = (tab_id == self.active_tab_id)
-            if is_active:
-                btn.configure(
-                    fg_color=_ACCENT,
-                    hover_color=_ACCENT_HOV,
-                    text_color="#ffffff",
-                    font=("Segoe UI", 12, "bold")
-                )
-            else:
-                btn.configure(
-                    fg_color="transparent",
-                    hover_color=_CARD_BORDER,
-                    text_color=_TEXT_SEC,
-                    font=("Segoe UI", 12)
-                )
+            idx = sb._value_list.index(tab_title)
+
+            # Dragging right
+            if idx < len(sb._value_list) - 1:
+                next_title = sb._value_list[idx + 1]
+                next_btn = sb._buttons_dict.get(next_title)
+                if next_btn:
+                    mid_x = next_btn.winfo_rootx() + (next_btn.winfo_width() // 2)
+                    if event.x_root > mid_x:
+                        sb._value_list[idx], sb._value_list[idx + 1] = sb._value_list[idx + 1], sb._value_list[idx]
+                        self.tabview._name_list = list(sb._value_list)
+                        sb._create_button_grid()
+                        for k in range(len(sb._value_list)):
+                            sb._configure_button_corners_for_index(k)
+                        self.update_idletasks()
+                        self._drag_data["swapped"] = True
+                        return
+
+            # Dragging left
+            if idx > 0:
+                prev_title = sb._value_list[idx - 1]
+                prev_btn = sb._buttons_dict.get(prev_title)
+                if prev_btn:
+                    mid_x = prev_btn.winfo_rootx() + (prev_btn.winfo_width() // 2)
+                    if event.x_root < mid_x:
+                        sb._value_list[idx], sb._value_list[idx - 1] = sb._value_list[idx - 1], sb._value_list[idx]
+                        self.tabview._name_list = list(sb._value_list)
+                        sb._create_button_grid()
+                        for k in range(len(sb._value_list)):
+                            sb._configure_button_corners_for_index(k)
+                        self.update_idletasks()
+                        self._drag_data["swapped"] = True
+                        return
+
+        def on_release(event):
+            if getattr(self, "_drag_data", None) and self._drag_data.get("swapped"):
+                new_order = [title_to_id[t] for t in sb._value_list if t in title_to_id]
+                if new_order:
+                    self.tab_order = new_order
+                    self.save_settings()
+            self._drag_data = None
+
+        def on_right_click(event, tab_title):
+            tid = title_to_id.get(tab_title)
+            if tid:
+                self.show_tab_context_menu(event, tid)
+
+        for tab_title, btn in sb._buttons_dict.items():
+            widgets = [btn]
+            if hasattr(btn, "_canvas") and btn._canvas:
+                widgets.append(btn._canvas)
+            if hasattr(btn, "_text_label") and btn._text_label:
+                widgets.append(btn._text_label)
+
+            for w in widgets:
+                try:
+                    w.bind("<Button-1>", lambda e, t=tab_title: on_press(e, t), add="+")
+                    w.bind("<B1-Motion>", on_motion, add="+")
+                    w.bind("<ButtonRelease-1>", on_release, add="+")
+                    w.bind("<Button-3>", lambda e, t=tab_title: on_right_click(e, t), add="+")
+                except Exception:
+                    pass
+
+    def apply_tab_order(self):
+        """Reorder segmented button items according to self.tab_order."""
+        if not hasattr(self, "tabview") or not hasattr(self.tabview, "_segmented_button"):
+            return
+        sb = self.tabview._segmented_button
+        new_values = [TAB_METADATA[tid]["title"] for tid in self.tab_order if tid in TAB_METADATA]
+        if set(new_values) == set(sb._value_list):
+            sb._value_list = new_values
+            self.tabview._name_list = list(sb._value_list)
+            sb._create_button_grid()
+            for k in range(len(sb._value_list)):
+                sb._configure_button_corners_for_index(k)
 
     def select_tab(self, tab_id):
-        """Switch to tab_id and display its frame."""
-        if tab_id not in self.tab_frames:
+        """Switch to tab_id in tabview."""
+        norm_id = TAB_NAME_MAP.get(str(tab_id).lower().strip(), tab_id)
+        if norm_id not in TAB_METADATA:
             return
-        self.active_tab_id = tab_id
-        for tid, frame in self.tab_frames.items():
-            if tid == tab_id:
-                frame.grid(row=0, column=0, sticky="nsew")
-            else:
-                frame.grid_forget()
-        self._update_tab_buttons_style()
+        self.active_tab_id = norm_id
+        meta = TAB_METADATA[norm_id]
+        try:
+            self.tabview.set(meta["title"])
+        except Exception:
+            pass
         self.save_settings()
+
+    def _on_tab_changed(self):
+        """Called when user switches tabs via CTkTabview."""
+        try:
+            current_name = self.tabview.get()
+            norm = str(current_name).lower().strip()
+            tid = TAB_NAME_MAP.get(norm)
+            if tid:
+                self.active_tab_id = tid
+                self.save_settings()
+        except Exception:
+            pass
 
     def move_active_tab_left(self):
         """Move the currently active tab one position to the left."""
@@ -1359,7 +1384,7 @@ class UnifiedApp(ctk.CTk):
         idx = self.tab_order.index(self.active_tab_id)
         if idx > 0:
             self.tab_order[idx], self.tab_order[idx - 1] = self.tab_order[idx - 1], self.tab_order[idx]
-            self.repack_tab_buttons()
+            self.apply_tab_order()
             self.save_settings()
 
     def move_active_tab_right(self):
@@ -1369,20 +1394,20 @@ class UnifiedApp(ctk.CTk):
         idx = self.tab_order.index(self.active_tab_id)
         if idx < len(self.tab_order) - 1:
             self.tab_order[idx], self.tab_order[idx + 1] = self.tab_order[idx + 1], self.tab_order[idx]
-            self.repack_tab_buttons()
+            self.apply_tab_order()
             self.save_settings()
 
     def reset_tab_order(self):
         """Reset tab order to default."""
         self.tab_order = list(DEFAULT_TAB_ORDER)
-        self.repack_tab_buttons()
+        self.apply_tab_order()
         self.save_settings()
 
     def show_tab_context_menu(self, event, tab_id):
         """Show context menu for reordering tabs on right click."""
         self.select_tab(tab_id)
         menu = tk.Menu(self, tearoff=0)
-        idx = self.tab_order.index(tab_id)
+        idx = self.tab_order.index(tab_id) if tab_id in self.tab_order else 0
         if idx > 0:
             menu.add_command(label="⬅ Mută la stânga", command=self.move_active_tab_left)
         else:
@@ -1444,94 +1469,50 @@ class UnifiedApp(ctk.CTk):
         self.version_lbl.pack(side="right", padx=(0, 16))
         self.version_lbl.bind("<Button-1>", lambda e: self.start_update_check(manual=True))
 
-        # ──── Reorderable Tab Bar (Requirement #2) ────
-        self.tab_nav_bar = ctk.CTkFrame(container, fg_color="transparent")
-        self.tab_nav_bar.pack(fill="x", pady=(0, 6))
-
-        # Left side: container with draggable tab buttons
-        self.tab_buttons_container = ctk.CTkFrame(
-            self.tab_nav_bar,
-            fg_color=_CARD_BG,
-            corner_radius=10,
-            border_width=1,
-            border_color=_CARD_BORDER
-        )
-        self.tab_buttons_container.pack(side="left", fill="x", expand=True)
-
-        # Right side: discrete reordering controls
-        self.reorder_controls = ctk.CTkFrame(self.tab_nav_bar, fg_color="transparent")
-        self.reorder_controls.pack(side="right", padx=(10, 0))
-
-        ctk.CTkLabel(
-            self.reorder_controls,
-            text="⇅ Tab:",
-            font=("Segoe UI", 11, "bold"),
-            text_color=_TEXT_SEC
-        ).pack(side="left", padx=(0, 4))
-
-        self.btn_move_left = ctk.CTkButton(
-            self.reorder_controls,
-            text="◀",
-            width=28,
-            height=28,
-            corner_radius=6,
-            fg_color=_CARD_BG,
-            hover_color=_CARD_BORDER,
-            border_width=1,
-            border_color=_CARD_BORDER,
-            text_color=_TEXT_PRI,
-            font=("Segoe UI", 11, "bold"),
-            command=self.move_active_tab_left
-        )
-        self.btn_move_left.pack(side="left", padx=2)
-
-        self.btn_move_right = ctk.CTkButton(
-            self.reorder_controls,
-            text="▶",
-            width=28,
-            height=28,
-            corner_radius=6,
-            fg_color=_CARD_BG,
-            hover_color=_CARD_BORDER,
-            border_width=1,
-            border_color=_CARD_BORDER,
-            text_color=_TEXT_PRI,
-            font=("Segoe UI", 11, "bold"),
-            command=self.move_active_tab_right
-        )
-        self.btn_move_right.pack(side="left", padx=2)
-
-        # ──── Tab Content Container ────
-        self.tab_content_container = ctk.CTkFrame(
+        # ──── Native Floating CTkTabview (Requirement #2 with Drag & Drop) ────
+        self.tabview = ctk.CTkTabview(
             container,
             fg_color=_CARD_BG,
-            corner_radius=12,
+            border_color=_CARD_BORDER,
             border_width=1,
-            border_color=_CARD_BORDER
+            segmented_button_selected_color=_ACCENT,
+            segmented_button_selected_hover_color=_ACCENT_HOV,
+            command=self._on_tab_changed
         )
-        self.tab_content_container.pack(fill="both", expand=True)
-        self.tab_content_container.grid_rowconfigure(0, weight=1)
-        self.tab_content_container.grid_columnconfigure(0, weight=1)
+        self.tabview.pack(fill="both", expand=True)
 
-        # Tab Frames (preserved in memory)
-        self.tab_ext = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
-        self.tab_nc = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
-        self.tab_mod = ctk.CTkFrame(self.tab_content_container, fg_color="transparent")
+        # Tab Frames (instantiated in current tab_order)
+        self.tab_frames = {}
+        for tab_id in self.tab_order:
+            meta = TAB_METADATA[tab_id]
+            frame = self.tabview.add(meta["title"])
+            self.tab_frames[tab_id] = frame
 
-        self.tab_frames = {
-            "extractor": self.tab_ext,
-            "nc_sorter": self.tab_nc,
-            "mod_nc": self.tab_mod,
-        }
+        self.tab_ext = self.tab_frames["extractor"]
+        self.tab_nc = self.tab_frames["nc_sorter"]
+        self.tab_mod = self.tab_frames["mod_nc"]
 
-        # Backwards compatibility shim for self.tabview
-        self.tabview = _TabViewCompat(self)
+        # Backwards-compatibility wrapper for any self.tabview.set calls
+        _orig_tabview_set = self.tabview.set
+        def _safe_tabview_set(name):
+            norm = str(name).lower().strip()
+            tid = TAB_NAME_MAP.get(norm)
+            if tid and tid in TAB_METADATA:
+                return _orig_tabview_set(TAB_METADATA[tid]["title"])
+            return _orig_tabview_set(name)
+        self.tabview.set = _safe_tabview_set
 
         self.create_extractor_tab()
         self.create_nc_sorter_tab()
         self.create_mod_nc_tab()
 
-        self.init_tab_bar()
+        self._setup_tabview_drag_and_drop()
+
+        active_meta = TAB_METADATA.get(self.active_tab_id, TAB_METADATA["extractor"])
+        try:
+            self.tabview.set(active_meta["title"])
+        except Exception:
+            pass
 
     # ══════════════════════════════════════════════════════════════════════
     #  EXTRACTOR TAB
