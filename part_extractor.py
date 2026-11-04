@@ -302,14 +302,9 @@ def _get_settings_path():
     make_dir_with_permissions(app_folder)
     return os.path.join(app_folder, "steelsync_settings.json")
 
-# ─── Theme & Fast Hardware Rendering ──────────────────────────────────────
+# ─── Theme ────────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
-try:
-    from customtkinter.windows.widgets.core_rendering.draw_engine import DrawEngine
-    DrawEngine.preferred_drawing_method = "circle_shapes"
-except Exception:
-    pass
 
 # Color palette
 _BG          = ("#f2f2f7", "#1a1a2e")   # main window background
@@ -327,7 +322,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -935,14 +930,14 @@ class UnifiedApp(ctk.CTk):
         # Trigger responsive extension relayout if width changed
         curr_w = event.width if event else self.winfo_width()
         last_w = getattr(self, "_last_relayout_w", 0)
-        if abs(curr_w - last_w) >= 25:
+        if abs(curr_w - last_w) >= 15:
             self._last_relayout_w = curr_w
             if getattr(self, "_ext_relayout_timer", None) is not None:
                 try:
                     self.after_cancel(self._ext_relayout_timer)
                 except Exception:
                     pass
-            self._ext_relayout_timer = self.after(30, lambda: self.reposition_extensions())
+            self._ext_relayout_timer = self.after(25, lambda w=curr_w: self.reposition_extensions(w))
 
     def _record_normal_geometry(self):
         try:
@@ -1703,8 +1698,8 @@ class UnifiedApp(ctk.CTk):
                 cb = ctk.CTkCheckBox(
                     self.ext_inner_frame, text=ext, variable=self.extension_vars[ext],
                     fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
-                    text_color=_TEXT_PRI, font=("Segoe UI", 13), corner_radius=4,
-                    checkbox_width=20, checkbox_height=20,
+                    text_color=_TEXT_PRI, font=("Segoe UI", 12), corner_radius=4,
+                    width=0, checkbox_width=18, checkbox_height=18,
                 )
                 self.ext_checkboxes[ext] = cb
 
@@ -1716,43 +1711,37 @@ class UnifiedApp(ctk.CTk):
         self.reposition_extensions()
 
     def reposition_extensions(self, target_width=None):
-        """Dynamically flow checkboxes and Add input into available space, moving up when wide."""
+        """Dynamically flow checkboxes and Add input into available space, wrapping when needed and moving up when space allows."""
         if not hasattr(self, "ext_inner_frame") or not hasattr(self, "ext_add_frame"):
             return
 
-        w = target_width
-        if w is None and hasattr(self, "ext_card"):
-            try:
-                w = self.ext_card.winfo_width()
-            except Exception:
-                w = None
-        if not w or w <= 100:
-            try:
-                w = self.winfo_width()
-            except Exception:
-                w = 960
-        if not w or w <= 100:
-            w = 960
-
-        usable_w = max(320, w - 48)
+        # Determine available width from window or container
+        if target_width is not None and target_width > 100:
+            usable_w = max(250, target_width - 80)
+        elif hasattr(self, "ext_card") and self.ext_card.winfo_width() > 100:
+            usable_w = max(250, self.ext_card.winfo_width() - 36)
+        elif self.winfo_width() > 100:
+            usable_w = max(250, self.winfo_width() - 80)
+        else:
+            usable_w = 850
 
         cur_x = 0
         row = 0
         col = 0
-        item_w = 85
-        add_w = 160
 
         for ext in self.available_extensions:
             cb = self.ext_checkboxes.get(ext)
             if cb:
-                if cur_x + item_w > usable_w and cur_x > 0:
+                w_req = max(cb.winfo_reqwidth(), 42) + 14
+                if cur_x + w_req > usable_w and cur_x > 0:
                     row += 1
                     col = 0
                     cur_x = 0
                 cb.grid(row=row, column=col, padx=(0, 14), pady=3, sticky="w")
-                cur_x += item_w
+                cur_x += w_req
                 col += 1
 
+        add_w = max(self.ext_add_frame.winfo_reqwidth(), 135) + 8
         if cur_x + add_w > usable_w and cur_x > 0:
             row += 1
             col = 0
