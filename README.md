@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.1.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.1.1/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.1.1)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.1.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.1.2/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.1.2)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.1.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.1.1/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.1.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.1.2/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -19,7 +19,7 @@
 - **Sistem Auto-Update inteligent** – Verifică automat versiunile noi din GitHub Release la pornire (fără blocaje, 100% silențios când ești offline). Actualizare cu un singur click fără pierderea portabilității.
 - **Reordonare Tab-uri Floating prin Drag & Drop** – Tab-urile își păstrează estetica nativă flotantă (floating pills) și pot fi reordonate direct prin Drag & Drop cu mouse-ul (sau prin click-dreapta / scurtături). Ordinea preferată se salvează automat și este reținută la repornire.
 - **Memorii Independente pentru Browse** – Câmpul `Sursă` din `File Extractor` are memorie proprie izolată (`extractor_source_last_dir`), în timp ce toate celelalte butoane `Browse` partajează o memorie globală independentă (`global_last_dir`).
-- **Design Complet Responsiv** – Adaptare dinamică la redimensionarea ferestrei și la ecrane compacte (`minsize: 900x650`). Câmpurile de introducere a căilor se extind proporțional pe orizontală, iar terminalul de loguri se scalează automat pe verticală.
+- **Design Complet Responsiv & Randare Ultra-Fluidă** – Fără sacadări la redimensionarea ferestrei (motor optimizat de randare nativă și debouncing). Elementele din cardul de extensii se adaptează dinamic și urcă pe rândurile superioare când au spațiu disponibil, iar câmpurile de input se extind proporțional (`minsize: 900x650`).
 - **File Extractor** – Caută și copiază fișierele unui proiect pe baza unei liste Excel (BOM).
 - **NC Sorter** – Sortează fișierele .nc/.nc1 în foldere după tipul profilului:
   - PLĂCI (S235, S355, Z35, INOX, ALUMINIU)
@@ -31,7 +31,7 @@
 
 ## 🏷️ Versiune curentă
 
-**v1.1.1**
+**v1.1.2**
 
 ## 📖 Ghid Dezvoltare și Reguli Versionare
 Pentru ghidul complet de update și convențiile SemVer (`x.y.z`) dedicate dezvoltatorilor și agenților AI, consultă [AGENTS.md](AGENTS.md).

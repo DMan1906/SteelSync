@@ -302,9 +302,14 @@ def _get_settings_path():
     make_dir_with_permissions(app_folder)
     return os.path.join(app_folder, "steelsync_settings.json")
 
-# ─── Theme ────────────────────────────────────────────────────────────────
+# ─── Theme & Fast Hardware Rendering ──────────────────────────────────────
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+try:
+    from customtkinter.windows.widgets.core_rendering.draw_engine import DrawEngine
+    DrawEngine.preferred_drawing_method = "circle_shapes"
+except Exception:
+    pass
 
 # Color palette
 _BG          = ("#f2f2f7", "#1a1a2e")   # main window background
@@ -322,7 +327,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -915,9 +920,31 @@ class UnifiedApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _on_window_configure(self, event=None):
-        """Track window position and size when in normal (non-maximized) state."""
+        """Smooth, debounced tracking of window resizing and position."""
         if event is not None and getattr(event, "widget", None) != self:
             return
+
+        # Debounce geometry saving (prevents Win32 lag during mouse drag)
+        if getattr(self, "_geom_save_timer", None) is not None:
+            try:
+                self.after_cancel(self._geom_save_timer)
+            except Exception:
+                pass
+        self._geom_save_timer = self.after(200, self._record_normal_geometry)
+
+        # Trigger responsive extension relayout if width changed
+        curr_w = event.width if event else self.winfo_width()
+        last_w = getattr(self, "_last_relayout_w", 0)
+        if abs(curr_w - last_w) >= 25:
+            self._last_relayout_w = curr_w
+            if getattr(self, "_ext_relayout_timer", None) is not None:
+                try:
+                    self.after_cancel(self._ext_relayout_timer)
+                except Exception:
+                    pass
+            self._ext_relayout_timer = self.after(30, lambda: self.reposition_extensions())
+
+    def _record_normal_geometry(self):
         try:
             if self.state() == "normal":
                 self._last_normal_geometry = self.geometry()
@@ -1565,29 +1592,34 @@ class UnifiedApp(ctk.CTk):
         # ──── Extensions card ────
         ext_card = self._make_card(container)
         ext_card.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        self.ext_card = ext_card
 
         section_lbl2 = ctk.CTkLabel(ext_card, text="🔖 Extensii Fișiere", font=("Segoe UI", 14, "bold"), text_color=_TEXT_PRI)
         section_lbl2.pack(anchor="w", padx=16, pady=(8, 2))
 
         self.ext_inner_frame = ctk.CTkFrame(ext_card, fg_color="transparent")
-        self.ext_inner_frame.pack(anchor="w", padx=16, pady=(0, 2))
+        self.ext_inner_frame.pack(fill="x", padx=16, pady=(0, 8))
 
-        self.draw_extensions()
-
-        add_row = ctk.CTkFrame(ext_card, fg_color="transparent")
-        add_row.pack(anchor="w", padx=16, pady=(0, 8))
+        # Add controls container inside ext_inner_frame for unified responsive flow
+        self.ext_add_frame = ctk.CTkFrame(self.ext_inner_frame, fg_color="transparent")
         self.new_ext_entry = ctk.CTkEntry(
-            add_row, width=90, placeholder_text=".ext",
+            self.ext_add_frame, width=80, height=28, placeholder_text=".ext",
             fg_color=_ENTRY_BG, border_color=_CARD_BORDER,
-            text_color=_TEXT_PRI, corner_radius=8, font=("Segoe UI", 12)
+            text_color=_TEXT_PRI, corner_radius=6, font=("Segoe UI", 12)
         )
         self.new_ext_entry.pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
-            add_row, text="＋ Add", width=70, height=30,
+        self.new_ext_entry.bind("<Return>", lambda e: self.add_extension())
+
+        self.add_ext_btn = ctk.CTkButton(
+            self.ext_add_frame, text="＋ Add", width=65, height=28,
             fg_color=_ACCENT, hover_color=_ACCENT_HOV,
-            corner_radius=8, font=("Segoe UI", 12, "bold"),
+            corner_radius=6, font=("Segoe UI", 12, "bold"),
             command=self.add_extension,
-        ).pack(side="left")
+        )
+        self.add_ext_btn.pack(side="left")
+
+        self.ext_checkboxes = {}
+        self.draw_extensions()
 
         # ──── Settings row ────
         settings_card = self._make_card(container)
@@ -1660,24 +1692,72 @@ class UnifiedApp(ctk.CTk):
         self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
 
     def draw_extensions(self):
-        for widget in self.ext_inner_frame.winfo_children():
-            widget.destroy()
-        col = 0
-        row = 0
+        """Create or update checkboxes for available extensions without destroying widgets."""
+        if not hasattr(self, "ext_checkboxes"):
+            self.ext_checkboxes = {}
+
         for ext in self.available_extensions:
             if ext not in self.extension_vars:
                 self.extension_vars[ext] = ctk.BooleanVar(value=True if ext in ['.nc', '.pdf', '.dwg'] else False)
-            cb = ctk.CTkCheckBox(
-                self.ext_inner_frame, text=ext, variable=self.extension_vars[ext],
-                fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
-                text_color=_TEXT_PRI, font=("Segoe UI", 13), corner_radius=4,
-                checkbox_width=20, checkbox_height=20,
-            )
-            cb.grid(row=row, column=col, padx=(0, 18), pady=5, sticky="w")
-            col += 1
-            if col > 4:
-                col = 0
-                row += 1
+            if ext not in self.ext_checkboxes:
+                cb = ctk.CTkCheckBox(
+                    self.ext_inner_frame, text=ext, variable=self.extension_vars[ext],
+                    fg_color=_ACCENT, hover_color=_ACCENT_HOV, border_color=_CARD_BORDER,
+                    text_color=_TEXT_PRI, font=("Segoe UI", 13), corner_radius=4,
+                    checkbox_width=20, checkbox_height=20,
+                )
+                self.ext_checkboxes[ext] = cb
+
+        for ext in list(self.ext_checkboxes.keys()):
+            if ext not in self.available_extensions:
+                self.ext_checkboxes[ext].destroy()
+                del self.ext_checkboxes[ext]
+
+        self.reposition_extensions()
+
+    def reposition_extensions(self, target_width=None):
+        """Dynamically flow checkboxes and Add input into available space, moving up when wide."""
+        if not hasattr(self, "ext_inner_frame") or not hasattr(self, "ext_add_frame"):
+            return
+
+        w = target_width
+        if w is None and hasattr(self, "ext_card"):
+            try:
+                w = self.ext_card.winfo_width()
+            except Exception:
+                w = None
+        if not w or w <= 100:
+            try:
+                w = self.winfo_width()
+            except Exception:
+                w = 960
+        if not w or w <= 100:
+            w = 960
+
+        usable_w = max(320, w - 48)
+
+        cur_x = 0
+        row = 0
+        col = 0
+        item_w = 85
+        add_w = 160
+
+        for ext in self.available_extensions:
+            cb = self.ext_checkboxes.get(ext)
+            if cb:
+                if cur_x + item_w > usable_w and cur_x > 0:
+                    row += 1
+                    col = 0
+                    cur_x = 0
+                cb.grid(row=row, column=col, padx=(0, 14), pady=3, sticky="w")
+                cur_x += item_w
+                col += 1
+
+        if cur_x + add_w > usable_w and cur_x > 0:
+            row += 1
+            col = 0
+            cur_x = 0
+        self.ext_add_frame.grid(row=row, column=col, columnspan=2, padx=(0, 6), pady=3, sticky="w")
 
     def add_extension(self):
         new_ext = self.new_ext_entry.get().strip().lower()
