@@ -273,6 +273,26 @@ class PdfToCadConverter:
             clusters.sort(key=lambda c: (c[1] - c[0]), reverse=True)
             contour_drawings = clusters[0][2]
 
+        # 3.1 Izolare vedere principală pe axa Y (eliminare vederi secundare Top / Topp / Bunn)
+        if only_front_view and len(contour_drawings) > 1:
+            intervals_y = sorted([(d["rect"].y0, d["rect"].y1, d) for d in contour_drawings], key=lambda y: y[0])
+            clusters_y = []
+            cur_y0, cur_y1 = intervals_y[0][0], intervals_y[0][1]
+            cur_drawings_y = [intervals_y[0][2]]
+            for y0, y1, dr in intervals_y[1:]:
+                if y0 - cur_y1 <= 25.0:  # aparțin aceleiași vederi pe Y
+                    cur_y1 = max(cur_y1, y1)
+                    cur_drawings_y.append(dr)
+                else:
+                    clusters_y.append((cur_y0, cur_y1, cur_drawings_y))
+                    cur_y0, cur_y1 = y0, y1
+                    cur_drawings_y = [dr]
+            clusters_y.append((cur_y0, cur_y1, cur_drawings_y))
+
+            # Vederea Front are înălțimea conturului mult mai mare decât Topp (care este doar o bandă de grosime t)
+            clusters_y.sort(key=lambda c: (c[1] - c[0]), reverse=True)
+            contour_drawings = clusters_y[0][2]
+
         # 4. Colectare primitive geometrice
         items = []
         for d in contour_drawings:
