@@ -371,7 +371,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -2019,18 +2019,17 @@ class UnifiedApp(ctk.CTk):
             self.save_settings()
 
     def find_matching_project_folders(self, parent_dir, search_term):
-        """Scan parent_dir for directories matching search_term as whole words."""
+        """Scan parent_dir for directories matching search_term as whole words, traversing all subdirectories."""
         tokens = [t.strip() for t in re.split(r'[\s\-_\.,\(\)\[\]]+', search_term) if t.strip()]
         if not tokens:
             return []
 
         matches = []
-        for root, dirs, files in os.walk(parent_dir):
-            rel_depth = len(os.path.relpath(root, parent_dir).split(os.sep))
-            if rel_depth > 3:
-                dirs.clear()
-                continue
+        parent_base = os.path.basename(parent_dir)
+        if all(re.search(rf'(?:^|[\s\-_\.,\(\)\[\]]){re.escape(token)}(?:$|[\s\-_\.,\(\)\[\]])', parent_base, re.IGNORECASE) for token in tokens):
+            matches.append(parent_dir)
 
+        for root, dirs, files in os.walk(parent_dir, followlinks=True):
             matched_in_level = []
             for d in dirs:
                 all_match = True
@@ -2040,8 +2039,10 @@ class UnifiedApp(ctk.CTk):
                         all_match = False
                         break
                 if all_match:
-                    matched_in_level.append(d)
-                    matches.append(os.path.join(root, d))
+                    full_match_path = os.path.join(root, d)
+                    if full_match_path not in matches:
+                        matched_in_level.append(d)
+                        matches.append(full_match_path)
 
             for d in matched_in_level:
                 dirs.remove(d)
@@ -2367,7 +2368,7 @@ class UnifiedApp(ctk.CTk):
             source_path = Path(source_dir_to_use)
             
             all_files = []
-            for root, _, files in os.walk(source_path):
+            for root, _, files in os.walk(source_path, followlinks=True):
                 for f in files:
                     all_files.append(Path(root) / f)
                     
@@ -3398,7 +3399,7 @@ class UnifiedApp(ctk.CTk):
             self.dwg_log("\n⚠ Solicitare de oprire primită. Se finalizează operațiunea curentă...")
 
     def _dwg_search_worker(self, parent_dir, proj_num, pdf_dir, dest_dir):
-        """Worker thread executing CAD matching & extraction with thickness subfolders and variations."""
+        """Worker thread executing CAD matching & extraction with deep recursion in all subfolders."""
         self.dwg_log("=" * 60)
         self.dwg_log(f"🚀 Pornire Căutare DWG-uri Existente (SteelSync v{APP_VERSION})")
         self.dwg_log(f"• Director Mamă: {parent_dir}")
@@ -3410,53 +3411,74 @@ class UnifiedApp(ctk.CTk):
         make_dir_with_permissions(dest_dir)
 
         # ─── Pasul 1: Localizarea Folderelor de Proiect în Directorul Mamă ───
-        self.dwg_log("🔍 Pasul 1: Scanare directoare proiect în Directorul Mamă...")
+        self.dwg_log("🔍 Pasul 1: Scanare directoare proiect în Directorul Mamă (recursiv în toate subfolderele)...")
         proj_pattern = re.compile(rf'(?<!\d){re.escape(proj_num)}(?!\d)', re.IGNORECASE)
         matched_proj_dirs = []
 
         if proj_pattern.search(os.path.basename(parent_dir)):
             matched_proj_dirs.append(parent_dir)
-        else:
-            for root, dirs, files in os.walk(parent_dir):
-                if self._dwg_cancel_requested:
-                    break
-                to_remove = []
-                for d in dirs:
-                    if proj_pattern.search(d):
-                        matched_proj_dirs.append(os.path.join(root, d))
-                        to_remove.append(d)
-                for d in to_remove:
-                    dirs.remove(d)
 
-        if not matched_proj_dirs:
-            self.dwg_log(f"⚠ Nu s-a găsit niciun folder care să conțină numărul '{proj_num}' în directorul mamă.")
-        else:
+        for root, dirs, files in os.walk(parent_dir, followlinks=True):
+            if self._dwg_cancel_requested:
+                break
+            matched_here = []
+            for d in dirs:
+                if proj_pattern.search(d):
+                    full_d = os.path.join(root, d)
+                    if full_d not in matched_proj_dirs:
+                        matched_proj_dirs.append(full_d)
+                    matched_here.append(d)
+            for d in matched_here:
+                dirs.remove(d)
+
+        if not matched_proj_dirs and os.path.isdir(parent_dir):
+            self.dwg_log(f"ℹ Nu s-a găsit niciun subfolder cu numărul '{proj_num}'. Se utilizează directorul mamă ca proiect direct.")
+            matched_proj_dirs.append(parent_dir)
+        elif matched_proj_dirs:
             self.dwg_log(f"✅ S-au identificat {len(matched_proj_dirs)} directoare de proiect asociate:")
             for p in matched_proj_dirs:
                 self.dwg_log(f"   ↳ {p}")
 
-        # ─── Indexare DWG-uri existente în directoarele găsite ───
-        self.dwg_log("\n📂 Indexare fișiere DWG din directoarele proiectului (inclusiv subfoldere de grosimi)...")
+        # ─── Indexare DWG-uri existente în directoarele găsite (până la capăt) ───
+        self.dwg_log("\n📂 Indexare recursivă completă a fișierelor DWG din toate subfolderele proiectului...")
         dwg_records = []  # list of dicts: path, filename, stem, clean_key, mtime, subfolder, proj_dir
-        generic_folder_names = {'dwg', 'dwgs', 'cad', 'drawings', 'desene', 'model', 'tekla', 'advance steel'}
+        generic_folder_names = {'dwg', 'dwgs', 'cad', 'drawings', 'desene', 'model', 'tekla', 'advance steel', 'export', 'fisiere'}
+        thickness_regex = re.compile(
+            r'^(?:t|pl|p|thk|grosime)?[_\s-]*\d+(?:[\.,]\d+)?[_\s-]*(?:mm)?(?:[_\s-]+[a-z0-9]+)?$|^\d+(?:[\.,]\d+)?$',
+            re.IGNORECASE
+        )
 
+        def detect_thickness_subfolder(dwg_full_path, project_root_path):
+            try:
+                rel = os.path.relpath(os.path.dirname(dwg_full_path), project_root_path)
+            except Exception:
+                rel = os.path.dirname(dwg_full_path)
+            parts = [p.strip() for p in rel.split(os.sep) if p.strip() and p.strip() != '.']
+            if not parts:
+                return ""
+            # Check backwards from immediate parent upwards for explicit thickness pattern
+            for p in reversed(parts):
+                if p.lower() in generic_folder_names:
+                    continue
+                if thickness_regex.match(p):
+                    return p
+            # Check immediate parent if not generic
+            if parts[-1].lower() not in generic_folder_names:
+                return parts[-1]
+            # Check any non-generic part
+            for p in reversed(parts):
+                if p.lower() not in generic_folder_names:
+                    return p
+            return ""
+
+        scanned_dirs_count = 0
         for p_dir in matched_proj_dirs:
             if self._dwg_cancel_requested:
                 break
-            proj_root_name = os.path.basename(p_dir).lower()
-            for root, dirs, files in os.walk(p_dir):
+            for root, dirs, files in os.walk(p_dir, followlinks=True):
                 if self._dwg_cancel_requested:
                     break
-                parent_folder_name = os.path.basename(root)
-                subfolder = ""
-                if parent_folder_name.lower() != proj_root_name and parent_folder_name.lower() not in generic_folder_names:
-                    subfolder = parent_folder_name
-                else:
-                    rel = os.path.relpath(root, p_dir)
-                    rel_parts = [p for p in rel.split(os.sep) if p and p != '.' and p.lower() not in generic_folder_names]
-                    if rel_parts:
-                        subfolder = rel_parts[-1]
-
+                scanned_dirs_count += 1
                 for f in files:
                     if f.lower().endswith(".dwg"):
                         full_p = os.path.join(root, f)
@@ -3469,6 +3491,8 @@ class UnifiedApp(ctk.CTk):
                         except Exception:
                             mtime = 0
 
+                        subfolder = detect_thickness_subfolder(full_p, p_dir)
+
                         dwg_records.append({
                             "path": full_p,
                             "filename": f,
@@ -3479,7 +3503,7 @@ class UnifiedApp(ctk.CTk):
                             "proj_dir": p_dir,
                         })
 
-        self.dwg_log(f"✅ Indexare completă: {len(dwg_records)} fișiere DWG identificate în proiect.")
+        self.dwg_log(f"✅ Indexare completă: {len(dwg_records)} fișiere DWG identificate în {scanned_dirs_count} foldere scanate până la capăt.")
 
         # ─── Helper de potrivire variații ───
         def is_dwg_variation(dwg_k, base_k):
@@ -3497,23 +3521,29 @@ class UnifiedApp(ctk.CTk):
                         return True, f"Variație ({suffix})"
             return False, ""
 
-        # ─── Pasul 2 & 3: Potrivire PDF <-> DWG și Copiere ───
-        self.dwg_log("\n📄 Pasul 2: Analiză și potrivire piese PDF din folderul de desenat...")
+        # ─── Pasul 2 & 3: Potrivire PDF <-> DWG și Copiere (inclusiv subfoldere PDF) ───
+        self.dwg_log("\n📄 Pasul 2: Analiză și potrivire piese PDF din toate subfolderele...")
+        pdf_entries = []  # list of (pdf_filename, full_pdf_path)
         try:
-            pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith(".pdf")]
+            for root, dirs, files in os.walk(pdf_dir, followlinks=True):
+                if self._dwg_cancel_requested:
+                    break
+                for f in files:
+                    if f.lower().endswith(".pdf"):
+                        pdf_entries.append((f, os.path.join(root, f)))
         except Exception as e:
             self.dwg_log(f"❌ Eroare la citirea folderului cu PDF-uri: {e}")
             self.after(0, self._dwg_on_search_complete, [], [], dest_dir, False)
             return
 
-        total_pdfs = len(pdf_files)
-        self.dwg_log(f"S-au găsit {total_pdfs} fișiere PDF de analizat.")
+        total_pdfs = len(pdf_entries)
+        self.dwg_log(f"S-au găsit {total_pdfs} fișiere PDF de analizat în toate subfolderele.")
 
         found_list = []
         missing_list = []
         copied_dest_paths = set()
 
-        for idx, pdf_name in enumerate(pdf_files):
+        for idx, (pdf_name, pdf_path) in enumerate(pdf_entries):
             if self._dwg_cancel_requested:
                 self.dwg_log("\n🛑 Procesul de căutare a fost întrerupt de utilizator.")
                 break
@@ -3522,7 +3552,6 @@ class UnifiedApp(ctk.CTk):
             self.after(0, self.dwg_progress_bar.set, progress_val)
 
             pdf_stem = Path(pdf_name).stem
-            pdf_path = os.path.join(pdf_dir, pdf_name)
 
             # ── Extragere coduri piesă din numele PDF-ului ──
             chunks = re.split(r'[\s_()\[\],;]+', pdf_stem)
