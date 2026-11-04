@@ -384,7 +384,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1836,7 +1836,7 @@ class UnifiedApp(ctk.CTk):
 
         self._label(self.proj_search_frame, text="Nr. / Denumire Proiect:").grid(row=0, column=0, padx=(0, 6), pady=2, sticky="w")
         self._entry(self.proj_search_frame, self.extractor_proj_search, placeholder_text="ex: 1242 sau Fiskebrygga").grid(row=0, column=1, padx=4, pady=2, sticky="ew")
-        ctk.CTkButton(
+        self.btn_verify_proj = ctk.CTkButton(
             self.proj_search_frame,
             text="🔍 Verifică",
             width=110,
@@ -1847,7 +1847,8 @@ class UnifiedApp(ctk.CTk):
             text_color=_TEXT_PRI,
             corner_radius=8,
             command=self.find_project_folder_interactive
-        ).grid(row=0, column=2, padx=(4, 0), pady=2)
+        )
+        self.btn_verify_proj.grid(row=0, column=2, padx=(4, 0), pady=2)
 
         self._label(paths_card, text="Destinație:").grid(row=4, column=0, padx=(16, 6), pady=4, sticky="w")
         self._entry(paths_card, self.dest_dir).grid(row=4, column=1, padx=4, pady=4, sticky="ew")
@@ -2375,34 +2376,61 @@ class UnifiedApp(ctk.CTk):
         except Exception as e:
             self.log(f"  Eroare generare raport status ansambluri: {e}")
 
-    def find_matching_project_folders(self, parent_dir, search_term):
-        """Scan parent_dir for directories matching search_term as whole words, traversing all subdirectories."""
+    def find_matching_project_folders(self, parent_dir, search_term, max_depth=3):
+        """
+        Scan parent_dir shallowly for project directories matching search_term as whole words.
+        Structure: FOLDER MAMA -> CLIENT -> PROIECT -> (does NOT search inside project files/subfolders).
+        """
         tokens = [t.strip() for t in re.split(r'[\s\-_\.,\(\)\[\]]+', search_term) if t.strip()]
         if not tokens:
             return []
 
+        def match_name(name):
+            for token in tokens:
+                pattern = rf'(?:^|[\s\-_\.,\(\)\[\]]){re.escape(token)}(?:$|[\s\-_\.,\(\)\[\]])'
+                if not re.search(pattern, name, re.IGNORECASE):
+                    return False
+            return True
+
         matches = []
-        parent_base = os.path.basename(parent_dir)
-        if all(re.search(rf'(?:^|[\s\-_\.,\(\)\[\]]){re.escape(token)}(?:$|[\s\-_\.,\(\)\[\]])', parent_base, re.IGNORECASE) for token in tokens):
+        parent_base = os.path.basename(parent_dir.rstrip('/\\'))
+        if parent_base and match_name(parent_base):
             matches.append(parent_dir)
+            return matches
 
-        for root, dirs, files in os.walk(parent_dir, followlinks=True):
-            matched_in_level = []
-            for d in dirs:
-                all_match = True
-                for token in tokens:
-                    pattern = rf'(?:^|[\s\-_\.,\(\)\[\]]){re.escape(token)}(?:$|[\s\-_\.,\(\)\[\]])'
-                    if not re.search(pattern, d, re.IGNORECASE):
-                        all_match = False
-                        break
-                if all_match:
-                    full_match_path = os.path.join(root, d)
-                    if full_match_path not in matches:
-                        matched_in_level.append(d)
-                        matches.append(full_match_path)
+        # BFS shallow traversal (Level 0: Parent -> Level 1: Client -> Level 2: Project)
+        queue = [(parent_dir, 0)]
+        visited = set()
 
-            for d in matched_in_level:
-                dirs.remove(d)
+        while queue:
+            curr_dir, depth = queue.pop(0)
+            norm_curr = os.path.normpath(curr_dir).lower()
+            if norm_curr in visited:
+                continue
+            visited.add(norm_curr)
+
+            try:
+                with os.scandir(curr_dir) as it:
+                    subdirs = []
+                    for entry in it:
+                        try:
+                            # Only check directories, skip all files instantly
+                            if entry.is_dir(follow_symlinks=False):
+                                subdirs.append((entry.name, entry.path))
+                        except (PermissionError, OSError):
+                            continue
+            except (PermissionError, OSError):
+                continue
+
+            for name, path in subdirs:
+                if match_name(name):
+                    # Found project folder! DO NOT descend inside it!
+                    if path not in matches:
+                        matches.append(path)
+                else:
+                    # Descend only if depth allows (never descend beyond project level)
+                    if depth + 1 < max_depth:
+                        queue.append((path, depth + 1))
 
         return matches
 
@@ -2412,11 +2440,11 @@ class UnifiedApp(ctk.CTk):
         search_term = self.extractor_proj_search.get().strip()
 
         if not parent_dir or not os.path.exists(parent_dir):
-            messagebox.showwarning("Atenție", "Te rog selectează Folderul Mamă valid.")
+            messagebox.showwarning("Atenție", "Te rog selectează un Folder Mamă valid.")
             return None
 
         if not search_term:
-            messagebox.showwarning("Atenție", "Te rog introdu numărul sau denumirea proiectului căutat (ex: 1242).")
+            messagebox.showwarning("Atenție", "Te rog introdu numărul sau denumirea proiectului căutat (ex: 1147).")
             return None
 
         matches = self.find_matching_project_folders(parent_dir, search_term)
@@ -2443,13 +2471,64 @@ class UnifiedApp(ctk.CTk):
                 return None
 
     def find_project_folder_interactive(self):
-        """Button click handler to test and verify project search immediately."""
-        chosen = self.resolve_project_folder()
-        if chosen:
+        """Button click handler to test and verify project search asynchronously without freezing UI."""
+        parent_dir = self.source_dir.get().strip()
+        search_term = self.extractor_proj_search.get().strip()
+
+        if not parent_dir or not os.path.exists(parent_dir):
+            messagebox.showwarning("Atenție", "Te rog selectează un Folder Mamă valid.")
+            return
+
+        if not search_term:
+            messagebox.showwarning("Atenție", "Te rog introdu numărul sau denumirea proiectului căutat (ex: 1147).")
+            return
+
+        if getattr(self, "_proj_search_in_progress", False):
+            return
+
+        self._proj_search_in_progress = True
+        if hasattr(self, "btn_verify_proj"):
+            self.btn_verify_proj.configure(text="⏳ Căutare...", state="disabled")
+        self.log(f"\n🔍 Căutare asincronă proiect '{search_term}' în: {parent_dir}...")
+
+        def _worker():
+            try:
+                matches = self.find_matching_project_folders(parent_dir, search_term)
+            except Exception as e:
+                matches = []
+                self.log(f"Eroare căutare proiect: {e}")
+            self.after(0, lambda: self._on_verify_project_complete(matches, search_term, parent_dir))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_verify_project_complete(self, matches, search_term, parent_dir):
+        """Callback on UI thread when asynchronous project search completes."""
+        self._proj_search_in_progress = False
+        if hasattr(self, "btn_verify_proj"):
+            self.btn_verify_proj.configure(text="🔍 Verifică", state="normal")
+
+        if not matches:
+            self.log(f"❌ Proiectul '{search_term}' nu a fost găsit în {parent_dir}.")
+            messagebox.showwarning(
+                "Proiect Negăsit",
+                f"Nu s-a găsit niciun folder de proiect care să conțină '{search_term}' ca și cuvânt întreg în:\n\n{parent_dir}"
+            )
+        elif len(matches) == 1:
+            chosen = matches[0]
+            self.log(f"✅ Proiect identificat cu succes:\n   Folder: {os.path.basename(chosen)}\n   Cale: {chosen}")
             messagebox.showinfo(
                 "Proiect Identificat",
-                f"A fost identificat folderul de proiect:\n\n{os.path.basename(chosen)}\n({chosen})"
+                f"A fost identificat cu succes folderul de proiect:\n\n📁 {os.path.basename(chosen)}\n\nCale: {chosen}"
             )
+        else:
+            self.log(f"⚠ S-au găsit {len(matches)} foldere care corespund termenului '{search_term}'. Deschidere dialog selecție...")
+            dlg = ProjectSelectionDialog(self, matches, search_term)
+            self.wait_window(dlg)
+            chosen = dlg.selected_path
+            if chosen:
+                self.log(f"✅ Proiect selectat: {os.path.basename(chosen)} ({chosen})")
+            else:
+                self.log("⚠ Selecția proiectului a fost anulată.")
 
     def browse_source(self):
         """Browse source folder exclusively for File Extractor (Requirement #3)."""

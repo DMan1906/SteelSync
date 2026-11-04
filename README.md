@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.5.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.5.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.5.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.1/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.5.1)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.5.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.5.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.5.1/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,10 @@
 
 ## 🚀 Funcționalități
 
-- **📑 Extracție Desene de Ansamblu din Excel Ansambluri (NOU în v1.5.0)**:
+- **⚡ Căutare Asincronă și Rapidă a Folderului de Proiect (NOU în v1.5.1)**:
+  - Căutarea după `Nr. / Denumire Proiect` rulează complet asincron pe un thread dedicat de fundal, eliminând complet blocarea/înghețarea interfeței grafice pe drive-uri de rețea (`Q:\...`).
+  - Scanare inteligentă pe structura specifică `Folder Mamă -> Client -> Proiect`: localizează directorul proiectului fără a scana inutil în interiorul fișierelor de proiect, oferind rezultate aproape instantanee.
+- **📑 Extracție Desene de Ansamblu din Excel Ansambluri (v1.5.0)**:
   - Opțiune dedicată în `File Extractor` pentru parsarea automată a fișierelor Excel cu ansambluri (Assembly Part List, ex. `1242 - 48.2 Fiskebrygga A4.xlsx`).
   - Auto-detecție inteligentă a coloanei de ansamblu (`Denumire ansamblu` / Coloana B), ignorând sub-piesele și rândurile de sumar.
   - Căutare recursivă cu toleranță la cratimă/revizii și salvare automată în subfolderul dedicat `Destinație/Desene Ansamblu`.
