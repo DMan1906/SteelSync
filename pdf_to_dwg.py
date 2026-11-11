@@ -145,6 +145,29 @@ class PdfToCadConverter:
                     if meta["stykk_y"] is None or b[1] < meta["stykk_y"]:
                         meta["stykk_y"] = b[1]
 
+        # 1.5 Aliniere spațială exactă pe coloana LENGDE / LENGTH din tabelul STYKKLISTE
+        words = page.get_text("words")
+        lengde_headers = [w for w in words if re.match(r'^LENGDE$|^LENGTH$', w[4], re.IGNORECASE)]
+        if not lengde_headers:
+            lengde_headers = [w for w in words if 'LENGDE' in w[4].upper()]
+
+        spatial_candidates = []
+        for hw in lengde_headers:
+            hx0, hy0, hx1, hy1, htxt = hw[:5]
+            for w in words:
+                wx0, wy0, wx1, wy1, wtxt = w[:5]
+                # Numărul de sub antetul LENGDE în interval de 45 pt pe verticală
+                if hy1 < wy0 < hy1 + 45:
+                    dist_x = abs((wx0 + wx1) / 2.0 - (hx0 + hx1) / 2.0)
+                    clean_txt = wtxt.replace(',', '.')
+                    if clean_txt.replace('.', '', 1).isdigit():
+                        val = float(clean_txt)
+                        if val > 15:
+                            spatial_candidates.append((dist_x, val))
+        if spatial_candidates:
+            spatial_candidates.sort(key=lambda c: c[0])
+            meta["lengde"] = spatial_candidates[0][1]
+
         # 2. Extragere din blocul de date STYKKLISTE
         for b in blocks:
             b_txt = b[4].strip()
@@ -169,12 +192,17 @@ class PdfToCadConverter:
                                 meta["pos_no"] = prev
                                 break
 
-                    for sub in lines[idx + 1:]:
-                        if sub.replace('.', '', 1).isdigit():
-                            val = float(sub)
-                            if val > 10 and (meta["lengde"] is None or val > meta["lengde"]):
-                                meta["lengde"] = val
-                                break
+                    if not meta["lengde"]:
+                        candidates_sub = []
+                        for sub in lines[idx + 1:]:
+                            clean_sub = sub.replace(',', '.')
+                            if clean_sub.replace('.', '', 1).isdigit():
+                                val = float(clean_sub)
+                                if val >= 50:
+                                    candidates_sub.append(val)
+                        if candidates_sub:
+                            # Lungimea reală este numărul mare din rând (nu cantitatea/antall)
+                            meta["lengde"] = max(candidates_sub)
                     break
             if meta["pos_no"]:
                 break
@@ -846,13 +874,31 @@ class PdfToCadConverter:
             # 3. Detectare stații de ruptură Tekla (view shortening breaks)
             stations = []
             is_shortened = False
-            if calibrate_1to1 and target_len and (target_len / drawn_len_mm >= 1.35):
-                raw_stations = self._find_view_break_stations(items, bbox)
-                if raw_stations:
-                    stations = self._calculate_break_expansions(
-                        raw_stations, items, bbox, target_len, base_scale_factor, page, meta["stykk_y"]
-                    )
-                    is_shortened = bool(stations)
+            raw_stations = self._find_view_break_stations(items, bbox)
+
+            # Dacă lungimea extrasă este mai mică decât desenul existent pe foaie, a fost citit un ANTALL sau alt număr
+            if target_len and target_len <= drawn_len_mm:
+                target_len = None
+
+            # Dacă avem ruptură Tekla dar nu avem target_len valid, căutăm cota principală deasupra vederii Front
+            if calibrate_1to1 and raw_stations and not target_len:
+                dim_candidates = []
+                for w in page.get_text("words"):
+                    clean_w = w[4].replace(",", ".")
+                    if clean_w.replace(".", "", 1).isdigit():
+                        v = float(clean_w)
+                        if v > drawn_len_mm * 1.2:
+                            dim_candidates.append((w[1], v))
+                if dim_candidates:
+                    dim_candidates.sort(key=lambda item: abs(item[0] - bbox["min_y"]))
+                    target_len = dim_candidates[0][1]
+                    meta["lengde"] = target_len
+
+            if calibrate_1to1 and target_len and (target_len / drawn_len_mm >= 1.35) and raw_stations:
+                stations = self._calculate_break_expansions(
+                    raw_stations, items, bbox, target_len, base_scale_factor, page, meta["stykk_y"]
+                )
+                is_shortened = bool(stations)
 
             doc.close()
 
@@ -930,6 +976,13 @@ class PdfToCadConverter:
             # Adăugăm liniile de legătură (bridging lines) peste fiecare stație de ruptură
             if is_shortened:
                 for s in stations:
+                    for xl, xr, y, idx1, idx2 in s["pairs"]:
+                        p_left = pt_to_cad(fitz.Point(xl, y))
+                        p_right = pt_to_cad(fitz.Point(xr, y))
+                        raw_cad_lines.append((p_left, p_right))
+            elif raw_stations:
+                # Chiar dacă nu se extinde scara, unim rupturile Tekla pentru a nu lăsa goluri deschise în contur
+                for s in raw_stations:
                     for xl, xr, y, idx1, idx2 in s["pairs"]:
                         p_left = pt_to_cad(fitz.Point(xl, y))
                         p_right = pt_to_cad(fitz.Point(xr, y))
