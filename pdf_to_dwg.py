@@ -347,7 +347,12 @@ class PdfToCadConverter:
                     cur_drawings_y = [dr]
             clusters_y.append((cur_y0, cur_y1, cur_drawings_y))
 
-            clusters_y.sort(key=lambda c: (c[1] - c[0]), reverse=True)
+            # Sortăm clusterele pe Y după lățimea orizontală totală (X-span) pentru a alege vederea principală Front (și nu secțiuni laterale înguste gen A-A)
+            def _cluster_x_span(c):
+                dr_list = c[2]
+                return max(d["rect"].x1 for d in dr_list) - min(d["rect"].x0 for d in dr_list)
+
+            clusters_y.sort(key=_cluster_x_span, reverse=True)
             contour_drawings = clusters_y[0][2]
 
         # 4. Colectare primitive geometrice
@@ -446,12 +451,43 @@ class PdfToCadConverter:
         return clusters
 
     @classmethod
-    def _calculate_break_expansions(cls, stations, items, bbox, target_len, base_scale, page, stykk_y):
+    def detect_holes_in_bbox(cls, page, bbox):
+        """
+        Detectează găurile circulare ale piesei aflate în interiorul vederii Front.
+        În PDF-urile Tekla, găurile sunt reprezentate prin 4 curbe Bezier circulare.
+        Returnează lista [{'center': (cx, cy), 'radius': r_pt}]
+        """
+        drawings = page.get_drawings()
+        holes = []
+        for d in drawings:
+            r = d["rect"]
+            # Verificăm să fie în interiorul cutiei de încadrare a vederii Front
+            if not (bbox["min_x"] - 5.0 <= r.x0 and r.x1 <= bbox["max_x"] + 5.0 and
+                    bbox["min_y"] - 5.0 <= r.y0 and r.y1 <= bbox["max_y"] + 5.0):
+                continue
+
+            items = d.get("items", [])
+            if len(items) == 4 and all(it[0] == "c" for it in items):
+                cx = (r.x0 + r.x1) / 2.0
+                cy = (r.y0 + r.y1) / 2.0
+                rx = (r.x1 - r.x0) / 2.0
+                ry = (r.y1 - r.y0) / 2.0
+                if rx > 0 and ry > 0 and abs(rx - ry) < 0.35 * max(rx, ry) and 0.4 <= rx <= 45.0:
+                    rad = (rx + ry) / 2.0
+                    if not any(math.hypot(cx - h["center"][0], cy - h["center"][1]) < 1.0 for h in holes):
+                        holes.append({
+                            "center": (cx, cy),
+                            "radius": rad
+                        })
+        return holes
+
+    @classmethod
+    def _calculate_break_expansions(cls, stations, items, bbox, target_len, base_scale, page, stykk_y, holes=None):
         """
         Calculează expansiunea exactă în milimetri pentru fiecare stație de ruptură (break station).
         Pentru 1 ruptură: exp = target_len - total_drawn_solid_mm.
         Pentru multi-break (N rupturi): identifică cotele din lanțul de cotare asociate fiecărei stații
-        și calculează expansiunea fără a distorsiona decupajele dintre rupturi.
+        și calculează expansiunea fără a distorsiona decupajele sau găurile dintre rupturi.
         """
         total_gaps_pt = sum(s["xr"] - s["xl"] for s in stations)
         total_drawn_solid_mm = (bbox["width"] - total_gaps_pt) * base_scale
@@ -475,42 +511,62 @@ class PdfToCadConverter:
 
         matched_dims = []
         for s in stations:
-            candidates = [dw for dw in dim_words if abs(dw[2] - s["center"]) < 5.0]
+            candidates = [dw for dw in dim_words if abs(dw[2] - s["center"]) < 6.0]
             if candidates:
                 best = min(candidates, key=lambda x: abs(x[2] - s["center"]))
                 matched_dims.append(best[4])
             else:
                 matched_dims.append(None)
 
-        # Găsim liniile verticale pentru delimitarea segmentelor fizice
+        # Găsim liniile verticale și găurile pentru delimitarea segmentelor fizice
         v_coords = []
         for it in items:
             if it[0] == "l" and abs(it[1].x - it[2].x) < 0.25:
                 v_coords.append(round((it[1].x + it[2].x) / 2.0, 2))
         v_coords = sorted(list(set(v_coords)))
 
+        feat_x = [vx for vx in v_coords if bbox["min_x"] + 1.0 < vx < bbox["max_x"] - 1.0]
+        if holes:
+            for h in holes:
+                hx = h["center"][0]
+                if bbox["min_x"] + 1.0 < hx < bbox["max_x"] - 1.0:
+                    feat_x.append(hx)
+        feat_x = sorted(list(set(feat_x)))
+
+        # Stabilim granițele dintre segmentele fiecărei stații
+        boundaries = [bbox["min_x"]]
+        for i in range(len(stations) - 1):
+            s1_r = stations[i]["xr"]
+            s2_l = stations[i + 1]["xl"]
+            between = [fx for fx in feat_x if s1_r <= fx <= s2_l]
+            if between:
+                b_x = sum(between) / len(between)
+            else:
+                b_x = (s1_r + s2_l) / 2.0
+            boundaries.append(b_x)
+        boundaries.append(bbox["max_x"])
+
+        expansions = []
         if all(d is not None for d in matched_dims):
-            expansions = []
             for i in range(len(stations)):
-                bl = stations[i]["xl"]
-                br = stations[i]["xr"]
-                left_bounds = [vx for vx in v_coords if vx <= bl]
-                b_left = max(left_bounds) if left_bounds else bbox["min_x"]
-                right_bounds = [vx for vx in v_coords if vx >= br]
-                b_right = min(right_bounds) if right_bounds else bbox["max_x"]
-                seg_drawn_mm = ((b_right - b_left) - (br - bl)) * base_scale
+                b_left = boundaries[i]
+                b_right = boundaries[i + 1]
+                gap = stations[i]["xr"] - stations[i]["xl"]
+                seg_drawn_mm = ((b_right - b_left) - gap) * base_scale
                 exp_i = max(0.0, matched_dims[i] - seg_drawn_mm)
                 expansions.append(exp_i)
 
             sum_exp = sum(expansions)
-            scale_exp = (total_missing_mm / sum_exp) if sum_exp > 0 else 1.0
-            for i, s in enumerate(stations):
-                s["exp"] = expansions[i] * scale_exp
-        else:
-            # Fallback uniform dacă nu toate cotele au fost găsite în text
-            exp_per_station = total_missing_mm / len(stations)
-            for s in stations:
-                s["exp"] = max(0.0, exp_per_station)
+            if sum_exp > 0:
+                scale_exp = total_missing_mm / sum_exp
+                for i, s in enumerate(stations):
+                    s["exp"] = expansions[i] * scale_exp
+                return stations
+
+        # Fallback uniform dacă nu toate cotele au fost găsite sau sum_exp <= 0
+        exp_per_station = total_missing_mm / len(stations)
+        for s in stations:
+            s["exp"] = max(0.0, exp_per_station)
 
         return stations
 
@@ -894,9 +950,12 @@ class PdfToCadConverter:
                     target_len = dim_candidates[0][1]
                     meta["lengde"] = target_len
 
+            # Detectare găuri circulare în interiorul vederii Front
+            holes = self.detect_holes_in_bbox(page, bbox)
+
             if calibrate_1to1 and target_len and (target_len / drawn_len_mm >= 1.35) and raw_stations:
                 stations = self._calculate_break_expansions(
-                    raw_stations, items, bbox, target_len, base_scale_factor, page, meta["stykk_y"]
+                    raw_stations, items, bbox, target_len, base_scale_factor, page, meta["stykk_y"], holes=holes
                 )
                 is_shortened = bool(stations)
 
@@ -1057,6 +1116,19 @@ class PdfToCadConverter:
                         start_angle=a_start,
                         end_angle=a_end,
                         dxfattribs={"layer": "0"},
+                    )
+
+            # 12. Adăugare găuri circulare interioare (CIRCLE pe layer 0)
+            if holes:
+                scale_for_holes = base_scale_factor if is_shortened else scale_final
+                for h in holes:
+                    h_center_pt = fitz.Point(h["center"][0], h["center"][1])
+                    cad_center = pt_to_cad(h_center_pt)
+                    cad_radius = h["radius"] * scale_for_holes
+                    msp.add_circle(
+                        center=cad_center,
+                        radius=cad_radius,
+                        dxfattribs={"layer": "0"}
                     )
 
             # 9. Salvare DXF / Conversie DWG
