@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.1/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.1)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.2/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.2)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.1/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.2/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,9 +16,10 @@
 
 ## 🚀 Funcționalități
 
-- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.1)**:
+- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.2)**:
   - **Reconstrucție Topologică cu Snapping Magnetic (Grid & Union-Find):** Elimină 100% micro-golurile dintre linii (gaps de 0.01 - 0.5 mm) și treptele decalate, unind nodurile adiacente în puncte identice exacte.
   - **Generare Nativă de Polilinii Închise (`LWPOLYLINE`):** Conturul piesei și toate decupajele/găurile interioare sunt generate ca entități polilinie continuă închisă (`closed=True`), gata pentru import direct în softurile de nesting (Metalix, Lantek, Pronest) fără erori de "contur deschis".
+  - **Configurare Nativă Stil Cotare 1:1 (`DIMLFAC = 1.0`):** Toate fișierele DWG/DXF generate au stilul de cotare presetat cu factorul de multiplicare 1.0 (nu 100.0), astfel încât cotele puse în AutoCAD (`DIMENSION`) să corespundă 100% cu măsurătoarea reală (`MEASURE`).
   - **Racordări Curbe Native (Fillet Arcs via Bulge):** Arcele de racordare sunt încorporate matematic direct în polilinie prin parametrul `bulge`, eliminând aproximarea prin linii frânte sau arce decuplate.
   - **Filtrare Avansată Cote și Săgeți de Secțiune:** Ignoră săgețile mari de secțiune (A-A, B-B), liniile ajutătoare de cotă și cartușul, izolând strict conturul piesei chiar și atunci când tabelul STYKKLISTE se află în partea superioară a desenului.
   - **Suport Multi-Break Tekla pentru Decupaje Marginale:** Piesele lungi scurtate în Tekla cu decupaje deschise (notches) își păstrează forma corectă cu golurile decupate din contur (fără linii suprapuse prin decupaje).

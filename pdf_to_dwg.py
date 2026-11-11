@@ -965,6 +965,21 @@ class PdfToCadConverter:
             # 11. Creare document DXF cu entități curate
             dxf_doc = ezdxf.new("R2010", setup=True)
             dxf_doc.units = ezdxf.units.MM
+
+            # Configurare parametri de cotare metrică 1:1 (mm)
+            # Forțăm ca stilul activ și toate stilurile de cotare să aibă factorul de scalare DIMLFAC = 1.0 (nu 100.0)
+            dxf_doc.header["$DIMLFAC"] = 1.0
+            dxf_doc.header["$DIMSCALE"] = 1.0
+            dxf_doc.header["$DIMSTYLE"] = "Standard"
+            dxf_doc.header["$MEASUREMENT"] = 1  # 1 = Metric
+            dxf_doc.header["$INSUNITS"] = 4     # 4 = Millimeters
+            dxf_doc.header["$LUNITS"] = 2       # 2 = Decimal
+            dxf_doc.header["$DIMLUNIT"] = 2     # 2 = Decimal
+
+            for ds in dxf_doc.dimstyles:
+                ds.dxf.dimlfac = 1.0
+                ds.dxf.dimscale = 1.0
+
             msp = dxf_doc.modelspace()
             dxf_doc.layers.add("CONTUR_PIESA", color=4)  # Cyan
 
