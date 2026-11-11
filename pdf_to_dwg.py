@@ -131,15 +131,19 @@ class PdfToCadConverter:
             "profil_width": None,
             "profil_thickness": None,
             "stykk_y": None,
+            "top_margin_y": 20.0,
             "clean_name": None,
         }
 
-        # 1. Determinare Y pentru STYKKLISTE / Cartuș
+        # 1. Determinare Y pentru STYKKLISTE / Cartuș (diferențiere sus vs jos)
         for b in blocks:
             txt = b[4].lower()
-            if any(k in txt for k in ["stykkliste", "arbeidstegning", "pos.nummer", "originalformat"]):
-                if meta["stykk_y"] is None or b[1] < meta["stykk_y"]:
-                    meta["stykk_y"] = b[1]
+            if "stykkliste" in txt and b[1] < page.rect.height * 0.35:
+                meta["top_margin_y"] = max(meta["top_margin_y"], b[3] + 8.0)
+            elif any(k in txt for k in ["stykkliste", "arbeidstegning", "pos.nummer", "originalformat"]):
+                if b[1] >= page.rect.height * 0.40:
+                    if meta["stykk_y"] is None or b[1] < meta["stykk_y"]:
+                        meta["stykk_y"] = b[1]
 
         # 2. Extragere din blocul de date STYKKLISTE
         for b in blocks:
@@ -155,10 +159,15 @@ class PdfToCadConverter:
                         pass
 
                     if idx > 0:
-                        prev = lines[idx - 1].strip()
-                        clean_prev = re.sub(r'[^A-Za-z0-9]', '', prev).upper()
-                        if clean_prev and clean_prev not in self.BLACKLIST_NAMES and any(c.isdigit() for c in clean_prev):
-                            meta["pos_no"] = prev
+                        # Căutăm în sus primul rând care nu este un simplu număr/greutate (ex. 6.6)
+                        for look_back in range(idx - 1, -1, -1):
+                            prev = lines[look_back].strip()
+                            clean_prev = re.sub(r'[^A-Za-z0-9]', '', prev).upper()
+                            if clean_prev.replace('.', '').isdigit():
+                                continue
+                            if clean_prev and clean_prev not in self.BLACKLIST_NAMES and any(c.isdigit() for c in clean_prev):
+                                meta["pos_no"] = prev
+                                break
 
                     for sub in lines[idx + 1:]:
                         if sub.replace('.', '', 1).isdigit():
@@ -222,18 +231,18 @@ class PdfToCadConverter:
 
         return meta
 
-    def extract_geometry_items(self, page, stykk_y=None, only_front_view=True):
+    def extract_geometry_items(self, page, stykk_y=None, top_margin_y=20.0, only_front_view=True):
         """
         Extrage geometria curată a piesei:
-        - Filtrează cartușul și tabelele.
+        - Filtrează cartușul și tabelele (atât când STYKKLISTE este jos, cât și când este sus).
         - Elimină automat liniile de cotă, cotele, săgețile și simbolurile de secțiune (cutting planes).
         - Izolează vederea principală (Front) față de secțiunile laterale înguste și vederea Topp.
         - Păstrează decupajele, găurile și colțurile 100% intacte.
         """
-        max_y = (stykk_y - 8) if stykk_y else (page.rect.height * 0.72)
+        max_y = (stykk_y - 8) if stykk_y else (page.rect.height * 0.88)
         margin_x0 = 20
         margin_x1 = page.rect.width - 20
-        margin_y0 = 20
+        margin_y0 = top_margin_y if top_margin_y else 20.0
 
         drawings = page.get_drawings()
         graphic_drawings = [
@@ -494,10 +503,10 @@ class PdfToCadConverter:
             x1, y1 = p1[0], p1[1]
             x2, y2 = p2[0], p2[1]
             if abs(y1 - y2) < 0.25:
-                y_key = round((y1 + y2) / 2.0, 1)
+                y_key = round((y1 + y2) / 2.0, 2)
                 h_by_y[y_key].append((min(x1, x2), max(x1, x2)))
             elif abs(x1 - x2) < 0.25:
-                x_key = round((x1 + x2) / 2.0, 1)
+                x_key = round((x1 + x2) / 2.0, 2)
                 v_by_x[x_key].append((min(y1, y2), max(y1, y2)))
             else:
                 others.append((p1, p2))
@@ -561,6 +570,166 @@ class PdfToCadConverter:
             return a, b
         else:
             return b, a
+
+    @staticmethod
+    def calculate_arc_bulge(p1, p2, center, mid):
+        """
+        Calculează valoarea bulge cu semnul matematic corect pentru un arc de la p1 la p2
+        care trece prin mid, având centrul în center.
+        bulge = tan(theta / 4)
+        bulge > 0: arc CCW (la stânga)
+        bulge < 0: arc CW (la dreapta)
+        """
+        cx, cy = center
+        a1 = math.degrees(math.atan2(p1[1] - cy, p1[0] - cx)) % 360
+        a2 = math.degrees(math.atan2(p2[1] - cy, p2[0] - cx)) % 360
+        am = math.degrees(math.atan2(mid[1] - cy, mid[0] - cx)) % 360
+
+        sweep_ccw = (a2 - a1) % 360
+        mid_ccw = (am - a1) % 360
+
+        if 0 < mid_ccw < sweep_ccw:
+            theta_rad = math.radians(sweep_ccw)
+            return math.tan(theta_rad / 4.0)
+        else:
+            sweep_cw = (a1 - a2) % 360
+            theta_rad = math.radians(sweep_cw)
+            return -math.tan(theta_rad / 4.0)
+
+    @staticmethod
+    def snap_points_grid(segments, tol=0.5):
+        """
+        Snap-uiește punctele folosind o grilă de discretizare spațială (spatial hash) și Union-Find.
+        Garantează fuziunea tranzitivă completă a nodurilor adiacente din toleranță.
+        Elimină 100% micro-golurile (gaps) și treptele dintre linii.
+        """
+        if not segments:
+            return []
+
+        raw_pts = []
+        for p1, p2 in segments:
+            raw_pts.append((float(p1[0]), float(p1[1])))
+            raw_pts.append((float(p2[0]), float(p2[1])))
+
+        parent = list(range(len(raw_pts)))
+
+        def find(i):
+            path = []
+            while parent[i] != i:
+                path.append(i)
+                i = parent[i]
+            for node in path:
+                parent[node] = i
+            return i
+
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j:
+                parent[root_j] = root_i
+
+        grid = defaultdict(list)
+        cell_size = tol
+        for idx, (x, y) in enumerate(raw_pts):
+            cx = int(math.floor(x / cell_size))
+            cy = int(math.floor(y / cell_size))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    cell_key = (cx + dx, cy + dy)
+                    if cell_key in grid:
+                        for other_idx in grid[cell_key]:
+                            ox, oy = raw_pts[other_idx]
+                            if math.hypot(x - ox, y - oy) <= tol:
+                                union(idx, other_idx)
+            grid[(cx, cy)].append(idx)
+
+        groups = defaultdict(list)
+        for idx in range(len(raw_pts)):
+            groups[find(idx)].append(raw_pts[idx])
+
+        group_centers = {}
+        for root, pts_in_group in groups.items():
+            avg_x = sum(p[0] for p in pts_in_group) / float(len(pts_in_group))
+            avg_y = sum(p[1] for p in pts_in_group) / float(len(pts_in_group))
+            rx = round(avg_x, 2)
+            ry = round(avg_y, 2)
+            if abs(rx - round(rx)) < 0.03:
+                rx = round(rx)
+            if abs(ry - round(ry)) < 0.03:
+                ry = round(ry)
+            group_centers[root] = (rx, ry)
+
+        snapped_segments = []
+        for i in range(0, len(raw_pts), 2):
+            sp1 = group_centers[find(i)]
+            sp2 = group_centers[find(i + 1)]
+            if sp1 != sp2:
+                snapped_segments.append((sp1, sp2))
+
+        return snapped_segments
+
+    @classmethod
+    def extract_all_closed_loops(cls, lines, arcs=None):
+        """
+        Extrage toate ciclurile închise (contur exterior + decupaje / găuri interioare).
+        Fiecare ciclu este o listă ordonată de vertexuri (x, y, 0, 0, bulge) gata pentru LWPOLYLINE.
+        """
+        adj = defaultdict(list)
+        edges = []
+
+        for p1, p2 in lines:
+            p1_r = (round(p1[0], 2), round(p1[1], 2))
+            p2_r = (round(p2[0], 2), round(p2[1], 2))
+            e_idx = len(edges)
+            edges.append((p1_r, p2_r, False))
+            adj[p1_r].append((p2_r, 0.0, e_idx))
+            adj[p2_r].append((p1_r, 0.0, e_idx))
+
+        if arcs:
+            for p_start, p_end, center, mid in arcs:
+                s_r = (round(p_start[0], 2), round(p_start[1], 2))
+                e_r = (round(p_end[0], 2), round(p_end[1], 2))
+                b_fwd = cls.calculate_arc_bulge(s_r, e_r, center, mid)
+                b_rev = cls.calculate_arc_bulge(e_r, s_r, center, mid)
+                e_idx = len(edges)
+                edges.append((s_r, e_r, True))
+                adj[s_r].append((e_r, b_fwd, e_idx))
+                adj[e_r].append((s_r, b_rev, e_idx))
+
+        visited_edges = set()
+        loops = []
+
+        for node in sorted(adj.keys()):
+            for next_pt, bulge, e_idx in adj[node]:
+                if e_idx in visited_edges:
+                    continue
+
+                chain = []
+                curr = node
+                start_loop = node
+
+                while True:
+                    candidates = [c for c in adj[curr] if c[2] not in visited_edges]
+                    if not candidates:
+                        break
+
+                    best_cand = candidates[0]
+                    for c in candidates:
+                        if c[0] == start_loop and len(chain) >= 2:
+                            best_cand = c
+                            break
+
+                    nxt, b_val, edge_num = best_cand
+                    visited_edges.add(edge_num)
+                    chain.append((curr[0], curr[1], 0, 0, b_val))
+                    curr = nxt
+                    if curr == start_loop:
+                        break
+
+                if curr == start_loop and len(chain) >= 3:
+                    loops.append(chain)
+
+        return loops
 
     @classmethod
     def _detect_fillet_arcs(cls, items, exclude_indices=None):
@@ -656,7 +825,7 @@ class PdfToCadConverter:
 
             # 2. Extragere geometrie curată
             items, bbox = self.extract_geometry_items(
-                page, stykk_y=meta["stykk_y"], only_front_view=only_front_view
+                page, stykk_y=meta["stykk_y"], top_margin_y=meta.get("top_margin_y", 20.0), only_front_view=only_front_view
             )
 
             if not items or not bbox or bbox["width"] <= 0 or bbox["height"] <= 0:
@@ -766,32 +935,62 @@ class PdfToCadConverter:
                         p_right = pt_to_cad(fitz.Point(xr, y))
                         raw_cad_lines.append((p_left, p_right))
 
-            # 7. Unire muchii coliniare adiacente (eliminare goluri și linii suprapuse)
-            final_lines = self._merge_collinear_lines(raw_cad_lines)
+            # 7. Unire muchii coliniare adiacente (eliminare linii suprapuse)
+            merged_lines = self._merge_collinear_lines(raw_cad_lines)
 
-            # 8. Creare document DXF cu entități curate
+            # 8. Snapping magnetic de noduri (eliminare micro-goluri 0.01 - 0.5 mm)
+            final_lines = self.snap_points_grid(merged_lines, tol=0.5)
+
+            # 9. Snap capete arce la cele mai apropiate noduri din contur
+            snapped_arcs_data = []
+            if fillet_arcs:
+                pts_contour = [p for l in final_lines for p in l]
+                for cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt in fillet_arcs:
+                    c_cad = pt_to_cad(fitz.Point(cx_pdf, cy_pdf))
+                    start_cad = pt_to_cad(start_pt)
+                    end_cad = pt_to_cad(end_pt)
+                    mid_cad = pt_to_cad(mid_pt)
+                    if pts_contour:
+                        s_snap = min(pts_contour, key=lambda q: math.hypot(q[0] - start_cad[0], q[1] - start_cad[1]))
+                        e_snap = min(pts_contour, key=lambda q: math.hypot(q[0] - end_cad[0], q[1] - end_cad[1]))
+                        if math.hypot(s_snap[0] - start_cad[0], s_snap[1] - start_cad[1]) <= 1.5:
+                            start_cad = s_snap
+                        if math.hypot(e_snap[0] - end_cad[0], e_snap[1] - end_cad[1]) <= 1.5:
+                            end_cad = e_snap
+                    snapped_arcs_data.append((start_cad, end_cad, c_cad, mid_cad))
+
+            # 10. Extragere cicluri închise (LWPOLYLINE 100% continuu)
+            closed_loops = self.extract_all_closed_loops(final_lines, snapped_arcs_data)
+
+            # 11. Creare document DXF cu entități curate
             dxf_doc = ezdxf.new("R2010", setup=True)
             dxf_doc.units = ezdxf.units.MM
             msp = dxf_doc.modelspace()
             dxf_doc.layers.add("CONTUR_PIESA", color=4)  # Cyan
 
-            for p1, p2 in final_lines:
-                msp.add_line(p1, p2, dxfattribs={"layer": "CONTUR_PIESA"})
+            if closed_loops:
+                for loop in closed_loops:
+                    msp.add_lwpolyline(
+                        loop,
+                        format="xyseb",
+                        close=True,
+                        dxfattribs={"layer": "CONTUR_PIESA"}
+                    )
+            else:
+                # Fallback dacă din motive excepționale nu se formează un loop complet închis
+                for p1, p2 in final_lines:
+                    msp.add_line(p1, p2, dxfattribs={"layer": "CONTUR_PIESA"})
 
-            for cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt in fillet_arcs:
-                c_cad = pt_to_cad(fitz.Point(cx_pdf, cy_pdf))
-                start_cad = pt_to_cad(start_pt)
-                end_cad = pt_to_cad(end_pt)
-                mid_cad = pt_to_cad(mid_pt)
-                r_cad = math.hypot(start_cad[0] - c_cad[0], start_cad[1] - c_cad[1])
-                a_start, a_end = self._get_arc_angles(c_cad[0], c_cad[1], start_cad, mid_cad, end_cad)
-                msp.add_arc(
-                    center=c_cad,
-                    radius=r_cad,
-                    start_angle=a_start,
-                    end_angle=a_end,
-                    dxfattribs={"layer": "CONTUR_PIESA"},
-                )
+                for s_cad, e_cad, c_cad, m_cad in snapped_arcs_data:
+                    r_cad = math.hypot(s_cad[0] - c_cad[0], s_cad[1] - c_cad[1])
+                    a_start, a_end = self._get_arc_angles(c_cad[0], c_cad[1], s_cad, m_cad, e_cad)
+                    msp.add_arc(
+                        center=c_cad,
+                        radius=r_cad,
+                        start_angle=a_start,
+                        end_angle=a_end,
+                        dxfattribs={"layer": "CONTUR_PIESA"},
+                    )
 
             # 9. Salvare DXF / Conversie DWG
             os.makedirs(output_dir, exist_ok=True)
