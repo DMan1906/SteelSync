@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.2/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.2)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.3)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.3/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.3)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.2/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.3)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.3/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,8 @@
 
 ## 🚀 Funcționalități
 
-- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.2)**:
+- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.3)**:
+  - **Generare Nativă în Layer-ul Default (`0`):** Geometria piesei este creată direct în layer-ul nativ `0` (fără layere suplimentare create de program), conform cerințelor standard din producție și AutoCAD.
   - **Reconstrucție Topologică cu Snapping Magnetic (Grid & Union-Find):** Elimină 100% micro-golurile dintre linii (gaps de 0.01 - 0.5 mm) și treptele decalate, unind nodurile adiacente în puncte identice exacte.
   - **Generare Nativă de Polilinii Închise (`LWPOLYLINE`):** Conturul piesei și toate decupajele/găurile interioare sunt generate ca entități polilinie continuă închisă (`closed=True`), gata pentru import direct în softurile de nesting (Metalix, Lantek, Pronest) fără erori de "contur deschis".
   - **Configurare Nativă Stil Cotare 1:1 (`DIMLFAC = 1.0`):** Toate fișierele DWG/DXF generate au stilul de cotare presetat cu factorul de multiplicare 1.0 (nu 100.0), astfel încât cotele puse în AutoCAD (`DIMENSION`) să corespundă 100% cu măsurătoarea reală (`MEASURE`).

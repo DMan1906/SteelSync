@@ -981,7 +981,6 @@ class PdfToCadConverter:
                 ds.dxf.dimscale = 1.0
 
             msp = dxf_doc.modelspace()
-            dxf_doc.layers.add("CONTUR_PIESA", color=4)  # Cyan
 
             if closed_loops:
                 for loop in closed_loops:
@@ -989,12 +988,12 @@ class PdfToCadConverter:
                         loop,
                         format="xyseb",
                         close=True,
-                        dxfattribs={"layer": "CONTUR_PIESA"}
+                        dxfattribs={"layer": "0"}
                     )
             else:
                 # Fallback dacă din motive excepționale nu se formează un loop complet închis
                 for p1, p2 in final_lines:
-                    msp.add_line(p1, p2, dxfattribs={"layer": "CONTUR_PIESA"})
+                    msp.add_line(p1, p2, dxfattribs={"layer": "0"})
 
                 for s_cad, e_cad, c_cad, m_cad in snapped_arcs_data:
                     r_cad = math.hypot(s_cad[0] - c_cad[0], s_cad[1] - c_cad[1])
@@ -1004,7 +1003,7 @@ class PdfToCadConverter:
                         radius=r_cad,
                         start_angle=a_start,
                         end_angle=a_end,
-                        dxfattribs={"layer": "CONTUR_PIESA"},
+                        dxfattribs={"layer": "0"},
                     )
 
             # 9. Salvare DXF / Conversie DWG
