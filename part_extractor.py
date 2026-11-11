@@ -4,6 +4,8 @@ import shutil
 import threading
 import tkinter as tk
 from pdf_to_dwg import PdfToCadConverter
+import metalix_importer
+import dwg_organizer
 from tkinter import filedialog, messagebox, ttk
 # pyrefly: ignore [missing-import]
 import customtkinter as ctk
@@ -382,22 +384,25 @@ _TEXT_SEC    = ("#8e8e93", "#94a3b8")   # secondary / muted text
 _ENTRY_BG    = ("#e5e5ea", "#0d1b2a")   # entry field background
 _LOG_BG      = ("#ffffff", "#0b0f19")   # log terminal background
 _DANGER      = ("#ff3b30", "#ef476f")   # error color
+_RED         = _DANGER
+_RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.6.7"
+APP_VERSION = "1.7.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # ─── Tab Configuration & Metadata ───────────────────────────────────────────
-DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder", "pdf_to_dwg"]
+DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder", "pdf_to_dwg", "imports_gen"]
 TAB_METADATA = {
     "extractor": {"title": "📄 File Extractor", "icon": "📄"},
     "nc_sorter": {"title": "🔧 NC Sorter", "icon": "🔧"},
     "mod_nc": {"title": "📝 Modify NC", "icon": "📝"},
     "dwg_finder": {"title": "🔍 DWG Finder", "icon": "🔍"},
     "pdf_to_dwg": {"title": "📐 PDF to DWG", "icon": "📐"},
+    "imports_gen": {"title": "📑 Imports Generator", "icon": "📑"},
 }
 TAB_NAME_MAP = {
     "extractor": "extractor",
@@ -419,6 +424,13 @@ TAB_NAME_MAP = {
     "📐 pdf to dwg": "pdf_to_dwg",
     "pdf2dwg": "pdf_to_dwg",
     "cad generator": "pdf_to_dwg",
+    "imports_gen": "imports_gen",
+    "imports generator": "imports_gen",
+    "generator import": "imports_gen",
+    "generator importuri": "imports_gen",
+    "📑 imports generator": "imports_gen",
+    "metalix": "imports_gen",
+    "import metalix": "imports_gen",
 }
 
 class _TabViewCompat:
@@ -1105,6 +1117,54 @@ class UnifiedApp(ctk.CTk):
         self._dwg_searching = False
         self._dwg_cancel_requested = False
 
+        # ── DWG Tools Variables (Integrated inside DWG Finder) ──
+        self.dwg_subview_mode = ctk.StringVar(value="🔍 Căutare DWG în Proiecte")
+        # Subview 2: Organizare pe piese din BOM
+        self.dwg_org_excel = ctk.StringVar()
+        self.dwg_org_source = ctk.StringVar()
+        self.dwg_org_dest = ctk.StringVar()
+        self.dwg_org_action = ctk.StringVar(value="move")
+        self.dwg_org_sheet = ctk.StringVar(value="-")
+        self.dwg_org_asmb_col = ctk.StringVar(value="-")
+        self.dwg_org_part_col = ctk.StringVar(value="-")
+        self.dwg_org_variations = ctk.BooleanVar(value=True)
+        self.dwg_org_clean_empty = ctk.BooleanVar(value=True)
+        self.dwg_org_open_dest = ctk.BooleanVar(value=True)
+        self.dwg_org_running = False
+        self.dwg_org_cancel = False
+        self.dwg_org_last_report = None
+        self.dwg_org_excel_meta = None
+        # Subview 3: Regrupare DWG pe grosimi
+        self.dwg_regroup_source = ctk.StringVar()
+        self.dwg_regroup_dest = ctk.StringVar()
+        self.dwg_regroup_action = ctk.StringVar(value="copy")
+        self.dwg_regroup_normalize = ctk.BooleanVar(value=True)
+        self.dwg_regroup_clean_empty = ctk.BooleanVar(value=True)
+        self.dwg_regroup_open_dest = ctk.BooleanVar(value=True)
+        self.dwg_regroup_running = False
+        self.dwg_regroup_cancel = False
+        self.dwg_regroup_last_report = None
+
+        # ── Imports Generator Variables (Dedicated New Tab) ──
+        self.imports_selected_files = []
+        self.imports_parsed_cache = {}
+        self.imports_last_output_dir = None
+        self.imports_last_generated_excel = None
+        self.imports_running = False
+        self.imports_cancel_requested = False
+        self.imports_export_mode = ctk.StringVar(value="individual")
+        self.imports_start_row_mode = ctk.StringVar(value="row2_empty1")
+        self.imports_merge_dups = ctk.BooleanVar(value=False)
+        self.imports_consolidated_name = ctk.StringVar(value="IMPORT.xlsx")
+        self.imports_output_dir = ctk.StringVar(value=os.path.join(os.path.expanduser("~"), "Desktop"))
+        self.imports_filter_text = ctk.StringVar(value="")
+        self.imports_remove_ext = ctk.BooleanVar(value=True)
+        self.imports_remove_index = ctk.BooleanVar(value=True)
+        self.imports_keep_plus = ctk.BooleanVar(value=True)
+        self.imports_remove_special = ctk.BooleanVar(value=True)
+        self.imports_uppercase = ctk.BooleanVar(value=True)
+        self.imports_open_folder = ctk.BooleanVar(value=True)
+
         # ── Extension tracking ──
         self.available_extensions = ['.nc', '.pdf', '.dwg', '.dxf', '.step', '.stp']
         self.extension_vars = {}
@@ -1240,6 +1300,25 @@ class UnifiedApp(ctk.CTk):
             self.pdf_cad_oda_path.set(saved_oda)
             self.pdf_cad_only_front.set(s.get("pdf_cad_only_front", True))
             self.pdf_cad_calibrate.set(s.get("pdf_cad_calibrate", True))
+
+            # DWG Tools settings
+            self.dwg_subview_mode.set(s.get("dwg_subview_mode", "🔍 Căutare DWG în Proiecte"))
+            self.dwg_org_excel.set(s.get("dwg_org_excel", ""))
+            self.dwg_org_source.set(s.get("dwg_org_source", ""))
+            self.dwg_org_dest.set(s.get("dwg_org_dest", ""))
+            self.dwg_org_action.set(s.get("dwg_org_action", "move"))
+            self.dwg_regroup_source.set(s.get("dwg_regroup_source", ""))
+            self.dwg_regroup_dest.set(s.get("dwg_regroup_dest", ""))
+            self.dwg_regroup_action.set(s.get("dwg_regroup_action", "copy"))
+
+            # Imports Generator settings
+            self.imports_export_mode.set(s.get("imports_export_mode", "individual"))
+            self.imports_start_row_mode.set(s.get("imports_start_row_mode", "row2_empty1"))
+            self.imports_merge_dups.set(s.get("imports_merge_dups", False))
+            self.imports_consolidated_name.set(s.get("imports_consolidated_name", "IMPORT.xlsx"))
+            default_desk = os.path.join(os.path.expanduser("~"), "Desktop")
+            self.imports_output_dir.set(s.get("imports_output_dir", default_desk))
+            self.imports_open_folder.set(s.get("imports_open_folder", True))
 
             # Restore browse directory memories (Requirement #3)
             self.extractor_source_last_dir = s.get("extractor_source_last_dir", "")
@@ -1392,6 +1471,20 @@ class UnifiedApp(ctk.CTk):
             "pdf_cad_oda_path": self.pdf_cad_oda_path.get(),
             "pdf_cad_only_front": self.pdf_cad_only_front.get(),
             "pdf_cad_calibrate": self.pdf_cad_calibrate.get(),
+            "dwg_subview_mode": self.dwg_subview_mode.get(),
+            "dwg_org_excel": self.dwg_org_excel.get(),
+            "dwg_org_source": self.dwg_org_source.get(),
+            "dwg_org_dest": self.dwg_org_dest.get(),
+            "dwg_org_action": self.dwg_org_action.get(),
+            "dwg_regroup_source": self.dwg_regroup_source.get(),
+            "dwg_regroup_dest": self.dwg_regroup_dest.get(),
+            "dwg_regroup_action": self.dwg_regroup_action.get(),
+            "imports_export_mode": self.imports_export_mode.get(),
+            "imports_start_row_mode": self.imports_start_row_mode.get(),
+            "imports_merge_dups": self.imports_merge_dups.get(),
+            "imports_consolidated_name": self.imports_consolidated_name.get(),
+            "imports_output_dir": self.imports_output_dir.get(),
+            "imports_open_folder": self.imports_open_folder.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
             "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
@@ -1862,6 +1955,7 @@ class UnifiedApp(ctk.CTk):
         self.tab_mod = self.tab_frames["mod_nc"]
         self.tab_dwg = self.tab_frames["dwg_finder"]
         self.tab_pdf_cad = self.tab_frames["pdf_to_dwg"]
+        self.tab_imports = self.tab_frames["imports_gen"]
 
         # Backwards-compatibility wrapper for any self.tabview.set calls
         _orig_tabview_set = self.tabview.set
@@ -1878,6 +1972,7 @@ class UnifiedApp(ctk.CTk):
         self.create_mod_nc_tab()
         self.create_dwg_finder_tab()
         self.create_pdf_to_dwg_tab()
+        self.create_imports_generator_tab()
 
         self._setup_tabview_drag_and_drop()
 
@@ -3578,11 +3673,30 @@ class UnifiedApp(ctk.CTk):
         )
 
     def create_dwg_finder_tab(self):
-        """Construct the layout for the DWG Finder tab."""
+        """Construct the layout for the DWG Finder tab with integrated DWG Tools."""
         self._setup_treeview_styles()
 
-        container = ctk.CTkFrame(self.tab_dwg, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=12, pady=8)
+        # ── Top Subview Selector: DWG Finder vs Organizare Piese vs Regrupare DWG ──
+        top_ctrl = ctk.CTkFrame(self.tab_dwg, fg_color="transparent")
+        top_ctrl.pack(fill="x", padx=12, pady=(6, 2))
+
+        self.dwg_subview_seg = ctk.CTkSegmentedButton(
+            top_ctrl,
+            values=[
+                "🔍 Căutare DWG în Proiecte",
+                "📦 Organizare Piese (BOM ➜ Piese)",
+                "🔄 Regrupare DWG pe Grosimi"
+            ],
+            variable=self.dwg_subview_mode,
+            command=self._on_dwg_subview_change,
+            height=34,
+            font=("Segoe UI", 12, "bold")
+        )
+        self.dwg_subview_seg.pack(side="left")
+
+        # Container 1: Căutare DWG în Proiecte
+        self.dwg_search_container = ctk.CTkFrame(self.tab_dwg, fg_color="transparent")
+        container = self.dwg_search_container
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(5, weight=1)
 
@@ -3867,8 +3981,19 @@ class UnifiedApp(ctk.CTk):
         )
         self.dwg_log_box.grid(row=0, column=0, sticky="nsew")
 
-        # Display initial view
+        # Display initial view inside search container
         self.dwg_found_frame.grid(row=0, column=0, sticky="nsew")
+
+        # Container 2: Organizare Piese (BOM -> Piese)
+        self.dwg_org_container = ctk.CTkFrame(self.tab_dwg, fg_color="transparent")
+        self._build_dwg_organize_view()
+
+        # Container 3: Regrupare DWG pe Grosimi
+        self.dwg_regroup_container = ctk.CTkFrame(self.tab_dwg, fg_color="transparent")
+        self._build_dwg_regroup_view()
+
+        # Set initial active subview
+        self._on_dwg_subview_change(self.dwg_subview_mode.get())
 
     def _on_dwg_source_type_change(self, val=None):
         val = val or self.dwg_source_type.get()
@@ -5705,6 +5830,1101 @@ class UnifiedApp(ctk.CTk):
 
         self.nc_log("\n✅ Sortare completă!")
         self.after(0, lambda: self.nc_start_btn.configure(state="normal"))
+
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  DWG TOOLS INTEGRATION (INSIDE DWG FINDER TAB)
+    # ══════════════════════════════════════════════════════════════════════
+    def _on_dwg_subview_change(self, val=None):
+        """Switch between DWG Search, Organizare Piese (BOM), and Regrupare DWG."""
+        mode = self.dwg_subview_mode.get()
+        if hasattr(self, "dwg_search_container"):
+            self.dwg_search_container.pack_forget()
+        if hasattr(self, "dwg_org_container"):
+            self.dwg_org_container.pack_forget()
+        if hasattr(self, "dwg_regroup_container"):
+            self.dwg_regroup_container.pack_forget()
+
+        if "căutare" in mode.lower():
+            self.dwg_search_container.pack(fill="both", expand=True, padx=12, pady=6)
+        elif "organizare" in mode.lower():
+            self.dwg_org_container.pack(fill="both", expand=True, padx=12, pady=6)
+        elif "regrupare" in mode.lower():
+            self.dwg_regroup_container.pack(fill="both", expand=True, padx=12, pady=6)
+        self.save_settings()
+
+    def _build_dwg_organize_view(self):
+        """Build UI for Modulul 1: Extragere pe Piese (BOM -> Piese)."""
+        parent = self.dwg_org_container
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=4, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        # Header card
+        hdr = self._make_card(scroll)
+        hdr.pack(fill="x", pady=(0, 8))
+        hdr.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(hdr, text="📦", font=("Segoe UI Emoji", 24)).grid(row=0, column=0, rowspan=2, padx=(16, 10), pady=10)
+        ctk.CTkLabel(hdr, text="Organizare Automată pe Piese (BOM ➜ Piese)", font=("Segoe UI", 15, "bold"), text_color=_TEXT_PRI).grid(row=0, column=1, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(hdr, text="Citește tabelul BOM Excel și creează un folder pentru fiecare piesă: mută fișierul NC, desenele PDF de ansamblu și DWG-urile pe grosimi.", font=("Segoe UI", 12), text_color=_TEXT_SEC, wraplength=850, justify="left").grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+        # Card 1: Excel & Columns
+        card_xl = self._make_card(scroll)
+        card_xl.pack(fill="x", pady=(0, 8))
+        card_xl.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(card_xl, text="1. Tabel Excel (Ansambluri & Piese)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
+
+        self._label(card_xl, text="Fișier Excel BOM:").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_xl, self.dwg_org_excel, placeholder_text="Selectează fișierul Excel (.xlsx, .xls)...").grid(row=1, column=1, sticky="ew", padx=4, pady=4)
+        self._browse_btn(card_xl, self._browse_dwg_org_excel).grid(row=1, column=2, padx=(4, 16), pady=4)
+
+        # Sheet & Columns selection row
+        cols_fr = ctk.CTkFrame(card_xl, fg_color="transparent")
+        cols_fr.grid(row=2, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 6))
+        cols_fr.grid_columnconfigure((1, 3, 5), weight=1)
+
+        self._label(cols_fr, text="Foaie (Sheet):").grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        self.combo_dwg_org_sheet = ctk.CTkComboBox(cols_fr, values=["-"], command=self._on_dwg_org_sheet_change, variable=self.dwg_org_sheet)
+        self.combo_dwg_org_sheet.grid(row=0, column=1, sticky="ew", padx=4, pady=2)
+
+        self._label(cols_fr, text="Col. Ansamblu:").grid(row=0, column=2, sticky="w", padx=(12, 4), pady=2)
+        self.combo_dwg_org_asmb_col = ctk.CTkComboBox(cols_fr, values=["-"], command=self._on_dwg_org_column_change, variable=self.dwg_org_asmb_col)
+        self.combo_dwg_org_asmb_col.grid(row=0, column=3, sticky="ew", padx=4, pady=2)
+
+        self._label(cols_fr, text="Col. Piesă:").grid(row=0, column=4, sticky="w", padx=(12, 4), pady=2)
+        self.combo_dwg_org_part_col = ctk.CTkComboBox(cols_fr, values=["-"], command=self._on_dwg_org_column_change, variable=self.dwg_org_part_col)
+        self.combo_dwg_org_part_col.grid(row=0, column=5, sticky="ew", padx=4, pady=2)
+
+        self.lbl_dwg_org_excel_info = ctk.CTkLabel(card_xl, text="ℹ️ Selectează un fișier Excel pentru detectarea automată a coloanelor.", font=("Segoe UI", 11), text_color=_TEXT_SEC)
+        self.lbl_dwg_org_excel_info.grid(row=3, column=0, columnspan=3, sticky="w", padx=16, pady=(0, 8))
+
+        # Card 2: Foldere Sursă & Destinație
+        card_dirs = self._make_card(scroll)
+        card_dirs.pack(fill="x", pady=(0, 8))
+        card_dirs.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(card_dirs, text="2. Foldere de Lucru (Sursă & Destinație)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
+
+        self._label(card_dirs, text="Folder Sursă:").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_dirs, self.dwg_org_source, placeholder_text="Folder ce conține PDF-uri, NC-uri și subfoldere cu grosimi...").grid(row=1, column=1, sticky="ew", padx=4, pady=4)
+        self._browse_btn(card_dirs, self._browse_dwg_org_source).grid(row=1, column=2, padx=(4, 16), pady=4)
+
+        self.lbl_dwg_org_source_info = ctk.CTkLabel(card_dirs, text="", font=("Segoe UI", 11), text_color=_TEXT_SEC)
+        self.lbl_dwg_org_source_info.grid(row=2, column=1, sticky="w", padx=4, pady=(0, 4))
+
+        self._label(card_dirs, text="Folder Destinație:").grid(row=3, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_dirs, self.dwg_org_dest, placeholder_text="Folderul unde se vor crea folderele fiecărei piese...").grid(row=3, column=1, sticky="ew", padx=4, pady=4)
+        self._browse_btn(card_dirs, self._browse_dwg_org_dest).grid(row=3, column=2, padx=(4, 16), pady=4)
+
+        # Card 3: Opțiuni & Butoane
+        card_opts = self._make_card(scroll)
+        card_opts.pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(card_opts, text="3. Mod Operare și Opțiuni", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).pack(anchor="w", padx=16, pady=(10, 4))
+
+        sub_opts = ctk.CTkFrame(card_opts, fg_color="transparent")
+        sub_opts.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkRadioButton(sub_opts, text="Mută fișierele (Move)", variable=self.dwg_org_action, value="move").pack(side="left", padx=(0, 20))
+        ctk.CTkRadioButton(sub_opts, text="Copiază fișierele (Copy - păstrează originalele)", variable=self.dwg_org_action, value="copy").pack(side="left", padx=(0, 20))
+        ctk.CTkCheckBox(sub_opts, text="Include variații DWG (ex. T, L, C)", variable=self.dwg_org_variations).pack(side="left", padx=(0, 20))
+        ctk.CTkCheckBox(sub_opts, text="Curăță folderele goale la final (Mutare)", variable=self.dwg_org_clean_empty).pack(side="left")
+
+        # Action Buttons
+        btn_bar = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_bar.pack(fill="x", pady=(2, 6))
+        btn_bar.grid_columnconfigure((0, 1), weight=1)
+
+        self.btn_dwg_org_run = ctk.CTkButton(
+            btn_bar, text="🚀  ÎNCEPE ORGANIZAREA PE PIESE",
+            font=("Segoe UI", 13, "bold"), height=40,
+            fg_color=_GREEN, hover_color=_GREEN_HOV,
+            command=self._start_dwg_org_pipeline
+        )
+        self.btn_dwg_org_run.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+
+        self.btn_dwg_org_cancel = ctk.CTkButton(
+            btn_bar, text="🛑  Oprește / Anulează",
+            font=("Segoe UI", 13), height=40,
+            fg_color=_RED, hover_color=_RED_HOV,
+            state="disabled",
+            command=self._cancel_dwg_org_pipeline
+        )
+        self.btn_dwg_org_cancel.grid(row=0, column=1, padx=(6, 0), sticky="ew")
+
+        self.dwg_org_progress = ctk.CTkProgressBar(scroll, height=10)
+        self.dwg_org_progress.pack(fill="x", pady=(4, 2))
+        self.dwg_org_progress.set(0)
+
+        self.lbl_dwg_org_status = ctk.CTkLabel(scroll, text="Așteptare pornire...", font=("Segoe UI", 11), text_color=_TEXT_SEC)
+        self.lbl_dwg_org_status.pack(anchor="w", padx=4, pady=(0, 6))
+
+        # Log & post actions
+        card_log = self._make_card(scroll)
+        card_log.pack(fill="both", expand=True, pady=(0, 6))
+
+        head_log = ctk.CTkFrame(card_log, fg_color="transparent")
+        head_log.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(head_log, text="Jurnal Activitate:", font=("Segoe UI", 12, "bold"), text_color=_TEXT_PRI).pack(side="left")
+        ctk.CTkButton(head_log, text="🧹 Curăță", width=80, height=26, fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=lambda: self._dwg_org_clear_log()).pack(side="right")
+
+        self.dwg_org_log_box = ctk.CTkTextbox(card_log, height=180, font=("Cascadia Code", 11), fg_color=_LOG_BG, text_color="#a3e635")
+        self.dwg_org_log_box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        post_bar = ctk.CTkFrame(scroll, fg_color="transparent")
+        post_bar.pack(fill="x", pady=(2, 8))
+        self.btn_dwg_org_open_dest = ctk.CTkButton(post_bar, text="📁 Deschide Folder Destinație", width=190, height=32, state="disabled", fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._open_dwg_org_dest)
+        self.btn_dwg_org_open_dest.pack(side="left", padx=(0, 8))
+        self.btn_dwg_org_open_rep = ctk.CTkButton(post_bar, text="📊 Deschide Raport Excel", width=190, height=32, state="disabled", fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._open_dwg_org_report)
+        self.btn_dwg_org_open_rep.pack(side="left")
+
+    def _browse_dwg_org_excel(self):
+        initial = self._get_browse_initial_dir("dest_based", self.dwg_org_excel.get())
+        f = filedialog.askopenfilename(title="Selectează Fișierul Excel BOM", initialdir=initial, filetypes=[("Excel", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")])
+        if f:
+            norm = os.path.normpath(f)
+            self.dwg_org_excel.set(norm)
+            self.save_settings()
+            self._on_dwg_org_excel_selected(norm)
+
+    def _on_dwg_org_excel_selected(self, filepath):
+        try:
+            sheets, active_sh, h_row, asmb_idx, part_idx, headers = dwg_organizer.detect_excel_structure(filepath)
+            self.dwg_org_excel_meta = {
+                "sheets": sheets, "active_sheet": active_sh, "header_row": h_row,
+                "asmb_idx": asmb_idx, "part_idx": part_idx, "headers": headers
+            }
+            if sheets:
+                self.combo_dwg_org_sheet.configure(values=sheets)
+                self.dwg_org_sheet.set(active_sh)
+            col_vals = [f"Col {idx}: {name}" for idx, name in headers.items()]
+            if col_vals:
+                self.combo_dwg_org_asmb_col.configure(values=col_vals)
+                self.combo_dwg_org_part_col.configure(values=col_vals)
+                if asmb_idx in headers:
+                    self.dwg_org_asmb_col.set(f"Col {asmb_idx}: {headers[asmb_idx]}")
+                if part_idx in headers:
+                    self.dwg_org_part_col.set(f"Col {part_idx}: {headers[part_idx]}")
+            self.lbl_dwg_org_excel_info.configure(
+                text=f"✅ Detectat: Sheet '{active_sh}', Rând Antet: {h_row}, Asmb: Col {asmb_idx}, Piesă: Col {part_idx}",
+                text_color=_GREEN[1]
+            )
+        except Exception as e:
+            self.lbl_dwg_org_excel_info.configure(text=f"⚠ Eroare la citirea Excel-ului: {e}", text_color=_RED[1])
+
+    def _on_dwg_org_sheet_change(self, val):
+        f = self.dwg_org_excel.get().strip()
+        if f and os.path.isfile(f):
+            try:
+                sheets, active_sh, h_row, asmb_idx, part_idx, headers = dwg_organizer.detect_excel_structure(f, sheet_name=val)
+                self.dwg_org_excel_meta = {
+                    "sheets": sheets, "active_sheet": active_sh, "header_row": h_row,
+                    "asmb_idx": asmb_idx, "part_idx": part_idx, "headers": headers
+                }
+                col_vals = [f"Col {idx}: {name}" for idx, name in headers.items()]
+                if col_vals:
+                    self.combo_dwg_org_asmb_col.configure(values=col_vals)
+                    self.combo_dwg_org_part_col.configure(values=col_vals)
+                    if asmb_idx in headers:
+                        self.dwg_org_asmb_col.set(f"Col {asmb_idx}: {headers[asmb_idx]}")
+                    if part_idx in headers:
+                        self.dwg_org_part_col.set(f"Col {part_idx}: {headers[part_idx]}")
+            except Exception:
+                pass
+
+    def _on_dwg_org_column_change(self, val=None):
+        pass
+
+    def _browse_dwg_org_source(self):
+        initial = self._get_browse_initial_dir("dest_based", self.dwg_org_source.get())
+        d = filedialog.askdirectory(title="Selectează Folderul Sursă", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_org_source.set(norm)
+            self.save_settings()
+            try:
+                nc_files, pdf_files, dwg_files, dwg_map = dwg_organizer.scan_source_files(norm)
+                total_dwg = sum(len(v) for v in dwg_map.values())
+                self.lbl_dwg_org_source_info.configure(
+                    text=f"Găsit în sursă: {len(nc_files)} NC-uri, {len(pdf_files)} PDF-uri, {total_dwg} DWG-uri în {len(dwg_map)} grosimi.",
+                    text_color=_GREEN[1]
+                )
+            except Exception:
+                pass
+
+    def _browse_dwg_org_dest(self):
+        initial = self._get_browse_initial_dir("dest_based", self.dwg_org_dest.get())
+        d = filedialog.askdirectory(title="Selectează Folderul Destinație Piese", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_org_dest.set(norm)
+            self.save_settings()
+
+    def _start_dwg_org_pipeline(self):
+        if self.dwg_org_running:
+            return
+        excel_p = self.dwg_org_excel.get().strip()
+        src_p = self.dwg_org_source.get().strip()
+        dst_p = self.dwg_org_dest.get().strip()
+
+        if not excel_p or not os.path.isfile(excel_p):
+            messagebox.showwarning("Atenție", "Selectează un fișier Excel BOM valid.")
+            return
+        if not src_p or not os.path.isdir(src_p):
+            messagebox.showwarning("Atenție", "Selectează un folder Sursă valid.")
+            return
+        if not dst_p:
+            messagebox.showwarning("Atenție", "Selectează un folder Destinație.")
+            return
+
+        meta = getattr(self, "dwg_org_excel_meta", None)
+        h_row = meta.get("header_row", 1) if meta else 1
+        sh_name = self.dwg_org_sheet.get()
+        if sh_name == "-":
+            sh_name = meta.get("active_sheet") if meta else None
+
+        # Extract col indices
+        def parse_col_idx(val_str, fallback):
+            m = re.match(r'Col\s+(\d+)', val_str)
+            return int(m.group(1)) if m else fallback
+
+        asmb_idx = parse_col_idx(self.dwg_org_asmb_col.get(), meta.get("asmb_idx", 1) if meta else 1)
+        part_idx = parse_col_idx(self.dwg_org_part_col.get(), meta.get("part_idx", 2) if meta else 2)
+
+        self.dwg_org_running = True
+        self.dwg_org_cancel = False
+        self.btn_dwg_org_run.configure(state="disabled", text="⏳ Se organizează...")
+        self.btn_dwg_org_cancel.configure(state="normal")
+        self.dwg_org_progress.set(0)
+        self._dwg_org_clear_log()
+
+        mode = self.dwg_org_action.get()
+        allow_vars = self.dwg_org_variations.get()
+        clean_empty = self.dwg_org_clean_empty.get()
+
+        def worker():
+            def prog_cb(curr, total, msg):
+                self.after(0, lambda: self._update_dwg_org_progress(curr, total, msg))
+            def log_cb(txt, tag="INFO"):
+                self.after(0, lambda: self._dwg_org_log(txt, tag))
+            def cancel_cb():
+                return self.dwg_org_cancel
+
+            res = dwg_organizer.run_pipeline(
+                excel_path=excel_p,
+                sheet_name=sh_name,
+                header_row=h_row,
+                asmb_col_idx=asmb_idx,
+                part_col_idx=part_idx,
+                source_dir=src_p,
+                dest_dir=dst_p,
+                mode=mode,
+                allow_variations=allow_vars,
+                clean_empty_folders=clean_empty,
+                progress_callback=prog_cb,
+                log_callback=log_cb,
+                is_cancelled=cancel_cb
+            )
+            self.after(0, lambda: self._on_dwg_org_complete(res))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cancel_dwg_org_pipeline(self):
+        self.dwg_org_cancel = True
+        self._dwg_org_log("🛑 Solicitare de oprire trimisă...", "WARNING")
+
+    def _update_dwg_org_progress(self, curr, total, msg):
+        frac = curr / max(total, 1)
+        self.dwg_org_progress.set(frac)
+        self.lbl_dwg_org_status.configure(text=msg)
+
+    def _dwg_org_log(self, text, tag="INFO"):
+        self.dwg_org_log_box.configure(state="normal")
+        self.dwg_org_log_box.insert("end", f"{text}\n")
+        self.dwg_org_log_box.see("end")
+        self.dwg_org_log_box.configure(state="disabled")
+
+    def _dwg_org_clear_log(self):
+        self.dwg_org_log_box.configure(state="normal")
+        self.dwg_org_log_box.delete("1.0", "end")
+        self.dwg_org_log_box.configure(state="disabled")
+
+    def _on_dwg_org_complete(self, res):
+        self.dwg_org_running = False
+        self.btn_dwg_org_run.configure(state="normal", text="🚀  ÎNCEPE ORGANIZAREA PE PIESE")
+        self.btn_dwg_org_cancel.configure(state="disabled")
+        self.dwg_org_progress.set(1.0)
+
+        rep_path = res.get("report_path") if isinstance(res, dict) else None
+        self.dwg_org_last_report = rep_path
+        if rep_path and os.path.exists(rep_path):
+            self.btn_dwg_org_open_rep.configure(state="normal")
+        dst = self.dwg_org_dest.get().strip()
+        if dst and os.path.exists(dst):
+            self.btn_dwg_org_open_dest.configure(state="normal")
+
+        if res.get("cancelled"):
+            messagebox.showinfo("Oprit", "Procesul de organizare a fost oprit de utilizator.")
+        elif res.get("error"):
+            messagebox.showerror("Eroare", f"A apărut o eroare la organizare:\n{res['error']}")
+        else:
+            messagebox.showinfo(
+                "Organizare Finalizată",
+                f"Organizarea pe piese a fost finalizată cu succes!\n\n"
+                f"• Piese procesate: {res.get('processed_parts', 0)}\n"
+                f"• NC-uri transferate: {res.get('nc_transferred', 0)}\n"
+                f"• PDF-uri transferate: {res.get('pdf_transferred', 0)}\n"
+                f"• DWG-uri transferate: {res.get('dwg_transferred', 0)}\n\n"
+                f"Folder Destinație:\n{dst}"
+            )
+
+    def _open_dwg_org_dest(self):
+        d = self.dwg_org_dest.get().strip()
+        if d and os.path.exists(d):
+            os.startfile(d)
+
+    def _open_dwg_org_report(self):
+        if self.dwg_org_last_report and os.path.exists(self.dwg_org_last_report):
+            os.startfile(self.dwg_org_last_report)
+
+    # ───────────────────────────────────────────────────────────────────
+    # Subview 3: Regrupare DWG pe Grosimi
+    # ───────────────────────────────────────────────────────────────────
+    def _build_dwg_regroup_view(self):
+        """Build UI for Modulul 2: Regrupare DWG pe Grosimi (Piese -> Grosimi)."""
+        parent = self.dwg_regroup_container
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=4, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        # Header card
+        hdr = self._make_card(scroll)
+        hdr.pack(fill="x", pady=(0, 8))
+        hdr.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(hdr, text="🔄", font=("Segoe UI Emoji", 24)).grid(row=0, column=0, rowspan=2, padx=(16, 10), pady=10)
+        ctk.CTkLabel(hdr, text="Regrupare DWG pe Grosimi de Tablă (Piese ➜ Grosimi)", font=("Segoe UI", 15, "bold"), text_color=_TEXT_PRI).grid(row=0, column=1, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(hdr, text="Scanează folderele de piese organizate, extrage exclusiv fișierele DWG și le regrupează în foldere unificate după grosime (T10, T12, T15 etc.).", font=("Segoe UI", 12), text_color=_TEXT_SEC, wraplength=850, justify="left").grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+        # Card 1: Directoare
+        card_dirs = self._make_card(scroll)
+        card_dirs.pack(fill="x", pady=(0, 8))
+        card_dirs.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(card_dirs, text="1. Foldere de Lucru (Sursă Piese & Destinație Grosimi)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
+
+        self._label(card_dirs, text="Folder Piese (Sursă):").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_dirs, self.dwg_regroup_source, placeholder_text="Selectează folderul ce conține folderele de piese...").grid(row=1, column=1, sticky="ew", padx=4, pady=4)
+        self._browse_btn(card_dirs, self._browse_dwg_regroup_source).grid(row=1, column=2, padx=(4, 16), pady=4)
+
+        self.lbl_dwg_rg_src_info = ctk.CTkLabel(card_dirs, text="", font=("Segoe UI", 11), text_color=_TEXT_SEC)
+        self.lbl_dwg_rg_src_info.grid(row=2, column=1, sticky="w", padx=4, pady=(0, 4))
+
+        self._label(card_dirs, text="Folder Destinație Grosimi:").grid(row=3, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_dirs, self.dwg_regroup_dest, placeholder_text="Folderul unde se vor crea folderele cu grosimi (T10, T15...)...").grid(row=3, column=1, sticky="ew", padx=4, pady=4)
+        self._browse_btn(card_dirs, self._browse_dwg_regroup_dest).grid(row=3, column=2, padx=(4, 16), pady=4)
+
+        # Card 2: Opțiuni
+        card_opts = self._make_card(scroll)
+        card_opts.pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(card_opts, text="2. Opțiuni Regrupare DWG", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).pack(anchor="w", padx=16, pady=(10, 4))
+        sub_opts = ctk.CTkFrame(card_opts, fg_color="transparent")
+        sub_opts.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkRadioButton(sub_opts, text="Copiază fișierele DWG (Copy - păstrează originalele)", variable=self.dwg_regroup_action, value="copy").pack(side="left", padx=(0, 20))
+        ctk.CTkRadioButton(sub_opts, text="Mută fișierele DWG (Move)", variable=self.dwg_regroup_action, value="move").pack(side="left", padx=(0, 20))
+        ctk.CTkCheckBox(sub_opts, text="Unifică denumirile (ex: t10 -> T10)", variable=self.dwg_regroup_normalize).pack(side="left")
+
+        # Action Buttons
+        btn_bar = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_bar.pack(fill="x", pady=(2, 6))
+        btn_bar.grid_columnconfigure((0, 1), weight=1)
+
+        self.btn_dwg_rg_run = ctk.CTkButton(
+            btn_bar, text="🔄  ÎNCEPE REGRUPAREA DWG PE GROSIMI",
+            font=("Segoe UI", 13, "bold"), height=40,
+            fg_color=_GREEN, hover_color=_GREEN_HOV,
+            command=self._start_dwg_regroup_pipeline
+        )
+        self.btn_dwg_rg_run.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+
+        self.btn_dwg_rg_cancel = ctk.CTkButton(
+            btn_bar, text="🛑  Oprește / Anulează",
+            font=("Segoe UI", 13), height=40,
+            fg_color=_RED, hover_color=_RED_HOV,
+            state="disabled",
+            command=self._cancel_dwg_regroup_pipeline
+        )
+        self.btn_dwg_rg_cancel.grid(row=0, column=1, padx=(6, 0), sticky="ew")
+
+        self.dwg_rg_progress = ctk.CTkProgressBar(scroll, height=10)
+        self.dwg_rg_progress.pack(fill="x", pady=(4, 2))
+        self.dwg_rg_progress.set(0)
+
+        self.lbl_dwg_rg_status = ctk.CTkLabel(scroll, text="Așteptare pornire...", font=("Segoe UI", 11), text_color=_TEXT_SEC)
+        self.lbl_dwg_rg_status.pack(anchor="w", padx=4, pady=(0, 6))
+
+        # Log & post actions
+        card_log = self._make_card(scroll)
+        card_log.pack(fill="both", expand=True, pady=(0, 6))
+
+        head_log = ctk.CTkFrame(card_log, fg_color="transparent")
+        head_log.pack(fill="x", padx=12, pady=(8, 4))
+        ctk.CTkLabel(head_log, text="Jurnal Regrupare:", font=("Segoe UI", 12, "bold"), text_color=_TEXT_PRI).pack(side="left")
+        ctk.CTkButton(head_log, text="🧹 Curăță", width=80, height=26, fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=lambda: self._dwg_rg_clear_log()).pack(side="right")
+
+        self.dwg_rg_log_box = ctk.CTkTextbox(card_log, height=180, font=("Cascadia Code", 11), fg_color=_LOG_BG, text_color="#a3e635")
+        self.dwg_rg_log_box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        post_bar = ctk.CTkFrame(scroll, fg_color="transparent")
+        post_bar.pack(fill="x", pady=(2, 8))
+        self.btn_dwg_rg_open_dest = ctk.CTkButton(post_bar, text="📁 Deschide Folder Grosimi", width=190, height=32, state="disabled", fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._open_dwg_regroup_dest)
+        self.btn_dwg_rg_open_dest.pack(side="left", padx=(0, 8))
+        self.btn_dwg_rg_open_rep = ctk.CTkButton(post_bar, text="📊 Deschide Raport Excel", width=190, height=32, state="disabled", fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._open_dwg_regroup_report)
+        self.btn_dwg_rg_open_rep.pack(side="left")
+
+    def _browse_dwg_regroup_source(self):
+        initial = self._get_browse_initial_dir("dest_based", self.dwg_regroup_source.get())
+        d = filedialog.askdirectory(title="Selectează Folderul cu Piese", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_regroup_source.set(norm)
+            self.save_settings()
+            try:
+                total, thk_map, unclass = dwg_organizer.scan_dwgs_for_regrouping(norm)
+                self.lbl_dwg_rg_src_info.configure(
+                    text=f"Găsit: {total} fișiere DWG în {len(thk_map)} grosimi diferite ({len(unclass)} neclasificate).",
+                    text_color=_GREEN[1]
+                )
+            except Exception:
+                pass
+
+    def _browse_dwg_regroup_dest(self):
+        initial = self._get_browse_initial_dir("dest_based", self.dwg_regroup_dest.get())
+        d = filedialog.askdirectory(title="Selectează Folderul Destinație Grosimi", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_regroup_dest.set(norm)
+            self.save_settings()
+
+    def _start_dwg_regroup_pipeline(self):
+        if self.dwg_regroup_running:
+            return
+        src_p = self.dwg_regroup_source.get().strip()
+        dst_p = self.dwg_regroup_dest.get().strip()
+
+        if not src_p or not os.path.isdir(src_p):
+            messagebox.showwarning("Atenție", "Selectează un folder Sursă valid ce conține folderele de piese.")
+            return
+        if not dst_p:
+            messagebox.showwarning("Atenție", "Selectează un folder Destinație pentru grosimi.")
+            return
+
+        self.dwg_regroup_running = True
+        self.dwg_regroup_cancel = False
+        self.btn_dwg_rg_run.configure(state="disabled", text="⏳ Se regrupează...")
+        self.btn_dwg_rg_cancel.configure(state="normal")
+        self.dwg_rg_progress.set(0)
+        self._dwg_rg_clear_log()
+
+        mode = self.dwg_regroup_action.get()
+        norm_case = self.dwg_regroup_normalize.get()
+
+        def worker():
+            def prog_cb(curr, total, msg):
+                self.after(0, lambda: self._update_dwg_regroup_progress(curr, total, msg))
+            def log_cb(txt, tag="INFO"):
+                self.after(0, lambda: self._dwg_regroup_log(txt, tag))
+            def cancel_cb():
+                return self.dwg_regroup_cancel
+
+            res = dwg_organizer.run_regroup_pipeline(
+                source_dir=src_p,
+                dest_dir=dst_p,
+                mode=mode,
+                normalize_case=norm_case,
+                clean_empty_folders=True,
+                progress_callback=prog_cb,
+                log_callback=log_cb,
+                is_cancelled=cancel_cb
+            )
+            self.after(0, lambda: self._on_dwg_regroup_complete(res))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cancel_dwg_regroup_pipeline(self):
+        self.dwg_regroup_cancel = True
+        self._dwg_regroup_log("🛑 Solicitare de oprire trimisă...", "WARNING")
+
+    def _update_dwg_regroup_progress(self, curr, total, msg):
+        frac = curr / max(total, 1)
+        self.dwg_rg_progress.set(frac)
+        self.lbl_dwg_rg_status.configure(text=msg)
+
+    def _dwg_regroup_log(self, text, tag="INFO"):
+        self.dwg_rg_log_box.configure(state="normal")
+        self.dwg_rg_log_box.insert("end", f"{text}\n")
+        self.dwg_rg_log_box.see("end")
+        self.dwg_rg_log_box.configure(state="disabled")
+
+    def _dwg_rg_clear_log(self):
+        self.dwg_rg_log_box.configure(state="normal")
+        self.dwg_rg_log_box.delete("1.0", "end")
+        self.dwg_rg_log_box.configure(state="disabled")
+
+    def _on_dwg_regroup_complete(self, res):
+        self.dwg_regroup_running = False
+        self.btn_dwg_rg_run.configure(state="normal", text="🔄  ÎNCEPE REGRUPAREA DWG PE GROSIMI")
+        self.btn_dwg_rg_cancel.configure(state="disabled")
+        self.dwg_rg_progress.set(1.0)
+
+        rep_path = res.get("report_path") if isinstance(res, dict) else None
+        self.dwg_regroup_last_report = rep_path
+        if rep_path and os.path.exists(rep_path):
+            self.btn_dwg_rg_open_rep.configure(state="normal")
+        dst = self.dwg_regroup_dest.get().strip()
+        if dst and os.path.exists(dst):
+            self.btn_dwg_rg_open_dest.configure(state="normal")
+
+        if res.get("cancelled"):
+            messagebox.showinfo("Oprit", "Procesul de regrupare a fost oprit de utilizator.")
+        elif res.get("error"):
+            messagebox.showerror("Eroare", f"A apărut o eroare la regrupare:\n{res['error']}")
+        else:
+            messagebox.showinfo(
+                "Regrupare Finalizată",
+                f"Regruparea DWG pe grosimi a fost finalizată cu succes!\n\n"
+                f"• Fișiere DWG transferate: {res.get('transferred', 0)}\n"
+                f"• Grosimi unificate: {len(res.get('thickness_counts', {}))}\n\n"
+                f"Folder Destinație:\n{dst}"
+            )
+
+    def _open_dwg_regroup_dest(self):
+        d = self.dwg_regroup_dest.get().strip()
+        if d and os.path.exists(d):
+            os.startfile(d)
+
+    def _open_dwg_regroup_report(self):
+        if self.dwg_regroup_last_report and os.path.exists(self.dwg_regroup_last_report):
+            os.startfile(self.dwg_regroup_last_report)
+
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  IMPORTS GENERATOR TAB (METALIX WORD .DOC / .DOCX -> .XLSX)
+    # ══════════════════════════════════════════════════════════════════════
+    def create_imports_generator_tab(self):
+        """Construct the dedicated tab for Imports Generator (Word -> Excel)."""
+        parent = self.tab_imports
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=8, pady=6)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        # Header Card
+        hdr = self._make_card(scroll)
+        hdr.pack(fill="x", pady=(0, 8))
+        hdr.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(hdr, text="📑", font=("Segoe UI Emoji", 26)).grid(row=0, column=0, rowspan=2, padx=(16, 12), pady=10)
+        ctk.CTkLabel(hdr, text="Generator Import-uri Excel din Word (Metalix)", font=("Segoe UI", 15, "bold"), text_color=_TEXT_PRI).grid(row=0, column=1, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(hdr, text="Extrage automat piesele și cantitățile din documente Word (.doc / .docx) și generează fișiere Excel de import (.xlsx) cu denumiri curățate.", font=("Segoe UI", 12), text_color=_TEXT_SEC, wraplength=880, justify="left").grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+        # Card 1: Selecție Documente Word
+        card_sel = self._make_card(scroll)
+        card_sel.pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(card_sel, text="1. Selectează Documente Word (.doc / .docx)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).pack(anchor="w", padx=16, pady=(10, 6))
+
+        btn_bar1 = ctk.CTkFrame(card_sel, fg_color="transparent")
+        btn_bar1.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkButton(btn_bar1, text="📄 Selectează Fișier(e) Word", font=("Segoe UI", 12, "bold"), height=34, fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._on_imports_pick_word_files).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_bar1, text="➕ Adaugă Fișiere", font=("Segoe UI", 12), height=34, width=120, fg_color="#3b82f6", hover_color="#2563eb", command=lambda: self._on_imports_pick_word_files(append=True)).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_bar1, text="📂 Încarcă din Folder...", font=("Segoe UI", 12, "bold"), height=34, width=160, fg_color="#0d9488", hover_color="#0f766e", command=self._on_imports_pick_folder).pack(side="left", padx=(0, 8))
+
+        self._label(btn_bar1, text="Filtru:").pack(side="left", padx=(6, 4))
+        self._entry(btn_bar1, self.imports_filter_text, placeholder_text="ex: 1147-46", width=120, height=34).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_bar1, text="🔍 Plasma (D:)", font=("Segoe UI", 12), height=34, width=110, fg_color="#4f46e5", hover_color="#4338ca", command=self._on_imports_quick_search_plasma).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_bar1, text="🗑️ Golește", font=("Segoe UI", 12), height=34, width=80, fg_color=_RED, hover_color=_RED_HOV, command=self._on_imports_clear_files).pack(side="right")
+
+        self.lbl_imports_summary = ctk.CTkLabel(card_sel, text="Niciun document Word selectat. Apasă pe «Selectează Fișier(e) Word» sau caută după cod de proiect.", font=("Segoe UI", 11, "bold"), text_color=_TEXT_SEC)
+        self.lbl_imports_summary.pack(anchor="w", padx=16, pady=(0, 10))
+
+        # Card 2: Previzualizare Live
+        card_prev = self._make_card(scroll)
+        card_prev.pack(fill="both", expand=True, pady=(0, 8))
+
+        head_prev = ctk.CTkFrame(card_prev, fg_color="transparent")
+        head_prev.pack(fill="x", padx=16, pady=(8, 4))
+        ctk.CTkLabel(head_prev, text="2. Previzualizare Piese Extrase (Original Word ➜ Curățat Excel)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).pack(side="left")
+        ctk.CTkButton(head_prev, text="📋 Copiază Tabelul în Clipboard", font=("Segoe UI", 11, "bold"), height=28, fg_color="#d97706", hover_color="#b45309", command=self._on_imports_copy_to_clipboard).pack(side="right")
+
+        tbl_container = ctk.CTkFrame(card_prev, fg_color="transparent")
+        tbl_container.pack(fill="both", expand=True, padx=14, pady=(2, 10))
+        tbl_container.grid_columnconfigure(0, weight=2)
+        tbl_container.grid_columnconfigure(1, weight=5)
+        tbl_container.grid_rowconfigure(0, weight=1)
+
+        # Docs Tree
+        box_docs = ctk.CTkFrame(tbl_container, fg_color=_ENTRY_BG, corner_radius=8)
+        box_docs.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        box_docs.grid_rowconfigure(1, weight=1)
+        box_docs.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(box_docs, text="📑 Documente Word încărcate:", font=("Segoe UI", 11, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+
+        self.tree_imports_docs = ttk.Treeview(box_docs, columns=("doc_name", "rows", "qty"), show="headings", height=8, selectmode="browse", style="DWG.Treeview")
+        self.tree_imports_docs.heading("doc_name", text="Document Word")
+        self.tree_imports_docs.heading("rows", text="Poz.")
+        self.tree_imports_docs.heading("qty", text="Buc.")
+        self.tree_imports_docs.column("doc_name", width=170, anchor="w")
+        self.tree_imports_docs.column("rows", width=45, anchor="center")
+        self.tree_imports_docs.column("qty", width=50, anchor="center")
+        self.tree_imports_docs.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+
+        s_docs = ttk.Scrollbar(box_docs, orient="vertical", command=self.tree_imports_docs.yview)
+        self.tree_imports_docs.configure(yscrollcommand=s_docs.set)
+        s_docs.grid(row=1, column=1, sticky="ns", padx=(0, 4), pady=(0, 6))
+        self.tree_imports_docs.bind("<<TreeviewSelect>>", self._on_imports_doc_tree_select)
+
+        # Parts Tree
+        box_parts = ctk.CTkFrame(tbl_container, fg_color=_ENTRY_BG, corner_radius=8)
+        box_parts.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        box_parts.grid_rowconfigure(1, weight=1)
+        box_parts.grid_columnconfigure(0, weight=1)
+
+        self.lbl_imports_parts_title = ctk.CTkLabel(box_parts, text="🔩 Piese extrase (Col A = Denumire curățată | Col B = Cantitate):", font=("Segoe UI", 11, "bold"), text_color=_TEXT_PRI)
+        self.lbl_imports_parts_title.grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+
+        self.tree_imports_parts = ttk.Treeview(box_parts, columns=("source", "no", "raw_name", "clean_name", "qty", "dims"), show="headings", height=8, style="DWG.Treeview")
+        self.tree_imports_parts.heading("source", text="Fișier Word")
+        self.tree_imports_parts.heading("no", text="No.")
+        self.tree_imports_parts.heading("raw_name", text="Part name (Word)")
+        self.tree_imports_parts.heading("clean_name", text="➜ EXCEL (Col A)")
+        self.tree_imports_parts.heading("qty", text="Cant. (Col B)")
+        self.tree_imports_parts.heading("dims", text="Dimensiuni (mm)")
+        self.tree_imports_parts.column("source", width=140, anchor="w")
+        self.tree_imports_parts.column("no", width=40, anchor="center")
+        self.tree_imports_parts.column("raw_name", width=150, anchor="w")
+        self.tree_imports_parts.column("clean_name", width=130, anchor="center")
+        self.tree_imports_parts.column("qty", width=75, anchor="center")
+        self.tree_imports_parts.column("dims", width=110, anchor="center")
+        self.tree_imports_parts.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+
+        s_parts = ttk.Scrollbar(box_parts, orient="vertical", command=self.tree_imports_parts.yview)
+        self.tree_imports_parts.configure(yscrollcommand=s_parts.set)
+        s_parts.grid(row=1, column=1, sticky="ns", padx=(0, 4), pady=(0, 6))
+
+        # Card 3: Opțiuni & Format Excel
+        card_fmt = self._make_card(scroll)
+        card_fmt.pack(fill="x", pady=(0, 8))
+        card_fmt.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(card_fmt, text="3. Opțiuni Generare Excel & Folder Salvare", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 6))
+
+        self._label(card_fmt, text="Mod generare Excel:").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
+        m_frame = ctk.CTkFrame(card_fmt, fg_color="transparent")
+        m_frame.grid(row=1, column=1, columnspan=2, sticky="w", padx=4, pady=4)
+        ctk.CTkRadioButton(m_frame, text="Batch: Câte un Excel pentru fiecare Word (1:1)", variable=self.imports_export_mode, value="individual", command=self._on_imports_mode_change).pack(side="left", padx=(0, 14))
+        ctk.CTkRadioButton(m_frame, text="Un singur Excel consolidat", variable=self.imports_export_mode, value="consolidated_single", command=self._on_imports_mode_change).pack(side="left", padx=(0, 14))
+        ctk.CTkRadioButton(m_frame, text="Un Excel (Sheet per Word)", variable=self.imports_export_mode, value="consolidated_sheets", command=self._on_imports_mode_change).pack(side="left")
+
+        self._label(card_fmt, text="Format tabel Excel:").grid(row=2, column=0, sticky="w", padx=(16, 6), pady=4)
+        r_frame = ctk.CTkFrame(card_fmt, fg_color="transparent")
+        r_frame.grid(row=2, column=1, columnspan=2, sticky="w", padx=4, pady=4)
+        ctk.CTkRadioButton(r_frame, text="Rândul 2 (Rândul 1 gol - stil IMPORT.xlsx)", variable=self.imports_start_row_mode, value="row2_empty1").pack(side="left", padx=(0, 14))
+        ctk.CTkRadioButton(r_frame, text="Rândul 1", variable=self.imports_start_row_mode, value="row1").pack(side="left", padx=(0, 14))
+        ctk.CTkRadioButton(r_frame, text="Cu Antet (Denumire | Cantitate)", variable=self.imports_start_row_mode, value="header_row1").pack(side="left")
+
+        extra_fmt = ctk.CTkFrame(card_fmt, fg_color="transparent")
+        extra_fmt.grid(row=3, column=1, columnspan=2, sticky="w", padx=4, pady=4)
+        ctk.CTkCheckBox(extra_fmt, text="Cumulează cantitățile la duplicate", variable=self.imports_merge_dups, command=self._imports_refresh_preview_tables).pack(side="left", padx=(0, 16))
+        self._label(extra_fmt, text="Nume fișier consolidat:").pack(side="left", padx=(0, 6))
+        self.entry_imports_cons_name = self._entry(extra_fmt, self.imports_consolidated_name, width=160, height=28)
+        self.entry_imports_cons_name.pack(side="left")
+
+        self._label(card_fmt, text="Folder Destinație:").grid(row=4, column=0, sticky="w", padx=(16, 6), pady=(4, 10))
+        self._entry(card_fmt, self.imports_output_dir).grid(row=4, column=1, sticky="ew", padx=4, pady=(4, 10))
+        self._browse_btn(card_fmt, self._on_imports_pick_output_dir).grid(row=4, column=2, padx=(4, 16), pady=(4, 10))
+
+        # Card 4: Butoane Acțiune & Progres
+        card_act = self._make_card(scroll)
+        card_act.pack(fill="x", pady=(0, 8))
+
+        act_bar = ctk.CTkFrame(card_act, fg_color="transparent")
+        act_bar.pack(fill="x", padx=16, pady=(10, 6))
+
+        self.btn_imports_generate = ctk.CTkButton(act_bar, text="🚀 GENEREAZĂ EXCEL (.XLSX)", font=("Segoe UI", 13, "bold"), height=42, fg_color=_GREEN, hover_color=_GREEN_HOV, command=self._on_imports_generate_excel)
+        self.btn_imports_generate.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self.btn_imports_quick_desk = ctk.CTkButton(act_bar, text="⚡ Salvează în Desktop\\\\IMPORT.xlsx", font=("Segoe UI", 12, "bold"), height=42, fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._on_imports_quick_save_desktop)
+        self.btn_imports_quick_desk.pack(side="left", padx=(0, 8))
+
+        self.btn_imports_open_xl = ctk.CTkButton(act_bar, text="📊 Deschide Excel", font=("Segoe UI", 12), height=42, width=140, state="disabled", fg_color="#475569", hover_color="#334155", command=self._on_imports_open_last_excel)
+        self.btn_imports_open_xl.pack(side="left", padx=(0, 8))
+
+        self.btn_imports_open_fld = ctk.CTkButton(act_bar, text="📁 Deschide Folder", font=("Segoe UI", 12), height=42, width=140, fg_color="#475569", hover_color="#334155", command=self._on_imports_open_output_folder)
+        self.btn_imports_open_fld.pack(side="left")
+
+        self.imports_progress = ctk.CTkProgressBar(card_act, height=10)
+        self.imports_progress.pack(fill="x", padx=16, pady=(2, 4))
+        self.imports_progress.set(0)
+
+        self.lbl_imports_status = ctk.CTkLabel(card_act, text="Pregătit. Încarcă documente Word pentru a genera fișierele Excel.", font=("Segoe UI", 11), text_color=_TEXT_SEC)
+        self.lbl_imports_status.pack(anchor="w", padx=16, pady=(0, 10))
+
+    # Handlers for Imports Generator
+    def _on_imports_pick_word_files(self, append=False):
+        default_dir = r"D:\Programe plasma" if os.path.exists(r"D:\Programe plasma") else self._get_browse_initial_dir("dest_based") or os.getcwd()
+        files = filedialog.askopenfilenames(
+            title="Selectează documente Word (.doc / .docx)",
+            initialdir=default_dir,
+            filetypes=[("Documente Word", "*.doc *.docx *.DOC *.DOCX"), ("Toate fișierele", "*.*")]
+        )
+        if files:
+            self._imports_load_word_files(list(files), append=append)
+
+    def _on_imports_pick_folder(self):
+        default_dir = r"D:\Programe plasma" if os.path.exists(r"D:\Programe plasma") else self._get_browse_initial_dir("dest_based") or os.getcwd()
+        folder = filedialog.askdirectory(title="Selectează folderul cu documente Word", initialdir=default_dir)
+        if folder:
+            self._imports_scan_folder(folder)
+
+    def _on_imports_quick_search_plasma(self):
+        plasma_dir = r"D:\Programe plasma"
+        if not os.path.exists(plasma_dir):
+            messagebox.showwarning("Folder inexistent", "Folderul D:\\Programe plasma nu a fost găsit pe acest calculator.\nFolosește butonul «Încarcă din Folder...».")
+            return
+        flt = self.imports_filter_text.get().strip()
+        if not flt:
+            messagebox.showinfo("Introdu un filtru", "Scrie în căsuța «Filtru» codul proiectului (ex: 1147-46) pentru a căuta rapid în D:\\Programe plasma.")
+            return
+        self._imports_scan_folder(plasma_dir)
+
+    def _imports_scan_folder(self, folder):
+        flt = self.imports_filter_text.get().strip().lower()
+        matched = []
+        try:
+            for entry in os.listdir(folder):
+                if entry.startswith("~$"):
+                    continue
+                if entry.lower().endswith((".doc", ".docx")):
+                    if not flt or flt in entry.lower():
+                        matched.append(os.path.join(folder, entry))
+        except Exception as exc:
+            messagebox.showerror("Eroare", f"Nu s-a putut citi folderul:\n{exc}")
+            return
+        if not matched:
+            messagebox.showinfo("Niciun fișier găsit", f"Nu s-au găsit documente Word în:\n{folder}" + (f"\ncu filtrul «{flt}»." if flt else "."))
+            return
+        # Natural sort
+        def natural_sort_key(path_str):
+            name = os.path.basename(path_str)
+            return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r'(\d+)', name)]
+        matched.sort(key=natural_sort_key)
+        self._imports_load_word_files(matched, append=False)
+
+    def _on_imports_clear_files(self):
+        self.imports_selected_files.clear()
+        self.imports_parsed_cache.clear()
+        self._imports_refresh_preview_tables()
+        self.lbl_imports_summary.configure(text="Lista a fost golită. Selectează unul sau mai multe documente Word (.doc / .docx).")
+        self.lbl_imports_status.configure(text="Lista de fișiere a fost resetată.")
+
+    def _imports_load_word_files(self, file_paths, append=False):
+        if not append:
+            self.imports_selected_files.clear()
+            self.imports_parsed_cache.clear()
+
+        def natural_sort_key(path_str):
+            name = os.path.basename(path_str)
+            return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r'(\d+)', name)]
+
+        existing = set(os.path.normcase(os.path.abspath(p)) for p in self.imports_selected_files)
+        for p in file_paths:
+            norm = os.path.normcase(os.path.abspath(p))
+            if norm not in existing:
+                self.imports_selected_files.append(p)
+                existing.add(norm)
+
+        self.imports_selected_files.sort(key=natural_sort_key)
+
+        for p in self.imports_selected_files:
+            if p not in self.imports_parsed_cache:
+                try:
+                    self.imports_parsed_cache[p] = metalix_importer.parse_word_document(p)
+                except Exception as exc:
+                    self.imports_parsed_cache[p] = {
+                        "file_path": p, "file_name": os.path.basename(p),
+                        "metadata": {}, "parts": [], "error": str(exc)
+                    }
+
+        self._imports_refresh_preview_tables()
+
+    def _imports_refresh_preview_tables(self):
+        for item in self.tree_imports_docs.get_children():
+            self.tree_imports_docs.delete(item)
+        for item in self.tree_imports_parts.get_children():
+            self.tree_imports_parts.delete(item)
+
+        if not self.imports_selected_files:
+            return
+
+        merge_dups = self.imports_merge_dups.get()
+        total_rows = 0
+        total_qty = 0
+
+        if len(self.imports_selected_files) > 1:
+            for p in self.imports_selected_files:
+                d = self.imports_parsed_cache.get(p, {})
+                pts = d.get("parts", [])
+                if merge_dups:
+                    pts = metalix_importer.aggregate_parts(pts)
+                total_rows += len(pts)
+                total_qty += sum(x["quantity"] for x in pts)
+
+            self.tree_imports_docs.insert(
+                "", "end", iid="__ALL__",
+                values=(f"📚 TOATE ({len(self.imports_selected_files)} fișiere)", total_rows, total_qty)
+            )
+
+        total_rows_check = 0
+        total_qty_check = 0
+        for p in self.imports_selected_files:
+            d = self.imports_parsed_cache.get(p, {})
+            pts = d.get("parts", [])
+            if merge_dups:
+                pts = metalix_importer.aggregate_parts(pts)
+            r_cnt = len(pts)
+            q_cnt = sum(x["quantity"] for x in pts)
+            total_rows_check += r_cnt
+            total_qty_check += q_cnt
+            self.tree_imports_docs.insert("", "end", iid=p, values=(os.path.basename(p), r_cnt, q_cnt))
+
+        self.lbl_imports_summary.configure(
+            text=f"✅ {len(self.imports_selected_files)} document(e) Word încărcate  |  Total poziții: {total_rows_check}  |  Total bucăți: {total_qty_check}",
+            text_color=_GREEN[1]
+        )
+
+        first_iid = "__ALL__" if len(self.imports_selected_files) > 1 else self.imports_selected_files[0]
+        self.tree_imports_docs.selection_set(first_iid)
+        self._imports_populate_parts_tree(first_iid)
+
+    def _on_imports_doc_tree_select(self, _event=None):
+        sel = self.tree_imports_docs.selection()
+        if sel:
+            self._imports_populate_parts_tree(sel[0])
+
+    def _imports_populate_parts_tree(self, selected_iid):
+        for item in self.tree_imports_parts.get_children():
+            self.tree_imports_parts.delete(item)
+
+        merge_dups = self.imports_merge_dups.get()
+        if selected_iid == "__ALL__":
+            target_files = self.imports_selected_files
+            self.lbl_imports_parts_title.configure(text=f"🔩 Piese extrase din TOATE cele {len(target_files)} documente Word:")
+        else:
+            target_files = [selected_iid]
+            self.lbl_imports_parts_title.configure(text=f"🔩 Piese extrase din: {os.path.basename(selected_iid)}")
+
+        for fpath in target_files:
+            d = self.imports_parsed_cache.get(fpath, {})
+            fname = os.path.basename(fpath)
+            pts = d.get("parts", [])
+            if merge_dups:
+                pts = metalix_importer.aggregate_parts(pts)
+            for p in pts:
+                dims = f"{p.get('size_x', '')} x {p.get('size_y', '')}".strip(" x")
+                self.tree_imports_parts.insert(
+                    "", "end",
+                    values=(fname, p.get("no", ""), p.get("raw_name", ""), p.get("clean_name", ""), p.get("quantity", ""), dims)
+                )
+
+    def _on_imports_mode_change(self):
+        mode = self.imports_export_mode.get()
+        if hasattr(self, "entry_imports_cons_name"):
+            if mode == "individual":
+                self.entry_imports_cons_name.configure(state="disabled")
+            else:
+                self.entry_imports_cons_name.configure(state="normal")
+        self.save_settings()
+
+    def _on_imports_pick_output_dir(self):
+        initial = self.imports_output_dir.get().strip() or os.path.join(os.path.expanduser("~"), "Desktop")
+        folder = filedialog.askdirectory(title="Selectează folderul destinație pentru Excel", initialdir=initial)
+        if folder:
+            norm = os.path.normpath(folder)
+            self.imports_output_dir.set(norm)
+            self.save_settings()
+
+    def _on_imports_copy_to_clipboard(self):
+        if not self.imports_selected_files:
+            messagebox.showwarning("Atenție", "Selectează mai întâi cel puțin un document Word.")
+            return
+
+        sel = self.tree_imports_docs.selection()
+        selected_iid = sel[0] if sel else ("__ALL__" if len(self.imports_selected_files) > 1 else self.imports_selected_files[0])
+        target_files = self.imports_selected_files if selected_iid == "__ALL__" else [selected_iid]
+
+        merge_dups = self.imports_merge_dups.get()
+        all_parts = []
+        for fpath in target_files:
+            d = self.imports_parsed_cache.get(fpath, {})
+            all_parts.extend(d.get("parts", []))
+
+        if merge_dups:
+            all_parts = metalix_importer.aggregate_parts(all_parts)
+
+        if not all_parts:
+            messagebox.showwarning("Atenție", "Nu există piese de copiat.")
+            return
+
+        lines = [f"{p['clean_name']}\t{p['quantity']}" for p in all_parts]
+        tsv_text = "\n".join(lines)
+        self.clipboard_clear()
+        self.clipboard_append(tsv_text)
+        self.update()
+
+        self.lbl_imports_status.configure(text=f"📋 S-au copiat în Clipboard {len(all_parts)} rânduri (Col A + Col B). Poți da Paste (Ctrl+V) direct în Excel!")
+        messagebox.showinfo("Copiat în Clipboard", f"Au fost copiate {len(all_parts)} poziții!\n\nAcum poți da direct Paste (Ctrl+V) în Excel.")
+
+    def _get_imports_start_row_settings(self):
+        mode = self.imports_start_row_mode.get()
+        if mode == "row2_empty1":
+            return 2, False
+        elif mode == "row1":
+            return 1, False
+        else:  # header_row1
+            return 2, True
+
+    def _on_imports_quick_save_desktop(self):
+        if not self.imports_selected_files:
+            messagebox.showwarning("Atenție", "Selectează mai întâi unul sau mai multe documente Word.")
+            return
+
+        sel = self.tree_imports_docs.selection()
+        selected_iid = sel[0] if sel else ("__ALL__" if len(self.imports_selected_files) > 1 else self.imports_selected_files[0])
+        target_files = self.imports_selected_files if selected_iid == "__ALL__" else [selected_iid]
+
+        merge_dups = self.imports_merge_dups.get()
+        all_parts = []
+        for fpath in target_files:
+            d = self.imports_parsed_cache.get(fpath, {})
+            all_parts.extend(d.get("parts", []))
+        if merge_dups:
+            all_parts = metalix_importer.aggregate_parts(all_parts)
+
+        if not all_parts:
+            messagebox.showwarning("Atenție", "Nu s-au găsit piese în documentele selectate.")
+            return
+
+        desk = os.path.join(os.path.expanduser("~"), "Desktop")
+        import_path = os.path.join(desk, "IMPORT.xlsx")
+        start_row, include_header = self._get_imports_start_row_settings()
+
+        try:
+            metalix_importer.write_import_excel(
+                parts=all_parts, output_path=import_path,
+                start_row=start_row, include_header=include_header
+            )
+            self.imports_last_generated_excel = import_path
+            self.imports_last_output_dir = desk
+            self.btn_imports_open_xl.configure(state="normal")
+            self.lbl_imports_status.configure(text=f"✅ Salvat cu succes în {import_path} ({len(all_parts)} poziții, {sum(p['quantity'] for p in all_parts)} bucăți).")
+            messagebox.showinfo("IMPORT.xlsx Salvat", f"Fișierul a fost salvat pe Desktop:\n{import_path}\n\n• Poziții: {len(all_parts)}\n• Total bucăți: {sum(p['quantity'] for p in all_parts)}")
+        except PermissionError:
+            messagebox.showerror("Fișier deschis", f"Nu se poate salva în:\n{import_path}\n\nÎnchide fișierul IMPORT.xlsx din Excel și încearcă din nou!")
+        except Exception as exc:
+            messagebox.showerror("Eroare la salvare", f"A apărut o eroare:\n{exc}")
+
+    def _on_imports_generate_excel(self):
+        if self.imports_running:
+            return
+        if not self.imports_selected_files:
+            messagebox.showwarning("Atenție", "Selectează mai întâi cel puțin un document Word (.doc / .docx)!")
+            return
+
+        output_dir = self.imports_output_dir.get().strip() or os.path.join(os.path.expanduser("~"), "Desktop")
+        mode = self.imports_export_mode.get()
+        consolidated_name = self.imports_consolidated_name.get().strip() or "IMPORT.xlsx"
+        start_row, include_header = self._get_imports_start_row_settings()
+        merge_dups = self.imports_merge_dups.get()
+
+        self.imports_running = True
+        self.btn_imports_generate.configure(state="disabled", text="⏳ Se generează...")
+        self.imports_progress.set(0)
+
+        def worker():
+            def on_progress(curr, total, msg):
+                self.after(0, lambda: self._imports_update_progress(curr, total, msg))
+
+            report = metalix_importer.process_batch_documents(
+                word_files=list(self.imports_selected_files),
+                output_dir=output_dir,
+                mode=mode,
+                consolidated_filename=consolidated_name,
+                start_row=start_row,
+                include_header=include_header,
+                merge_duplicates=merge_dups,
+                progress_callback=on_progress
+            )
+            self.after(0, lambda: self._on_imports_generation_complete(report, output_dir))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _imports_update_progress(self, curr, total, msg):
+        frac = curr / max(total, 1)
+        self.imports_progress.set(frac)
+        self.lbl_imports_status.configure(text=msg)
+
+    def _on_imports_generation_complete(self, report, output_dir):
+        self.imports_running = False
+        self.btn_imports_generate.configure(state="normal", text="🚀 GENEREAZĂ EXCEL (.XLSX)")
+        self.imports_progress.set(1.0)
+
+        gen_files = report.get("generated_files", [])
+        errors = report.get("errors", [])
+        self.imports_last_output_dir = output_dir
+
+        if gen_files:
+            self.imports_last_generated_excel = gen_files[-1]
+            self.btn_imports_open_xl.configure(state="normal")
+
+        summary_msg = f"✅ Generare finalizată! Documente procesate: {report.get('processed_docs', len(gen_files))}/{report.get('total_docs', len(self.imports_selected_files))} | Fișiere create: {len(gen_files)}"
+        self.lbl_imports_status.configure(text=summary_msg)
+
+        if errors:
+            err_preview = "\n".join(errors[:6])
+            messagebox.showwarning("Finalizat cu atenționări", f"{summary_msg}\n\nFolder:\n{output_dir}\n\nAtenționări:\n{err_preview}")
+        else:
+            messagebox.showinfo(
+                "Generare Reușită",
+                f"Toate fișierele Excel au fost generate cu succes!\n\n"
+                f"• Fișiere Excel generate: {len(gen_files)}\n"
+                f"• Salvare în:\n{output_dir}"
+            )
+
+    def _on_imports_open_last_excel(self):
+        if self.imports_last_generated_excel and os.path.exists(self.imports_last_generated_excel):
+            os.startfile(self.imports_last_generated_excel)
+        else:
+            messagebox.showwarning("Fișier negăsit", "Nu există încă un fișier Excel generat.")
+
+    def _on_imports_open_output_folder(self):
+        target = self.imports_last_output_dir or self.imports_output_dir.get().strip() or os.path.join(os.path.expanduser("~"), "Desktop")
+        if os.path.exists(target):
+            os.startfile(target)
+        else:
+            messagebox.showwarning("Folder inexistent", f"Folderul nu există încă:\n{target}")
+
 
 if __name__ == "__main__":
     import sys

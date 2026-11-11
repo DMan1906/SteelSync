@@ -1,13 +1,13 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.6.7)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.6.7/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.6.7)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.6.7)](https://github.com/DMan1906/SteelSync/releases/download/v1.6.7/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
-**SteelSync Toolkit** este o aplicație desktop completă pentru industria construcțiilor metalice: generare CAD 1:1 din desene PDF (fără cote), căutare și extragere DWG-uri, sortarea și prelucrarea fișierelor NC/NC1 (FICEP, Voortman etc.) și managementul desenelor tehnice.
+**SteelSync Toolkit** este o aplicație desktop completă pentru industria construcțiilor metalice: generare automată de tabele de import Metalix din rapoarte Word, organizare și regrupare avansată DWG, generare CAD 1:1 din desene PDF (fără cote), căutare și extragere DWG-uri, sortarea și prelucrarea fișierelor NC/NC1 (FICEP, Voortman etc.) și managementul desenelor tehnice.
 
 ## 📦 Descărcare și Rulare
 1. Mergi la secțiunea **[Releases](https://github.com/DMan1906/SteelSync/releases)** din bara laterală dreapta (sau click pe butonul de mai sus).
@@ -16,7 +16,20 @@
 
 ## 🚀 Funcționalități
 
-- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (NOU în v1.6.0)**:
+- **📑 Imports Generator (NOU în v1.7.0 - Pagină / Tab Dedicat)**:
+  - Modul specializat pentru procesarea rapoartelor de nesting Metalix salvate în format Word (`.doc` și `.docx`).
+  - Extrage automat tabelele de piese din documente: denumire piesă, grosime tablă, calitate material (`S235`, `S355`, etc.), cantitate totală necesară și denumire nesting.
+  - Generare fișier Excel standardizat (`IMPORT.xlsx`) gata de importat direct în softul de nesting Metalix.
+  - Funcție **Quick Save on Desktop** printr-un singur click (`IMPORT.xlsx` generat direct pe desktop) și buton dedicat **Copiază în Clipboard** (date tabelare compatibile direct cu Paste în orice spreadsheet Excel).
+  - Previzualizare tabelară interactivă cu căutare/filtrare live a pieselor extrase.
+
+- **📦 Integrare DWG Tools în DWG Finder (NOU în v1.7.0)**:
+  - Tabul `🔍 DWG Finder` integrează acum un comutator vizual rapid de sub-vederi (segmented button) cu 3 moduri de lucru:
+    1. **🔍 Căutare DWG în Proiecte:** Modulul consacrat de scanare recursivă a desenelor DWG/PDF după codurile pieselor sau fișiere NC.
+    2. **📦 Organizare Piese (BOM ➜ Piese):** Citește lista de debitare/BOM din Excel, detectează automat coloanele (Piesă, Grosime/Profil, Material, Cantitate), caută fișierele DWG în folderul sursă și le organizează automat în foldere curate per grosime (ex. `t10`, `t15`, `t20`). Include rapoarte automate `_PIESE_LIPSA.txt` și `_RAPORT_ORGANIZARE.txt`.
+    3. **🔄 Regrupare DWG pe Grosimi:** Scanează o ierarhie dezorganizată de fișiere DWG, identifică automat grosimea fiecărui reper din denumirea fișierului sau din calea folderului părinte și le re-grupează curat în subfoldere per grosime.
+
+- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (v1.6.0)**:
   - Modul dedicat și tab nou în aplicație: convertește automat desenele tehnice de execuție PDF în fișiere CAD (`.dwg` / `.dxf`) la scară reală **1:1 (milimetri)**.
   - **Filtrare Geometrie Pură:** Elimină automat toate cotele, liniile de cotă, săgețile, textele, simbolurile de secțiune și cartușul desenului, păstrând doar conturul piesei și decupajele interioare.
   - **Calibrare Automată:** Extrage automat metadatele din tabelul `STYKKLISTE` (dimensiuni nominale profil/lungime, scară) și calibrează geometria la milimetru, mutând colțul stânga-jos în originea CAD `(0, 0)`.

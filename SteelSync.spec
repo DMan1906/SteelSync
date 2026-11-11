@@ -12,6 +12,9 @@ tmp_ret3 = collect_all('pymupdf')
 datas += tmp_ret3[0]; binaries += tmp_ret3[1]; hiddenimports += tmp_ret3[2]
 tmp_ret4 = collect_all('ezdxf')
 datas += tmp_ret4[0]; binaries += tmp_ret4[1]; hiddenimports += tmp_ret4[2]
+tmp_ret5 = collect_all('docx')
+datas += tmp_ret5[0]; binaries += tmp_ret5[1]; hiddenimports += tmp_ret5[2]
+hiddenimports += ['metalix_importer', 'dwg_organizer', 'openpyxl']
 
 
 a = Analysis(
