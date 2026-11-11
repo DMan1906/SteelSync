@@ -385,7 +385,7 @@ _DANGER      = ("#ff3b30", "#ef476f")   # error color
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.6.6"
+APP_VERSION = "1.6.7"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1115,16 +1115,19 @@ class UnifiedApp(ctk.CTk):
 
         # ── Directory Browse Memories (Independent per Requirement #3) ──
         self.extractor_source_last_dir = ""
+        self.extractor_dest_last_dir = ""
         self.global_last_dir = ""
+        self._settings_loaded = False
+        self._saved_settings_raw = {}
 
         # ── Tab Ordering & State (Requirement #2 with Drag & Drop) ──
         self.tab_order = list(DEFAULT_TAB_ORDER)
         self.active_tab_id = "extractor"
         self._drag_data = None
-        self._load_saved_tab_order()
+        self._load_saved_variables()
 
         self.create_widgets()
-        self.load_settings()
+        self._apply_settings_ui()
         self.bind("<Configure>", self._on_window_configure)
         self.bind("<Control-Left>", lambda e: self.move_active_tab_left())
         self.bind("<Control-Right>", lambda e: self.move_active_tab_right())
@@ -1176,11 +1179,15 @@ class UnifiedApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════
     #  SETTINGS PERSISTENCE
     # ══════════════════════════════════════════════════════════════════════
-    def load_settings(self):
-        """Load persisted user settings from JSON."""
+    def _load_saved_variables(self):
+        """Pre-load all variables and values from settings JSON before widgets are constructed."""
         try:
+            if not os.path.exists(SETTINGS_PATH):
+                return
             with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
                 s = json.load(f)
+            self._saved_settings_raw = s
+
             self.ignored_update_version = s.get("ignored_update_version", "")
             self.appearance_mode_var.set(s.get("appearance_mode", "Dark"))
             ctk.set_appearance_mode(self.appearance_mode_var.get())
@@ -1238,11 +1245,14 @@ class UnifiedApp(ctk.CTk):
             self.extractor_source_last_dir = s.get("extractor_source_last_dir", "")
             if not self.extractor_source_last_dir:
                 self.extractor_source_last_dir = self.source_dir.get()
+            self.extractor_dest_last_dir = s.get("extractor_dest_last_dir", "")
+            if not self.extractor_dest_last_dir:
+                self.extractor_dest_last_dir = self.dest_dir.get()
             self.global_last_dir = s.get("global_last_dir", "")
             if not self.global_last_dir:
                 self.global_last_dir = self.dest_dir.get() or self.nc_source_folder.get()
 
-            # Restore Tab Ordering & Active Tab (Requirement #2)
+            # Pre-load Tab Ordering & Active Tab (Requirement #2)
             raw_order = s.get("tab_order", [])
             valid_order = []
             for item in raw_order:
@@ -1260,12 +1270,18 @@ class UnifiedApp(ctk.CTk):
                 self.active_tab_id = mapped_active
             else:
                 self.active_tab_id = self.tab_order[0]
-            
-            # Apply loaded tab order & active tab
+        except Exception:
+            pass
+
+    def _apply_settings_ui(self):
+        """Apply loaded settings to UI elements after create_widgets() finishes."""
+        s = getattr(self, "_saved_settings_raw", {})
+        try:
+            # 1. Apply tab order & active tab
             self.apply_tab_order()
             self.select_tab(self.active_tab_id)
 
-            # Restore extension selections
+            # 2. Restore extension selections
             saved_exts = s.get("extensions", {})
             for ext, val in saved_exts.items():
                 if ext in self.extension_vars:
@@ -1275,7 +1291,13 @@ class UnifiedApp(ctk.CTk):
                     self.extension_vars[ext] = ctk.BooleanVar(value=val)
             self.draw_extensions()
 
-            # Restore window geometry and position (multi-monitor safe)
+            # 3. Synchronize toggle UI states
+            if hasattr(self, "_on_toggle_auto_search"):
+                self._on_toggle_auto_search()
+            if hasattr(self, "_on_toggle_extract_assembly"):
+                self._on_toggle_extract_assembly()
+
+            # 4. Restore window geometry and position (multi-monitor safe)
             saved_geom = s.get("window_geometry", "")
             if saved_geom and _is_geometry_visible(saved_geom):
                 try:
@@ -1294,13 +1316,21 @@ class UnifiedApp(ctk.CTk):
                     self.after(50, lambda: self.state("zoomed"))
                 except Exception:
                     pass
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
         except Exception:
             pass
+        finally:
+            self._settings_loaded = True
+            self.save_settings()
+
+    def load_settings(self):
+        """Load persisted user settings from JSON and apply to UI."""
+        self._load_saved_variables()
+        self._apply_settings_ui()
 
     def save_settings(self):
         """Persist current user settings to JSON."""
+        if not getattr(self, "_settings_loaded", False):
+            return
         is_zoomed = False
         try:
             is_zoomed = (self.state() == "zoomed")
@@ -1365,6 +1395,7 @@ class UnifiedApp(ctk.CTk):
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
             "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
+            "extractor_dest_last_dir": getattr(self, "extractor_dest_last_dir", ""), 
             "global_last_dir": getattr(self, "global_last_dir", ""),
             "tab_order": getattr(self, "tab_order", list(DEFAULT_TAB_ORDER)),
             "active_tab_id": getattr(self, "active_tab_id", "extractor"),
@@ -1475,31 +1506,64 @@ class UnifiedApp(ctk.CTk):
         )
 
     # ══════════════════════════════════════════════════════════════════════
-    #  DIRECTORY BROWSE HELPERS (INDEPENDENT MEMORIES - REQUIREMENT #3)
+    #  DIRECTORY BROWSE HELPERS (INDEPENDENT & CONTEXT-AWARE MEMORIES)
     # ══════════════════════════════════════════════════════════════════════
+    def _get_browse_initial_dir(self, target_type, current_val=""):
+        """
+        Determine the initial directory for file/folder dialogs according to User Rule:
+        - 'extractor_source': independent memory (source_dir / extractor_source_last_dir)
+        - 'extractor_dest': independent memory (dest_dir / extractor_dest_last_dir)
+        - 'dest_based': based on File Extractor Destinatie (dest_dir / extractor_dest_last_dir)
+        - 'dest_sorted_based': based on Destinatie + "\\Sorted" (or "\\SORTED", fallback dest_dir)
+        """
+        def _as_valid_dir(p):
+            if not p:
+                return None
+            norm = os.path.normpath(str(p).strip())
+            if os.path.isdir(norm):
+                return norm
+            parent = os.path.dirname(norm)
+            if parent and os.path.isdir(parent):
+                return parent
+            return None
+
+        # 1. Extractor Source (Independent)
+        if target_type == "extractor_source":
+            d = _as_valid_dir(current_val) or _as_valid_dir(getattr(self, "extractor_source_last_dir", "")) or _as_valid_dir(self.source_dir.get())
+            return d or None
+
+        # 2. Extractor Dest (Independent)
+        if target_type == "extractor_dest":
+            d = _as_valid_dir(current_val) or _as_valid_dir(getattr(self, "extractor_dest_last_dir", "")) or _as_valid_dir(self.dest_dir.get())
+            return d or None
+
+        # Base directory from File Extractor Destinatie
+        dest_base = _as_valid_dir(self.dest_dir.get()) or _as_valid_dir(getattr(self, "extractor_dest_last_dir", ""))
+
+        # 3. Dest-based (Excel Extractor, Assembly Excel, NC Sorter Source, NC Sorter Excel)
+        if target_type == "dest_based":
+            if dest_base:
+                return dest_base
+            return _as_valid_dir(current_val) or _as_valid_dir(getattr(self, "global_last_dir", "")) or None
+
+        # 4. Dest-Sorted-based (Modify NC Folder, Modify NC Excel) -> Destinatie + "\Sorted"
+        if target_type == "dest_sorted_based":
+            if dest_base:
+                for sub in ("Sorted", "SORTED", "sorted"):
+                    candidate = os.path.join(dest_base, sub)
+                    if os.path.isdir(candidate):
+                        return candidate
+                return dest_base
+            return _as_valid_dir(current_val) or _as_valid_dir(getattr(self, "global_last_dir", "")) or None
+
+        return _as_valid_dir(current_val) or None
+
     def _get_global_initial_dir(self, current_val=""):
-        """Get the initial directory for global browse dialogs (ignoring File Extractor source)."""
-        val = (current_val or "").strip()
-        if val:
-            if os.path.isdir(val):
-                return val
-            elif os.path.isfile(val):
-                return os.path.dirname(val)
-            parent = os.path.dirname(val)
-            if os.path.isdir(parent):
-                return parent
-
-        if getattr(self, "global_last_dir", "") and os.path.isdir(self.global_last_dir):
-            return self.global_last_dir
-        elif getattr(self, "global_last_dir", ""):
-            parent = os.path.dirname(self.global_last_dir)
-            if os.path.isdir(parent):
-                return parent
-
-        return None
+        """Get the initial directory for global browse dialogs (fallback helper)."""
+        return self._get_browse_initial_dir("dest_based", current_val)
 
     def _set_global_last_dir(self, chosen_path):
-        """Update global last dir memory and persist (ignoring File Extractor source)."""
+        """Update global last dir memory and persist."""
         if not chosen_path:
             return
         norm = os.path.normpath(chosen_path)
@@ -2164,15 +2228,16 @@ class UnifiedApp(ctk.CTk):
             self.save_settings()
 
     def browse_assembly_excel(self):
-        start_dir = self.global_last_dir or self.extractor_source_last_dir or os.getcwd()
+        """Browse Assembly Excel (opens in File Extractor Destinatie folder)."""
+        initial = self._get_browse_initial_dir("dest_based", self.assembly_excel_file.get())
         f = filedialog.askopenfilename(
             title="Selectează Fișierul Excel cu Ansambluri",
-            initialdir=start_dir,
+            initialdir=initial,
             filetypes=[("Excel Files", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")]
         )
         if f:
-            self.assembly_excel_file.set(f)
-            self.global_last_dir = str(Path(f).parent)
+            norm = os.path.normpath(f)
+            self.assembly_excel_file.set(norm)
             self.save_settings()
 
     def is_assembly_match(self, filename, asmb_code):
@@ -2580,14 +2645,8 @@ class UnifiedApp(ctk.CTk):
                 self.log("⚠ Selecția proiectului a fost anulată.")
 
     def browse_source(self):
-        """Browse source folder exclusively for File Extractor (Requirement #3)."""
-        curr = self.source_dir.get().strip()
-        initial = None
-        if curr and os.path.isdir(curr):
-            initial = curr
-        elif getattr(self, "extractor_source_last_dir", "") and os.path.isdir(self.extractor_source_last_dir):
-            initial = self.extractor_source_last_dir
-
+        """Browse source folder exclusively for File Extractor (Independent memory)."""
+        initial = self._get_browse_initial_dir("extractor_source", self.source_dir.get())
         title = "Selectează Folderul Mamă al Clienților" if self.extractor_auto_search.get() else "Selectare Director Sursă (File Extractor)"
         folder = filedialog.askdirectory(title=title, initialdir=initial)
         if folder:
@@ -2597,22 +2656,28 @@ class UnifiedApp(ctk.CTk):
             self.save_settings()
 
     def browse_dest(self):
-        """Browse destination folder (uses global directory memory - Requirement #3)."""
-        initial = self._get_global_initial_dir(self.dest_dir.get())
+        """Browse destination folder (independent memory for File Extractor)."""
+        initial = self._get_browse_initial_dir("extractor_dest", self.dest_dir.get())
         folder = filedialog.askdirectory(title="Selectare Director Destinație", initialdir=initial)
         if folder:
             norm = os.path.normpath(folder)
             self.dest_dir.set(norm)
-            self._set_global_last_dir(norm)
+            self.extractor_dest_last_dir = norm
+            self.global_last_dir = norm
+            self.save_settings()
 
     def browse_excel(self):
-        """Browse Excel file (uses global directory memory - Requirement #3)."""
-        initial = self._get_global_initial_dir(self.excel_file.get())
-        file = filedialog.askopenfilename(title="Selectare Fișier Excel", initialdir=initial, filetypes=[("Excel files", "*.xlsx *.xls")])
+        """Browse Excel file (opens in File Extractor Destinație folder)."""
+        initial = self._get_browse_initial_dir("dest_based", self.excel_file.get())
+        file = filedialog.askopenfilename(
+            title="Selectare Fișier Excel",
+            initialdir=initial,
+            filetypes=[("Excel files", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")]
+        )
         if file:
             norm = os.path.normpath(file)
             self.excel_file.set(norm)
-            self._set_global_last_dir(norm)
+            self.save_settings()
 
     def log(self, message):
         self.after(0, self._insert_log, message)
@@ -3168,22 +3233,26 @@ class UnifiedApp(ctk.CTk):
         self.nc_log_box.pack(fill="both", expand=True, padx=8, pady=8)
 
     def nc_browse_source(self):
-        """Browse source folder for NC Sorter (uses global directory memory - Requirement #3)."""
-        initial = self._get_global_initial_dir(self.nc_source_folder.get())
+        """Browse source folder for NC Sorter (opens in File Extractor Destinație folder)."""
+        initial = self._get_browse_initial_dir("dest_based", self.nc_source_folder.get())
         folder = filedialog.askdirectory(title="Selectare Director Sursă", initialdir=initial)
         if folder:
             norm = os.path.normpath(folder)
             self.nc_source_folder.set(norm)
-            self._set_global_last_dir(norm)
+            self.save_settings()
 
     def nc_browse_excel(self):
-        """Browse BOM Excel for NC Sorter (uses global directory memory - Requirement #3)."""
-        initial = self._get_global_initial_dir(self.nc_excel_file.get())
-        file = filedialog.askopenfilename(title="Selectare Fișier Excel BOM", initialdir=initial, filetypes=[("Excel files", "*.xlsx *.xls")])
+        """Browse BOM Excel for NC Sorter (opens in File Extractor Destinație folder)."""
+        initial = self._get_browse_initial_dir("dest_based", self.nc_excel_file.get())
+        file = filedialog.askopenfilename(
+            title="Selectare Fișier Excel BOM",
+            initialdir=initial,
+            filetypes=[("Excel files", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")]
+        )
         if file:
             norm = os.path.normpath(file)
             self.nc_excel_file.set(norm)
-            self._set_global_last_dir(file)
+            self.save_settings()
 
     def nc_log(self, message):
         self.after(0, self._nc_insert_log, message)
@@ -3320,22 +3389,26 @@ class UnifiedApp(ctk.CTk):
         self.mod_nc_log_box.pack(fill="both", expand=True, padx=8, pady=8)
 
     def mod_nc_browse_dir(self):
-        """Browse NC folder for Modify NC (uses global directory memory - Requirement #3)."""
-        initial = self._get_global_initial_dir(self.mod_nc_dir.get())
+        """Browse NC folder for Modify NC (opens in File Extractor Destinație + \\Sorted)."""
+        initial = self._get_browse_initial_dir("dest_sorted_based", self.mod_nc_dir.get())
         d = filedialog.askdirectory(title="Selectează folderul cu fișiere NC", initialdir=initial)
         if d:
             norm = os.path.normpath(d)
             self.mod_nc_dir.set(norm)
-            self._set_global_last_dir(norm)
+            self.save_settings()
 
     def mod_nc_browse_excel(self):
-        """Browse quantities Excel for Modify NC (uses global directory memory - Requirement #3)."""
-        initial = self._get_global_initial_dir(self.mod_nc_excel.get())
-        f = filedialog.askopenfilename(title="Selectează fișierul Excel cu cantități", initialdir=initial, filetypes=[("Excel", "*.xlsx *.xls")])
+        """Browse quantities Excel for Modify NC (opens in File Extractor Destinație + \\Sorted)."""
+        initial = self._get_browse_initial_dir("dest_sorted_based", self.mod_nc_excel.get())
+        f = filedialog.askopenfilename(
+            title="Selectează fișierul Excel cu cantități",
+            initialdir=initial,
+            filetypes=[("Excel files", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")]
+        )
         if f:
             norm = os.path.normpath(f)
             self.mod_nc_excel.set(norm)
-            self._set_global_last_dir(norm)
+            self.save_settings()
 
     def mod_nc_log(self, msg):
         self.after(0, self._mod_nc_insert_log, msg)
@@ -5012,7 +5085,8 @@ class UnifiedApp(ctk.CTk):
     def _build_quantity_map(self, excel_path, part_col_name, qty_col_name):
         """
         Build a dict { normalized_part_name: quantity } from the BOM Excel across ALL sheets.
-        Handles both explicit columns, standard named tables, and multi-section A4 layouts.
+        Handles both explicit columns, standard named tables, and multi-section A4 layouts
+        with multiple side-by-side (part, qty) column pairs per sheet.
         Returns an empty dict on failure.
         """
         try:
@@ -5031,49 +5105,73 @@ class UnifiedApp(ctk.CTk):
                 if df.empty:
                     continue
 
-                p_col = None
-                q_col = None
+                cols = list(df.columns)
+                num_cols = len(cols)
+                part_cols = []
+                qty_cols = []
 
-                if part_col_name and part_col_name in df.columns:
-                    p_col = part_col_name
-                if qty_col_name and qty_col_name in df.columns:
-                    q_col = qty_col_name
+                for i, col in enumerate(cols):
+                    c_clean = str(col).lower().strip()
+                    base_clean = re.sub(r'\.\d+$', '', c_clean).strip()
+                    is_nr = any(kw == base_clean or c_clean.startswith(kw + ' ') or c_clean.startswith(kw + '.') for kw in nr_keywords)
 
-                # Auto-detect named columns if not explicitly provided
-                if not p_col or not q_col:
-                    for col in df.columns:
-                        c_clean = str(col).lower().strip()
-                        if not p_col:
-                            if any(kw in c_clean for kw in part_keywords) and not any(kw == c_clean for kw in nr_keywords):
-                                p_col = col
-                        if not q_col:
-                            if any(kw in c_clean for kw in qty_keywords):
-                                q_col = col
+                    is_part = False
+                    if "unnamed" not in c_clean:
+                        if part_col_name and part_col_name.lower() in c_clean:
+                            is_part = True
+                        elif not part_col_name and any(kw in base_clean for kw in part_keywords) and not is_nr:
+                            is_part = True
 
-                # If standard named columns exist, extract directly
-                if p_col and q_col and p_col != q_col:
-                    for idx in df.index:
-                        pname = str(df[p_col][idx]).strip()
-                        if not pname or pname.lower() == 'nan':
-                            continue
-                        try:
-                            qty = int(float(df[q_col][idx]))
-                        except (ValueError, TypeError):
-                            continue
-                        norm = self._normalize_name(pname)
-                        result[norm] = result.get(norm, 0) + qty
+                    is_qty = False
+                    if qty_col_name and qty_col_name.lower() in c_clean:
+                        is_qty = True
+                    elif not qty_col_name and any(kw in base_clean for kw in qty_keywords):
+                        is_qty = True
+
+                    if is_part:
+                        part_cols.append((i, col))
+                    elif is_qty:
+                        qty_cols.append((i, col))
+
+                pairs = []
+                for p_idx, p_col in part_cols:
+                    next_p_idx = num_cols
+                    for np_idx, _ in part_cols:
+                        if np_idx > p_idx:
+                            next_p_idx = np_idx
+                            break
+
+                    cand_q = [q for q in qty_cols if p_idx < q[0] < next_p_idx]
+                    if cand_q:
+                        pairs.append((p_col, cand_q[0][1]))
+
+                if pairs:
+                    for p_col, q_col in pairs:
+                        for idx in df.index:
+                            pname = str(df[p_col][idx]).strip()
+                            if not pname or pname.lower() == 'nan':
+                                continue
+                            p_clean = pname.lower()
+                            if any(kw in p_clean for kw in part_keywords + qty_keywords + nr_keywords):
+                                continue
+                            try:
+                                qty = int(float(df[q_col][idx]))
+                            except (ValueError, TypeError):
+                                continue
+                            norm = self._normalize_name(pname)
+                            result[norm] = result.get(norm, 0) + qty
                     continue
 
                 # Fallback: multi-section generic scan for unheadered or complex multi-column sheets
                 try:
                     df_raw = xl.parse(sheet_name, header=None)
-                    num_cols = df_raw.shape[1]
-                    if num_cols < 2:
+                    num_cols_raw = df_raw.shape[1]
+                    if num_cols_raw < 2:
                         continue
                     used_cols = set()
                     valid_pairs = []
 
-                    for c in range(num_cols - 1):
+                    for c in range(num_cols_raw - 1):
                         if c in used_cols or (c + 1) in used_cols:
                             continue
 
