@@ -173,11 +173,15 @@ class PdfToCadConverter:
             b_txt = b[4].strip()
             lines = [l.strip() for l in b_txt.splitlines() if l.strip()]
             for idx, line in enumerate(lines):
-                m_prof = re.search(r'\b(?:PL|BL|FL|P|FLAT)?\s*(\d+(?:\.\d+)?)\s*[*xX\-]\s*(\d+(?:\.\d+)?)\b', line, re.IGNORECASE)
+                m_prof = re.search(r'\b(?:PL|BL|FL|P|FLAT)\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\b', line, re.IGNORECASE)
+                if not m_prof:
+                    m_prof = re.search(r'\b(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\b', line, re.IGNORECASE)
                 if m_prof:
                     try:
-                        meta["profil_thickness"] = float(m_prof.group(1))
-                        meta["profil_width"] = float(m_prof.group(2))
+                        d1 = float(m_prof.group(1))
+                        d2 = float(m_prof.group(2))
+                        meta["profil_thickness"] = min(d1, d2)
+                        meta["profil_width"] = max(d1, d2)
                     except ValueError:
                         pass
 
@@ -249,17 +253,21 @@ class PdfToCadConverter:
                     pass
 
         if not meta["profil_width"]:
-            m_prof = re.search(r'\b(?:PL|BL|FL|P|FLAT)?\s*(\d+(?:\.\d+)?)\s*[*xX\-]\s*(\d+(?:\.\d+)?)\b', text, re.IGNORECASE)
+            m_prof = re.search(r'\b(?:PL|BL|FL|P|FLAT)\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\b', text, re.IGNORECASE)
+            if not m_prof:
+                m_prof = re.search(r'\b(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\b', text, re.IGNORECASE)
             if m_prof:
                 try:
-                    meta["profil_thickness"] = float(m_prof.group(1))
-                    meta["profil_width"] = float(m_prof.group(2))
+                    d1 = float(m_prof.group(1))
+                    d2 = float(m_prof.group(2))
+                    meta["profil_thickness"] = min(d1, d2)
+                    meta["profil_width"] = max(d1, d2)
                 except ValueError:
                     pass
 
         return meta
 
-    def extract_geometry_items(self, page, stykk_y=None, top_margin_y=20.0, only_front_view=True):
+    def extract_geometry_items(self, page, stykk_y=None, top_margin_y=20.0, only_front_view=True, meta=None):
         """
         Extrage geometria curată a piesei:
         - Filtrează cartușul și tabelele (atât când STYKKLISTE este jos, cât și când este sus).
@@ -331,7 +339,7 @@ class PdfToCadConverter:
             clusters.sort(key=lambda c: (c[1] - c[0]), reverse=True)
             contour_drawings = clusters[0][2]
 
-        # 3.1 Izolare vedere principală pe axa Y (eliminare vederi secundare Top / Topp / Bunn)
+        # 3.1 Izolare vedere principală pe axa Y (eliminare vederi secundare cant/grosime t, Topp/Bunn sau secțiuni înguste A-A)
         if only_front_view and len(contour_drawings) > 1:
             intervals_y = sorted([(d["rect"].y0, d["rect"].y1, d) for d in contour_drawings], key=lambda y: y[0])
             clusters_y = []
@@ -347,12 +355,62 @@ class PdfToCadConverter:
                     cur_drawings_y = [dr]
             clusters_y.append((cur_y0, cur_y1, cur_drawings_y))
 
-            # Sortăm clusterele pe Y după lățimea orizontală totală (X-span) pentru a alege vederea principală Front (și nu secțiuni laterale înguste gen A-A)
+            # Sortăm clusterele pe Y pentru a alege vederea principală Front (fața piesei)
+            # și a elimina vederile de cant (grosime t), vederile de sus/jos (Topp/Bunn) sau secțiuni laterale (A-A)
             def _cluster_x_span(c):
                 dr_list = c[2]
                 return max(d["rect"].x1 for d in dr_list) - min(d["rect"].x0 for d in dr_list)
 
-            clusters_y.sort(key=_cluster_x_span, reverse=True)
+            max_span = max(_cluster_x_span(c) for c in clusters_y) if clusters_y else 1.0
+
+            front_labels = []
+            try:
+                for b in page.get_text("blocks"):
+                    if re.search(r"\bFront\b", b[4], re.IGNORECASE):
+                        front_labels.append({"x0": b[0], "y0": b[1], "x1": b[2], "y1": b[3]})
+            except Exception:
+                pass
+
+            scale_val = (meta.get("scale", 10.0) if meta else 10.0) or 10.0
+            base_scale = scale_val * (25.4 / 72.0)
+            target_pw = meta.get("profil_width") if meta else None
+            target_th = meta.get("profil_thickness") if meta else None
+
+            def _view_score(c):
+                span = _cluster_x_span(c)
+                # Dacă lățimea orizontală e mult mai mică decât max_span, e o secțiune îngustă gen A-A
+                if max_span > 0 and span < 0.65 * max_span:
+                    return -100000.0 + span
+
+                score = span
+                h_pt = max(0.1, c[1] - c[0])
+                h_mm = h_pt * base_scale
+
+                # Prioritizăm fața plăcii conform profil_width și deprioritizăm cantul conform profil_thickness
+                if target_pw and target_pw > 0:
+                    if abs(h_mm - target_pw) <= max(5.0, target_pw * 0.15):
+                        score += 50000.0
+                if target_th and target_th > 0 and (not target_pw or target_pw > target_th * 1.5):
+                    if abs(h_mm - target_th) <= max(2.0, target_th * 0.2):
+                        score -= 25000.0
+
+                # Verificăm proximitatea față de eticheta text "Front"
+                c_min_x = min(d["rect"].x0 for d in c[2])
+                c_max_x = max(d["rect"].x1 for d in c[2])
+                c_y0, c_y1 = c[0], c[1]
+
+                for fl in front_labels:
+                    if fl["x0"] <= c_max_x + 50.0 and fl["x1"] >= c_min_x - 50.0:
+                        if 0 <= fl["y0"] - c_y1 <= 90.0:
+                            score += 20000.0
+                        elif 0 <= c_y0 - fl["y1"] <= 60.0:
+                            score += 10000.0
+
+                # În caz de egalitate între două vederi orizontale lungi, fața piesei are înălțimea mult mai mare decât cantul
+                score += h_pt * 2.0
+                return score
+
+            clusters_y.sort(key=_view_score, reverse=True)
             contour_drawings = clusters_y[0][2]
 
         # 4. Colectare primitive geometrice
@@ -945,7 +1003,7 @@ class PdfToCadConverter:
 
             # 2. Extragere geometrie curată
             items, bbox = self.extract_geometry_items(
-                page, stykk_y=meta["stykk_y"], top_margin_y=meta.get("top_margin_y", 20.0), only_front_view=only_front_view
+                page, stykk_y=meta["stykk_y"], top_margin_y=meta.get("top_margin_y", 20.0), only_front_view=only_front_view, meta=meta
             )
 
             if not items or not bbox or bbox["width"] <= 0 or bbox["height"] <= 0:
