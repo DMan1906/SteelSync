@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.6)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.6/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.6)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.7)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.7/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.7)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.6)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.6/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.7)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.7/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,8 @@
 
 ## 🚀 Funcționalități
 
-- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.6)**:
+- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.7)**:
+  - **Diferențiere Topologică Robustă între Decupaje/Notches și Rupturi Grafice:** Previne ștergerea sau unirea eronată a decupajelor semicirculare sau curbe (ex. `R35`), verificând continuitatea topologică a nodurilor și conservând toate detaliile geometrice ale conturului.
   - **Calibrare Matematică Exactă a Pauzelor Multi-Break cu Decupaje:** Garantează cote 100% exacte la fiecare segment al piesei (ex. 2353, 100, 1100, 100, 1100, 100, 1200, 100, 612 mm). Decupajele dintre stațiile de ruptură sunt izolate complet și nu mai afectează calculul expansiunilor.
   - **Detecție și Export Nativ de Găuri (`CIRCLE`):** Detectează automat toate găurile circulare ale piesei (inclusiv găuri filetate sau standard) și le generează ca entități native `CIRCLE` pe layer-ul `0`, poziționate exact conform cotelor de execuție.
   - **Corecție Multi-Break pentru Piese Plate/Profiluri:** Calculează expansiunile corecte peste multiple stații de ruptură Tekla fără a depinde de prezența liniilor verticale intermediare, distribuind lungimile exact după cotele intermediare ale găurilor.

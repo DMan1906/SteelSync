@@ -418,10 +418,30 @@ class PdfToCadConverter:
                     gap = x2_min - x1_max
                     # Ruptura Tekla este strict de 7.0 - 10.5 pt (3.0 mm). Decupajele au gap >= 20 pt.
                     if 7.0 <= gap <= 10.5:
-                        # Verificăm să nu existe linii verticale de contur la capetele rupturii
-                        has_v1 = any(abs(vx - x1_max) < 1.0 for _, vy_min, vy_max, vx, _, _ in v_lines)
-                        has_v2 = any(abs(vx - x2_min) < 1.0 for _, vy_min, vy_max, vx, _, _ in v_lines)
-                        if not has_v1 and not has_v2:
+                        # Verificăm ca niciun capăt al rupturii să nu aibă alte linii sau curbe conectate.
+                        # Într-o ruptură Tekla reală, capetele de linie sunt libere în aer.
+                        # Dacă de la capăt pleacă o linie sau o curbă (ex. decupaj semicircular R35), este un contur real, NU o ruptură.
+                        p_left = fitz.Point(x1_max, y1)
+                        p_right = fitz.Point(x2_min, y2)
+                        has_conn = False
+                        for other_idx, it in enumerate(items):
+                            if other_idx in (idx1, idx2):
+                                continue
+                            if it[0] == "l":
+                                if math.hypot(it[1].x - p_left.x, it[1].y - p_left.y) < 0.5 or math.hypot(it[2].x - p_left.x, it[2].y - p_left.y) < 0.5:
+                                    has_conn = True
+                                    break
+                                if math.hypot(it[1].x - p_right.x, it[1].y - p_right.y) < 0.5 or math.hypot(it[2].x - p_right.x, it[2].y - p_right.y) < 0.5:
+                                    has_conn = True
+                                    break
+                            elif it[0] == "c":
+                                if math.hypot(it[1].x - p_left.x, it[1].y - p_left.y) < 0.5 or math.hypot(it[4].x - p_left.x, it[4].y - p_left.y) < 0.5:
+                                    has_conn = True
+                                    break
+                                if math.hypot(it[1].x - p_right.x, it[1].y - p_right.y) < 0.5 or math.hypot(it[4].x - p_right.x, it[4].y - p_right.y) < 0.5:
+                                    has_conn = True
+                                    break
+                        if not has_conn:
                             break_pairs.append((x1_max, x2_min, y1, idx1, idx2))
 
         if not break_pairs:
