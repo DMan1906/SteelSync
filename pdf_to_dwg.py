@@ -509,48 +509,64 @@ class PdfToCadConverter:
                 if val > 10 and (val < target_len - 10.0):
                     dim_words.append((w[0], w[2], (w[0] + w[2]) / 2.0, w[1], val))
 
+        # Găsim liniile verticale și găurile pentru delimitarea segmentelor fizice
+        feat_x = []
+        for it in items:
+            if it[0] == "l" and abs(it[1].x - it[2].x) < 0.25:
+                vx = round((it[1].x + it[2].x) / 2.0, 2)
+                if bbox["min_x"] + 1.0 < vx < bbox["max_x"] - 1.0:
+                    feat_x.append(vx)
+
+        if holes:
+            for h in holes:
+                hx = round(h["center"][0], 2)
+                if bbox["min_x"] + 1.0 < hx < bbox["max_x"] - 1.0:
+                    feat_x.append(hx)
+        feat_x = sorted(list(set(feat_x)))
+
+        # Stabilim granițele fizice [b_left, b_right] pentru fiecare stație de ruptură în parte.
+        # Decupajele sau caracteristicile dintre două stații nu aparțin niciunei stații și rămân nedistorsionate.
+        station_bounds = []
+        for i, s in enumerate(stations):
+            if i == 0:
+                left_feats = [fx for fx in feat_x if fx <= s["xl"]]
+                b_left = max(left_feats) if left_feats else bbox["min_x"]
+            else:
+                between_prev = [fx for fx in feat_x if stations[i - 1]["xr"] <= fx <= s["xl"]]
+                if between_prev:
+                    b_left = max(between_prev)
+                else:
+                    b_left = (stations[i - 1]["xr"] + s["xl"]) / 2.0
+
+            if i == len(stations) - 1:
+                right_feats = [fx for fx in feat_x if fx >= s["xr"]]
+                b_right = min(right_feats) if right_feats else bbox["max_x"]
+            else:
+                between_next = [fx for fx in feat_x if s["xr"] <= fx <= stations[i + 1]["xl"]]
+                if between_next:
+                    b_right = min(between_next)
+                else:
+                    b_right = (s["xr"] + stations[i + 1]["xl"]) / 2.0
+
+            station_bounds.append((b_left, b_right))
+
         matched_dims = []
-        for s in stations:
-            candidates = [dw for dw in dim_words if abs(dw[2] - s["center"]) < 6.0]
+        for i, s in enumerate(stations):
+            b_left, b_right = station_bounds[i]
+            candidates = [
+                dw for dw in dim_words
+                if (b_left - 5.0 <= dw[2] <= b_right + 5.0) or abs(dw[2] - s["center"]) < 15.0
+            ]
             if candidates:
                 best = min(candidates, key=lambda x: abs(x[2] - s["center"]))
                 matched_dims.append(best[4])
             else:
                 matched_dims.append(None)
 
-        # Găsim liniile verticale și găurile pentru delimitarea segmentelor fizice
-        v_coords = []
-        for it in items:
-            if it[0] == "l" and abs(it[1].x - it[2].x) < 0.25:
-                v_coords.append(round((it[1].x + it[2].x) / 2.0, 2))
-        v_coords = sorted(list(set(v_coords)))
-
-        feat_x = [vx for vx in v_coords if bbox["min_x"] + 1.0 < vx < bbox["max_x"] - 1.0]
-        if holes:
-            for h in holes:
-                hx = h["center"][0]
-                if bbox["min_x"] + 1.0 < hx < bbox["max_x"] - 1.0:
-                    feat_x.append(hx)
-        feat_x = sorted(list(set(feat_x)))
-
-        # Stabilim granițele dintre segmentele fiecărei stații
-        boundaries = [bbox["min_x"]]
-        for i in range(len(stations) - 1):
-            s1_r = stations[i]["xr"]
-            s2_l = stations[i + 1]["xl"]
-            between = [fx for fx in feat_x if s1_r <= fx <= s2_l]
-            if between:
-                b_x = sum(between) / len(between)
-            else:
-                b_x = (s1_r + s2_l) / 2.0
-            boundaries.append(b_x)
-        boundaries.append(bbox["max_x"])
-
         expansions = []
         if all(d is not None for d in matched_dims):
             for i in range(len(stations)):
-                b_left = boundaries[i]
-                b_right = boundaries[i + 1]
+                b_left, b_right = station_bounds[i]
                 gap = stations[i]["xr"] - stations[i]["xl"]
                 seg_drawn_mm = ((b_right - b_left) - gap) * base_scale
                 exp_i = max(0.0, matched_dims[i] - seg_drawn_mm)
