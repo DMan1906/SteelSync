@@ -1014,13 +1014,13 @@ class PdfToCadConverter:
                         xl, xr = min(p1.x, p2.x), max(p1.x, p2.x)
                         yl = (p1.y + p2.y) / 2.0
                         if bbox["min_x"] - 8.0 <= xl and xr <= bbox["max_x"] + 8.0:
-                            if yl < bbox["min_y"] - 2.0 or yl > bbox["max_y"] + 2.0:
+                            if bbox["min_y"] - 65.0 <= yl <= bbox["max_y"] + 65.0:
                                 h_lines.append((xl, xr, yl))
                     elif abs(p1.x - p2.x) < 0.25 and abs(p1.y - p2.y) > 2.0:
                         yt, yb = min(p1.y, p2.y), max(p1.y, p2.y)
                         xl = (p1.x + p2.x) / 2.0
                         if bbox["min_y"] - 8.0 <= yt and yb <= bbox["max_y"] + 8.0:
-                            if xl < bbox["min_x"] - 2.0 or xl > bbox["max_x"] + 2.0:
+                            if bbox["min_x"] - 65.0 <= xl <= bbox["max_x"] + 65.0:
                                 v_lines.append((yt, yb, xl))
 
         max_dim_y = (stykk_y - 5.0) if stykk_y else (page.rect.height * 0.70)
@@ -1057,6 +1057,62 @@ class PdfToCadConverter:
                     v_dims.append((yt, yb, xl, val))
 
         return h_dims, v_dims
+
+    @classmethod
+    def _extract_pdf_radius_constraints(cls, page, bbox, stykk_y):
+        """
+        Extrage cotele explicite de rază (R=15, R15, R 15, R=5 etc.) asociate
+        cu linii de indicație (leader lines) din jurul vederii Front.
+        Returnează [(tip_x, tip_y, r_val), ...] în coordonate PDF.
+        """
+        max_dim_y = (stykk_y - 5.0) if stykk_y else (page.rect.height * 0.70)
+        words = page.get_text("words")
+        r_boxes = []
+        for i, w in enumerate(words):
+            txt = w[4].strip()
+            if w[1] >= max_dim_y:
+                continue
+            if not (bbox["min_x"] - 65.0 <= w[0] <= bbox["max_x"] + 65.0 and
+                    bbox["min_y"] - 65.0 <= w[1] <= bbox["max_y"] + 65.0):
+                continue
+            m = re.match(r"^R\s*=?\s*(\d+(?:[.,]\d+)?)$", txt, re.IGNORECASE)
+            if m:
+                r_val = float(m.group(1).replace(",", "."))
+                if r_val > 0:
+                    r_boxes.append((w[0], w[1], w[2], w[3], r_val))
+            elif txt.upper() in ("R", "R=") and i + 1 < len(words):
+                w2 = words[i + 1]
+                t2 = w2[4].strip().replace(",", ".")
+                if t2.replace(".", "", 1).isdigit() and abs(w2[1] - w[1]) < 3.0 and 0.0 <= w2[0] - w[2] <= 10.0:
+                    r_val = float(t2)
+                    if r_val > 0:
+                        r_boxes.append((min(w[0], w2[0]), min(w[1], w2[1]), max(w[2], w2[2]), max(w[3], w2[3]), r_val))
+
+        if not r_boxes:
+            return []
+
+        thin_lines = []
+        for d in page.get_drawings():
+            w = d.get("width")
+            if not w or w > 0.52:
+                continue
+            for it in d["items"]:
+                if it[0] == "l":
+                    p1, p2 = it[1], it[2]
+                    if math.hypot(p1.x - p2.x, p1.y - p2.y) >= 1.5:
+                        thin_lines.append((p1, p2))
+
+        r_dims = []
+        for x0, y0, x1, y1, r_val in r_boxes:
+            for p1, p2 in thin_lines:
+                p1_near = (x0 - 5.0 <= p1.x <= x1 + 5.0 and y0 - 2.0 <= p1.y <= y1 + 4.0)
+                p2_near = (x0 - 5.0 <= p2.x <= x1 + 5.0 and y0 - 2.0 <= p2.y <= y1 + 4.0)
+                if p1_near and not p2_near:
+                    r_dims.append((p2.x, p2.y, r_val))
+                elif p2_near and not p1_near:
+                    r_dims.append((p1.x, p1.y, r_val))
+
+        return r_dims
 
     @classmethod
     def _calculate_break_expansions(cls, stations, items, bbox, target_len, base_scale, page, stykk_y, holes=None, h_dims=None):
@@ -1898,6 +1954,7 @@ class PdfToCadConverter:
         snap_tol=0.5,
         arc_snap_tol=1.5,
         disable_fillet_arcs=False,
+        r_dims=None,
     ):
         """
         Construiește geometria conturului CAD (bucle închise LWPOLYLINE, linii și arce)
@@ -1949,10 +2006,30 @@ class PdfToCadConverter:
         merged_lines = self._merge_collinear_lines(raw_cad_lines)
         final_lines = self.snap_points_grid(merged_lines, tol=snap_tol)
 
+        arc_target_r = {}
+        if fillet_arcs and r_dims:
+            for tx, ty, r_val in r_dims:
+                best_idx = None
+                best_d = 999.0
+                for a_idx, (cx_pdf, cy_pdf, r_pdf, sp, mp, ep) in enumerate(fillet_arcs):
+                    d_c = math.hypot(tx - cx_pdf, ty - cy_pdf)
+                    d_min = min(
+                        d_c,
+                        abs(d_c - r_pdf),
+                        math.hypot(tx - mp.x, ty - mp.y),
+                        math.hypot(tx - sp.x, ty - sp.y),
+                        math.hypot(tx - ep.x, ty - ep.y),
+                    )
+                    if d_min < best_d:
+                        best_d = d_min
+                        best_idx = a_idx
+                if best_idx is not None and best_d <= 3.5:
+                    arc_target_r[best_idx] = r_val
+
         snapped_arcs_data = []
         if fillet_arcs:
             pts_contour = [p for l in final_lines for p in l]
-            for cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt in fillet_arcs:
+            for a_idx, (cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt) in enumerate(fillet_arcs):
                 c_cad = pt_to_cad(fitz.Point(cx_pdf, cy_pdf))
                 start_cad = pt_to_cad(start_pt)
                 end_cad = pt_to_cad(end_pt)
@@ -1964,13 +2041,96 @@ class PdfToCadConverter:
                         start_cad = s_snap
                     if math.hypot(e_snap[0] - end_cad[0], e_snap[1] - end_cad[1]) <= arc_snap_tol:
                         end_cad = e_snap
+
+                # Recalibrare geometrică exactă a razei dacă există o cotă explicită R=... (ex. R=15 desenat simbolic R10 în Tekla)
+                r_target = arc_target_r.get(a_idx)
+                if r_target and r_target > 0:
+                    r_curr = math.hypot(start_cad[0] - c_cad[0], start_cad[1] - c_cad[1])
+                    if abs(r_curr - r_target) > 0.05 and final_lines:
+                        l1_match = None
+                        l2_match = None
+                        best_d1 = 0.25
+                        best_d2 = 0.25
+                        for li, (lp0, lp1) in enumerate(final_lines):
+                            if math.hypot(lp1[0] - lp0[0], lp1[1] - lp0[1]) < 0.2:
+                                continue
+                            d0_s = math.hypot(lp0[0] - start_cad[0], lp0[1] - start_cad[1])
+                            d1_s = math.hypot(lp1[0] - start_cad[0], lp1[1] - start_cad[1])
+                            if min(d0_s, d1_s) < best_d1:
+                                best_d1 = min(d0_s, d1_s)
+                                l1_match = (li, 0 if d0_s <= d1_s else 1)
+                            d0_e = math.hypot(lp0[0] - end_cad[0], lp0[1] - end_cad[1])
+                            d1_e = math.hypot(lp1[0] - end_cad[0], lp1[1] - end_cad[1])
+                            if min(d0_e, d1_e) < best_d2:
+                                best_d2 = min(d0_e, d1_e)
+                                l2_match = (li, 0 if d0_e <= d1_e else 1)
+
+                        if l1_match and l2_match and l1_match[0] != l2_match[0]:
+                            li1, le1 = l1_match
+                            li2, le2 = l2_match
+                            s_pt = final_lines[li1][le1]
+                            far1 = final_lines[li1][1 - le1]
+                            e_pt = final_lines[li2][le2]
+                            far2 = final_lines[li2][1 - le2]
+
+                            d1x, d1y = s_pt[0] - far1[0], s_pt[1] - far1[1]
+                            d2x, d2y = e_pt[0] - far2[0], e_pt[1] - far2[1]
+                            dl1 = math.hypot(d1x, d1y)
+                            dl2 = math.hypot(d2x, d2y)
+                            if dl1 > 0.2 and dl2 > 0.2:
+                                w1x, w1y = d1x / dl1, d1y / dl1
+                                w2x, w2y = d2x / dl2, d2y / dl2
+                                cross = w1x * w2y - w1y * w2x
+                                if abs(cross) > 0.25:
+                                    # Intersecția V a celor două muchii ale colțului
+                                    det = w1y * w2x - w1x * w2y
+                                    dx_se = e_pt[0] - s_pt[0]
+                                    dy_se = e_pt[1] - s_pt[1]
+                                    t1_hit = (w2x * dy_se - w2y * dx_se) / det
+                                    vx = s_pt[0] + t1_hit * w1x
+                                    vy = s_pt[1] + t1_hit * w1y
+
+                                    v1x, v1y = far1[0] - vx, far1[1] - vy
+                                    v2x, v2y = far2[0] - vx, far2[1] - vy
+                                    len1 = math.hypot(v1x, v1y)
+                                    len2 = math.hypot(v2x, v2y)
+                                    if len1 > 0.5 and len2 > 0.5:
+                                        u1x, u1y = v1x / len1, v1y / len1
+                                        u2x, u2y = v2x / len2, v2y / len2
+                                        dot = max(-1.0, min(1.0, u1x * u2x + u1y * u2y))
+                                        alpha = math.acos(dot)
+                                        tan_half = math.tan(alpha / 2.0)
+                                        sin_half = math.sin(alpha / 2.0)
+                                        if tan_half > 1e-4 and sin_half > 1e-4:
+                                            t_old_exp = r_curr / tan_half
+                                            t1_act = (s_pt[0] - vx) * u1x + (s_pt[1] - vy) * u1y
+                                            t2_act = (e_pt[0] - vx) * u2x + (e_pt[1] - vy) * u2y
+                                            t_new = r_target / tan_half
+                                            if (t1_act > 0 and t2_act > 0 and
+                                                    abs(t1_act - t_old_exp) <= max(2.0, 0.25 * t_old_exp) and
+                                                    abs(t2_act - t_old_exp) <= max(2.0, 0.25 * t_old_exp) and
+                                                    len1 > t_new + 0.5 and len2 > t_new + 0.5):
+                                                new_start = (round(vx + t_new * u1x, 4), round(vy + t_new * u1y, 4))
+                                                new_end = (round(vx + t_new * u2x, 4), round(vy + t_new * u2y, 4))
+                                                bx, by = u1x + u2x, u1y + u2y
+                                                blen = math.hypot(bx, by)
+                                                if blen > 1e-4:
+                                                    bx, by = bx / blen, by / blen
+                                                    dist_c = r_target / sin_half
+                                                    new_c = (vx + dist_c * bx, vy + dist_c * by)
+                                                    new_mid = (new_c[0] - r_target * bx, new_c[1] - r_target * by)
+
+                                                    final_lines[li1] = (new_start, far1) if le1 == 0 else (far1, new_start)
+                                                    final_lines[li2] = (new_end, far2) if le2 == 0 else (far2, new_end)
+                                                    start_cad, end_cad, c_cad, mid_cad = new_start, new_end, new_c, new_mid
+
                 snapped_arcs_data.append((start_cad, end_cad, c_cad, mid_cad))
 
         closed_loops = self.extract_all_closed_loops(final_lines, snapped_arcs_data)
         return closed_loops, final_lines, snapped_arcs_data
 
     @staticmethod
-    def _audit_generated_cad(closed_loops, cad_holes, bbox, meta, h_dims, v_dims, pt_to_cad, tol_mm=0.20):
+    def _audit_generated_cad(closed_loops, cad_holes, bbox, meta, h_dims, v_dims, pt_to_cad, tol_mm=0.20, r_dims=None):
         """
         Verifică automat calitatea topologică și precizia dimensională (±0.2 mm) a geometriei CAD.
         """
@@ -2039,6 +2199,46 @@ class PdfToCadConverter:
                     if abs((y2 - y1) - (oy2 - oy1)) > tol_mm:
                         max_err = max(max_err, err_val)
                         issues.append(f"v_dim_{val}_vs_{y2 - y1:.2f}")
+
+        if r_dims:
+            bulge_arcs = []
+            for lp in closed_loops:
+                n_pts = len(lp)
+                for idx_pt, pt in enumerate(lp):
+                    bulge = pt[4]
+                    if abs(bulge) <= 1e-4:
+                        continue
+                    nxt = lp[(idx_pt + 1) % n_pts]
+                    chord = math.hypot(nxt[0] - pt[0], nxt[1] - pt[1])
+                    theta = 4.0 * math.atan(abs(bulge))
+                    if theta < math.radians(20.0) or chord < 1e-4:
+                        continue
+                    r_arc = chord / (2.0 * math.sin(theta / 2.0))
+                    mx = (pt[0] + nxt[0]) * 0.5 + bulge * (nxt[1] - pt[1]) * 0.5
+                    my = (pt[1] + nxt[1]) * 0.5 - bulge * (nxt[0] - pt[0]) * 0.5
+                    bulge_arcs.append((pt[:2], nxt[:2], (mx, my), r_arc))
+
+            if bulge_arcs:
+                for tx, ty, r_val in r_dims:
+                    tip_cad = pt_to_cad(fitz.Point(tx, ty))
+                    closest = min(
+                        bulge_arcs,
+                        key=lambda a: min(
+                            math.hypot(tip_cad[0] - a[0][0], tip_cad[1] - a[0][1]),
+                            math.hypot(tip_cad[0] - a[1][0], tip_cad[1] - a[1][1]),
+                            math.hypot(tip_cad[0] - a[2][0], tip_cad[1] - a[2][1]),
+                        ),
+                    )
+                    d_arc = min(
+                        math.hypot(tip_cad[0] - closest[0][0], tip_cad[1] - closest[0][1]),
+                        math.hypot(tip_cad[0] - closest[1][0], tip_cad[1] - closest[1][1]),
+                        math.hypot(tip_cad[0] - closest[2][0], tip_cad[1] - closest[2][1]),
+                    )
+                    if d_arc <= max(12.0, r_val * 0.8):
+                        err_r = abs(closest[3] - r_val)
+                        if err_r > tol_mm:
+                            max_err = max(max_err, err_r)
+                            issues.append(f"r_dim_{r_val}_vs_{closest[3]:.2f}")
 
         return {
             "passed": (len(issues) == 0),
@@ -2136,6 +2336,7 @@ class PdfToCadConverter:
 
             # Extragere constrângeri de cotare și găuri circulare din vederea Front
             h_dims, v_dims = self._extract_pdf_dimension_constraints(page, bbox, meta["stykk_y"])
+            r_dims = self._extract_pdf_radius_constraints(page, bbox, meta["stykk_y"])
             holes = self.detect_holes_in_bbox(page, bbox)
 
             if calibrate_1to1 and target_len and raw_stations and (target_len > drawn_metal_mm + 1.0):
@@ -2209,18 +2410,28 @@ class PdfToCadConverter:
             ]
 
             best_result = None
-            audit_report = None
+            best_rank = None
             for profile in retry_profiles:
                 closed_loops, final_lines, snapped_arcs_data = self._build_contour_geometry(
                     items, pt_to_cad, stations if is_shortened else raw_stations,
                     snap_tol=profile["snap_tol"],
                     arc_snap_tol=profile["arc_snap_tol"],
                     disable_fillet_arcs=profile["disable_fillet_arcs"],
+                    r_dims=r_dims if calibrate_1to1 else None,
                 )
                 audit_report = self._audit_generated_cad(
-                    closed_loops, cad_holes, bbox, meta, h_dims, v_dims, pt_to_cad, tol_mm=0.20
+                    closed_loops, cad_holes, bbox, meta, h_dims, v_dims, pt_to_cad, tol_mm=0.20,
+                    r_dims=r_dims if calibrate_1to1 else None,
                 )
-                best_result = (closed_loops, final_lines, snapped_arcs_data)
+                rank = (
+                    0 if audit_report["contour_closed"] else 1,
+                    0 if audit_report["passed"] else 1,
+                    audit_report["max_err"],
+                    len(audit_report["issues"]),
+                )
+                if best_rank is None or rank < best_rank:
+                    best_rank = rank
+                    best_result = (closed_loops, final_lines, snapped_arcs_data)
                 if audit_report["contour_closed"] and audit_report["passed"]:
                     break
 

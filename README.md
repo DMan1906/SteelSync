@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.8.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.8.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.8.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.1/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.8.1)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.8.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.8.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.1/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,8 +16,9 @@
 
 ## 🚀 Funcționalități
 
-- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (NOU în v1.8.0 — Auto-Audit `±0.2 mm` / Ideal `0.00 mm` & Re-generare Adaptivă)**:
-  - **Sistem Automat de Auto-Audit & Re-generare Adaptivă (Closed-Loop Verification):** Fiecare fișier CAD generat este auditat matematic automat în memorie față de cotele orizontale (`h_dims`) și verticale (`v_dims`) extrase direct din PDF. Dacă este detectată orice abatere peste `±0.2 mm`, un contur deschis sau o eroare topologică, algoritmul re-calculează stațiile de ruptură, aliniază centrele găurilor cu precizie de până la `0.00 mm` și re-generează automat conturul cu profiluri progresive de snapping și racordare (`retry_profiles`).
+- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (NOU în v1.8.1 — Impunere & Audit Automat Cote de Rază `R=...` ±0.2 mm + Re-generare Adaptivă)**:
+  - **Extragere, Impunere Geometrică & Auditare Cote de Rază (`R=15`, `R=5`, `R10` etc.):** Algoritmul citește automat etichetele de rază cu linie de indicație (leader line + săgeată) din desenul PDF și recalibrează matematic arcul de racordare și capetele tangente ale muchiilor la raza reală cotată (`±0.00 mm`), corectând automat cazurile în care Tekla randează grafic un colț la o rază simbolică diferită (ex. desenat `R10` în PDF dar cotat `R=15` sau `R=5`).
+  - **Sistem Automat de Auto-Audit & Re-generare Adaptivă (Closed-Loop Verification ±0.2 mm):** Fiecare fișier CAD generat este auditat matematic automat în memorie față de cotele orizontale (`h_dims`), cotele verticale (`v_dims`) — inclusiv cotele interioare de decupaje — și cotele de rază (`r_dims`) extrase direct din PDF. Dacă este detectată orice abatere peste `±0.2 mm`, un contur deschis sau o eroare topologică, algoritmul re-calculează stațiile de ruptură, aliniază centrele găurilor cu precizie de până la `0.00 mm` și re-generează automat conturul cu profiluri progresive de snapping și racordare (`retry_profiles`).
   - **Calibrare de Precizie pentru Găuri pe Ambele Axe (X și Y):** Elimină erorile de cuantizare vectorială și rotunjirile din tabelele BOM Tekla (`Längd`), păstrând totodată intacte grupurile de găuri rotite / înclinate (protecție automată a pitch-ului diagonal).
   - **Prioritizare Inteligentă a Vederii Principale (Front View) față de Cantul Piesei:** La desenele Tekla cu vederi multiple orizontale (fața piesei și vederea îngustă de grosime/cant pentru bizotare/sudură), algoritmul identifică cu precizie absolută fața piesei corelată cu lățimea profilului (`profil_width`), eticheta text `Front` și aria geometrică, prevenind exportarea cantului subțire de grosime (ex. 12 mm în loc de 920 mm).
   - **Diferențiere Topologică Robustă între Decupaje/Notches și Rupturi Grafice:** Previne ștergerea sau unirea eronată a decupajelor semicirculare sau curbe (ex. `R35`), verificând continuitatea topologică a nodurilor și conservând toate detaliile geometrice ale conturului.
