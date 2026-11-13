@@ -999,8 +999,8 @@ class PdfToCadConverter:
         """
         Calculează expansiunea exactă în milimetri pentru fiecare stație de ruptură (break station).
         Pentru 1 ruptură: exp = target_len - total_drawn_solid_mm.
-        Pentru multi-break (N rupturi): identifică cotele din lanțul de cotare asociate fiecărei stații
-        și calculează expansiunea fără a distorsiona decupajele sau găurile dintre rupturi.
+        Pentru multi-break (N rupturi): asociază direct liniile orizontale de cotă din PDF cu
+        stațiile de ruptură pe care le acoperă și rezolvă sistemul exact fără a distorsiona cotele găurilor.
         """
         total_gaps_pt = sum(s["xr"] - s["xl"] for s in stations)
         total_drawn_solid_mm = (bbox["width"] - total_gaps_pt) * base_scale
@@ -1010,25 +1010,90 @@ class PdfToCadConverter:
             stations[0]["exp"] = max(0.0, total_missing_mm)
             return stations
 
-        # Multi-break: extragere numere de cote din textul paginii din jurul vederii
         words = page.get_text("words")
         max_dim_y = (stykk_y - 5.0) if stykk_y else (page.rect.height * 0.70)
+
+        # 1. Metoda exactă: extragere linii orizontale de cotă [xl, xr] și rezolvare sistem pe stații
+        h_dim_lines = []
+        for d in page.get_drawings():
+            w = d.get("width")
+            if not w or w > 0.52:
+                continue
+            for it in d["items"]:
+                if it[0] == "l":
+                    p1, p2 = it[1], it[2]
+                    if abs(p1.y - p2.y) < 0.25 and abs(p1.x - p2.x) > 2.0:
+                        xl, xr = min(p1.x, p2.x), max(p1.x, p2.x)
+                        yl = (p1.y + p2.y) / 2.0
+                        if bbox["min_x"] - 8.0 <= xl and xr <= bbox["max_x"] + 8.0:
+                            if yl < bbox["min_y"] - 2.0 or yl > bbox["max_y"] + 2.0:
+                                h_dim_lines.append((xl, xr, yl))
+
+        equations = []
         dim_words = []
         for w in words:
-            txt = w[4].strip()
-            if txt.replace('.', '', 1).isdigit() and w[1] < max_dim_y:
+            txt = w[4].strip().replace(",", ".")
+            if txt.replace(".", "", 1).isdigit() and w[1] < max_dim_y:
                 val = float(txt)
-                # Excludem cota generală target_len pentru a nu o confunda cu un segment intermediar
-                if val > 10 and (val < target_len - 10.0):
-                    dim_words.append((w[0], w[2], (w[0] + w[2]) / 2.0, w[1], val))
+                if val <= 10:
+                    continue
+                xm = (w[0] + w[2]) / 2.0
+                y1 = w[3]
+                if val < target_len - 10.0:
+                    dim_words.append((w[0], w[2], xm, w[1], val))
+                cands = [
+                    (xl, xr, yl) for (xl, xr, yl) in h_dim_lines
+                    if (y1 - 1.5 <= yl <= y1 + 2.5) and (xl - 5.0 <= xm <= xr + 5.0)
+                ]
+                if cands:
+                    xl, xr, yl = min(cands, key=lambda c: abs(c[2] - y1) + abs((c[0] + c[1]) / 2.0 - xm) * 0.1)
+                    covered = tuple(
+                        j for j, st in enumerate(stations)
+                        if xl - 0.8 <= st["xl"] and st["xr"] <= xr + 0.8
+                    )
+                    if covered:
+                        gaps_s = sum(stations[j]["xr"] - stations[j]["xl"] for j in covered)
+                        seg_solid_mm = ((xr - xl) - gaps_s) * base_scale
+                        rhs = max(0.0, val - seg_solid_mm)
+                        equations.append((len(covered), abs((xl + xr) / 2.0 - xm), covered, rhs))
 
-        # Găsim liniile verticale și găurile pentru delimitarea segmentelor fizice
+        if equations:
+            equations.append((len(stations), 9999.0, tuple(range(len(stations))), max(0.0, total_missing_mm)))
+            equations.sort(key=lambda e: (e[0], e[1]))
+            exps = [None] * len(stations)
+            changed = True
+            while changed:
+                changed = False
+                for _, _, covered, rhs in equations:
+                    unknowns = [j for j in covered if exps[j] is None]
+                    if len(unknowns) == 1:
+                        u = unknowns[0]
+                        known_sum = sum(exps[j] for j in covered if j != u)
+                        if rhs >= known_sum - 1.0:
+                            exps[u] = max(0.0, rhs - known_sum)
+                            changed = True
+                            break
+
+            if all(e is not None for e in exps) and abs(total_missing_mm - sum(exps)) <= max(10.0, 2.0 * len(stations)):
+                for i, s in enumerate(stations):
+                    s["exp"] = exps[i]
+                return stations
+
+        # 2. Fallback: linii verticale, capete de decupaje pe margini și găuri pentru delimitarea segmentelor
         feat_x = []
         for it in items:
             if it[0] == "l" and abs(it[1].x - it[2].x) < 0.25:
                 vx = round((it[1].x + it[2].x) / 2.0, 2)
                 if bbox["min_x"] + 1.0 < vx < bbox["max_x"] - 1.0:
                     feat_x.append(vx)
+            elif it[0] == "l" and abs(it[1].y - it[2].y) < 0.25:
+                ym = (it[1].y + it[2].y) / 2.0
+                if abs(ym - bbox["min_y"]) < 0.6 or abs(ym - bbox["max_y"]) < 0.6:
+                    for x_end in (it[1].x, it[2].x):
+                        vx = round(x_end, 2)
+                        if bbox["min_x"] + 1.0 < vx < bbox["max_x"] - 1.0:
+                            if not any(abs(vx - st["xl"]) < 1.0 or abs(vx - st["xr"]) < 1.0 for st in stations):
+                                feat_x.append(vx)
 
         if holes:
             for h in holes:
