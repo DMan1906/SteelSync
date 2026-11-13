@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.8)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.8/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.8)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.7.9)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.9/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.7.9)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.8)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.8/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.7.9)](https://github.com/DMan1906/SteelSync/releases/download/v1.7.9/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,7 @@
 
 ## 🚀 Funcționalități
 
-- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.8)**:
+- **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (PERFECȚIONAT în v1.7.9)**:
   - **Prioritizare Inteligentă a Vederii Principale (Front View) față de Cantul Piesei:** La desenele Tekla cu vederi multiple orizontale (fața piesei și vederea îngustă de grosime/cant pentru bizotare/sudură), algoritmul identifică cu precizie absolută fața piesei corelată cu lățimea profilului (`profil_width`), eticheta text `Front` și aria geometrică, prevenind exportarea cantului subțire de grosime (ex. 12 mm în loc de 920 mm).
   - **Diferențiere Topologică Robustă între Decupaje/Notches și Rupturi Grafice:** Previne ștergerea sau unirea eronată a decupajelor semicirculare sau curbe (ex. `R35`), verificând continuitatea topologică a nodurilor și conservând toate detaliile geometrice ale conturului.
   - **Calibrare Matematică Exactă a Pauzelor Multi-Break cu Decupaje:** Garantează cote 100% exacte la fiecare segment al piesei (ex. 2353, 100, 1100, 100, 1100, 100, 1200, 100, 612 mm). Decupajele dintre stațiile de ruptură sunt izolate complet și nu mai afectează calculul expansiunilor.

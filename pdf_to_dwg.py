@@ -35,11 +35,16 @@ class PdfToCadConverter:
 
     # Cuvinte cheie / denumiri excluse categoric din a fi considerate coduri de reper
     BLACKLIST_NAMES = {
-        "POS", "NO", "ANTALL", "PROFIL", "MATERIAL", "LENGDE", "VEKT", "LITTRA",
+        "POS", "NO", "ANTALL", "PROFIL", "PROFILE", "MATERIAL", "LENGDE", "LENGTH",
+        "LANGD", "LÄNGD", "VEKT", "WEIGHT", "VIKT", "TOTALVIKT", "AREA", "LIT", "LITTRA",
+        "DEL", "STORLEK", "TOTALANTAL", "NUMBER", "ASSEMBLY", "TOASSEMBLY",
         "NORSKE", "BARESYSTEMER", "BÆRESYSTEMER", "SWECO", "FISKEBRYGGA", "STALPLATE",
-        "STÅLPLATE", "RIB", "A4", "A3", "A2", "A1", "A0", "FORMAT", "DATO", "REV",
-        "ENDRING", "UTF", "KONTR", "STATUS", "ANSVARLIG", "TITTEL", "OPPDRAGSGIVER",
-        "OPPDRAGSNR", "TEGNINGSNUMMER", "TEGNINGSSTATUS", "ORIGINALFORMAT", "ARBEIDSTEGNING"
+        "STÅLPLATE", "RIB", "A4", "A3", "A2", "A1", "A0", "FORMAT", "DATO", "DATUM",
+        "REV", "ENDRING", "UTF", "KONTR", "STATUS", "ANSVARLIG", "TITTEL", "OPPDRAGSGIVER",
+        "OPPDRAGSNR", "UPPDRAG", "UPPDRAGSNR", "UPPDRAGSNUMMER", "TEGNINGSNUMMER",
+        "TEGNINGSSTATUS", "ORIGINALFORMAT", "ORGINALFORMAT", "ARBEIDSTEGNING",
+        "SKALA", "HANDLÄGGARE", "HANDLAGGARE", "LITTERA", "BYGGHANDLING", "BET", "SIGN",
+        "RITAD", "NUMMER", "SPEC", "REVISION", "DRAWINGNUMBER", "PROJECTNUMBER"
     }
 
     def __init__(self, oda_path=None):
@@ -138,18 +143,25 @@ class PdfToCadConverter:
         # 1. Determinare Y pentru STYKKLISTE / Cartuș (diferențiere sus vs jos)
         for b in blocks:
             txt = b[4].lower()
-            if "stykkliste" in txt and b[1] < page.rect.height * 0.35:
+            if b[1] < page.rect.height * 0.35 and any(
+                k in txt for k in ["stykkliste", "storlek", "totalantal", "total vikt", "längd (mm)", "langd (mm)"]
+            ):
                 meta["top_margin_y"] = max(meta["top_margin_y"], b[3] + 8.0)
-            elif any(k in txt for k in ["stykkliste", "arbeidstegning", "pos.nummer", "originalformat"]):
-                if b[1] >= page.rect.height * 0.40:
-                    if meta["stykk_y"] is None or b[1] < meta["stykk_y"]:
-                        meta["stykk_y"] = b[1]
+            elif b[1] >= page.rect.height * 0.40 and any(
+                k in txt for k in [
+                    "stykkliste", "arbeidstegning", "pos.nummer", "originalformat", "orginalformat",
+                    "ändringen avser", "bygghandling", "handläggare", "ritad av", "uppdrag nr",
+                    "uppdragsnummer", "revisjon", "norconsult", "no/ pcs"
+                ]
+            ):
+                if meta["stykk_y"] is None or b[1] < meta["stykk_y"]:
+                    meta["stykk_y"] = b[1]
 
-        # 1.5 Aliniere spațială exactă pe coloana LENGDE / LENGTH din tabelul STYKKLISTE
+        # 1.5 Aliniere spațială exactă pe coloana LENGDE / LÄNGD / LENGTH din tabelul BOM
         words = page.get_text("words")
-        lengde_headers = [w for w in words if re.match(r'^LENGDE$|^LENGTH$', w[4], re.IGNORECASE)]
+        lengde_headers = [w for w in words if re.match(r'^(?:LENGDE|LÄNGD|LANGD|LENGTH)$', w[4], re.IGNORECASE)]
         if not lengde_headers:
-            lengde_headers = [w for w in words if 'LENGDE' in w[4].upper()]
+            lengde_headers = [w for w in words if any(k in w[4].upper() for k in ("LENGDE", "LÄNGD", "LANGD"))]
 
         spatial_candidates = []
         for hw in lengde_headers:
@@ -236,16 +248,54 @@ class PdfToCadConverter:
 
         meta["clean_name"] = self.clean_part_name(meta["pos_no"])
 
-        # 6. Identificare Scară (Målestokk 1:X sau Front 1:X)
-        m_scale = re.search(r'(?:M.*?lestokk|Scale|Front|Top|View)\s*[:\s]?\s*1\s*:\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
-        if m_scale:
-            try:
-                meta["scale"] = float(m_scale.group(1))
-            except ValueError:
-                meta["scale"] = 10.0
+        # 6. Identificare Scară (căutare spațială sub SKALA / SCALE / MÅLESTOKK + regex text)
+        found_scale = None
+        scale_headers = [w for w in words if re.match(r'^(?:SKALA|SCALE|MÅLESTOKK|MALESTOKK):?$', w[4], re.IGNORECASE)]
+        scale_candidates = []
+        for hw in scale_headers:
+            hx0, hy0, hx1, hy1, _ = hw[:5]
+            for w in words:
+                wx0, wy0, wx1, wy1, wtxt = w[:5]
+                m_w = re.match(r'^1\s*:\s*(\d+(?:\.\d+)?)$', wtxt.strip())
+                if m_w and (hy0 - 5.0 <= wy0 <= hy1 + 35.0) and abs(wx0 - hx0) <= 105.0:
+                    try:
+                        val = float(m_w.group(1))
+                        if 0.1 <= val <= 100.0:
+                            dist = abs(wx0 - hx0) + abs(wy0 - hy0)
+                            scale_candidates.append((dist, val))
+                    except ValueError:
+                        pass
+        if scale_candidates:
+            scale_candidates.sort(key=lambda c: c[0])
+            found_scale = scale_candidates[0][1]
+
+        if found_scale is None:
+            m_scale = re.search(r'(?:M.*?lestokk|Skala|Scale|Front|Top|View)\s*[:\s]?\s*1\s*:\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+            if m_scale:
+                try:
+                    found_scale = float(m_scale.group(1))
+                except ValueError:
+                    found_scale = None
+
+        # Fallback: etichetă de scară solitară 1:X în zona de desen (deasupra cartușului)
+        if found_scale is None:
+            limit_y = meta["stykk_y"] if meta["stykk_y"] else page.rect.height * 0.75
+            for w in words:
+                if w[1] < limit_y:
+                    m_w = re.match(r'^1:(\d+(?:\.\d+)?)$', w[4].strip())
+                    if m_w:
+                        try:
+                            val = float(m_w.group(1))
+                            if 1.0 <= val <= 50.0:
+                                found_scale = val
+                                break
+                        except ValueError:
+                            pass
+
+        meta["scale"] = found_scale if found_scale is not None else 10.0
 
         if not meta["lengde"]:
-            m_len = re.search(r'LENGDE\s*[\r\n]+\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+            m_len = re.search(r'(?:LENGDE|LÄNGD|LANGD|LENGTH)\s*[\r\n]+\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
             if m_len:
                 try:
                     meta["lengde"] = float(m_len.group(1))
@@ -267,54 +317,366 @@ class PdfToCadConverter:
 
         return meta
 
+    @staticmethod
+    def _is_hole_circle_drawing(d):
+        """Returnează (cx, cy, radius) dacă desenul reprezintă o gaură circulară (4 sau 6 curbe Bezier), altfel None."""
+        items = d.get("items", [])
+        n_curves = sum(1 for it in items if it[0] == "c")
+        if (len(items) == 4 and n_curves == 4) or (n_curves == 4 and len(items) <= 6) or (len(items) == 6 and n_curves == 6):
+            r = d["rect"]
+            rx = (r.x1 - r.x0) / 2.0
+            ry = (r.y1 - r.y0) / 2.0
+            min_r = 0.8 if len(items) > 4 else 0.4
+            if rx > 0 and ry > 0 and abs(rx - ry) < 0.35 * max(rx, ry) and min_r <= rx <= 45.0:
+                rad = min(rx, ry) if n_curves == 6 else (rx + ry) / 2.0
+                return ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0, rad)
+        return None
+
+    @staticmethod
+    def _is_crosshair_line(d, holes_list):
+        """Detectează liniile de axă / centrare (+) care trec prin centrul unei găuri sau coboară la cotă."""
+        items = d.get("items", [])
+        if len(items) != 1 or items[0][0] != "l" or not holes_list:
+            return False
+        p1, p2 = items[0][1], items[0][2]
+        vx, vy = p2.x - p1.x, p2.y - p1.y
+        seg_len = math.hypot(vx, vy)
+        if seg_len < 1.0:
+            return False
+        ux, uy = vx / seg_len, vy / seg_len
+        for cx, cy, rad in holes_list:
+            if seg_len <= max(240.0, 6.0 * rad):
+                dx, dy = cx - p1.x, cy - p1.y
+                proj = dx * ux + dy * uy
+                if 0.25 * rad <= proj <= seg_len - 0.25 * rad:
+                    perp = abs(dx * uy - dy * ux)
+                    if perp <= 1.2:
+                        return True
+            if abs(vx) < 0.5 and abs(p1.x - cx) <= 0.8 and seg_len <= 240.0:
+                y_top = min(p1.y, p2.y)
+                y_bot = max(p1.y, p2.y)
+                if y_top <= cy + 2.0 * rad and y_top >= cy - 2.5 * rad and y_bot > cy + rad:
+                    return True
+        return False
+
+    @classmethod
+    def _detect_frame_and_table_exclusions(cls, page, drawings):
+        """
+        Detectează chenarul interior al foii și dreptunghiurile tabelelor/cartușelor (suedeză/norvegiană/engleză)
+        pentru a elimina liniuțele de centrare exterioare și liniile de tabel (ex. TO ASSEMBLY, ÄNDRINGEN AVSER).
+        """
+        pw, ph = page.rect.width, page.rect.height
+        left_x, right_x, top_y, bot_y = [], [], [], []
+        hv_lines = []
+        frame_border_indices = set()
+
+        for idx, d in enumerate(drawings):
+            items = d.get("items", [])
+            if len(items) == 1 and items[0][0] == "l":
+                p1, p2 = items[0][1], items[0][2]
+                length = math.hypot(p2.x - p1.x, p2.y - p1.y)
+                is_h = abs(p1.y - p2.y) < 0.5
+                is_v = abs(p1.x - p2.x) < 0.5
+                ym = (p1.y + p2.y) / 2.0
+                xm = (p1.x + p2.x) / 2.0
+                is_frame_line = (
+                    (is_h and length > 0.80 * pw and (ym < ph * 0.14 or ym > ph * 0.84)) or
+                    (is_v and length > 0.80 * ph and (xm < pw * 0.14 or xm > pw * 0.84))
+                )
+                if is_frame_line:
+                    frame_border_indices.add(idx)
+                    if is_h:
+                        if 2.0 < ym < ph * 0.14:
+                            top_y.append(ym)
+                        elif ph * 0.84 < ym < ph - 2.0:
+                            bot_y.append(ym)
+                    else:
+                        if 2.0 < xm < pw * 0.14:
+                            left_x.append(xm)
+                        elif pw * 0.84 < xm < pw - 2.0:
+                            right_x.append(xm)
+                elif is_h or is_v:
+                    hv_lines.append((idx, p1, p2, is_h, is_v, length))
+
+        frame = (
+            max(left_x) if left_x else None,
+            max(top_y) if top_y else None,
+            min(right_x) if right_x else None,
+            min(bot_y) if bot_y else None,
+        )
+
+        # Identificare blocuri de text ce aparțin tabelelor / cartușelor
+        table_kw = [
+            "to assembly", "number\nto assembly", "ändringen avser", "bygghandling",
+            "handläggare", "ritad av", "uppdrag nr", "uppdragsnummer", "total vikt",
+            "storlek", "totalantal", "stykkliste", "arbeidstegning", "pos.nummer",
+            "pos. nr", "originalformat", "orginalformat", "norconsult", "revisjon",
+            "drawingnumber", "projectnumber", "längd (mm)", "langd (mm)"
+        ]
+        table_blocks = []
+        to_asm_blocks = []
+        try:
+            for b in page.get_text("blocks"):
+                bt = b[4].lower()
+                if any(k in bt for k in table_kw):
+                    table_blocks.append((b[0], b[1], b[2], b[3]))
+                    if "to assembly" in bt:
+                        to_asm_blocks.append((b[0], b[1], b[2], b[3]))
+        except Exception:
+            pass
+
+        # Grupare linii H/V (fără liniile lungi de chenar) după conexiuni de capăt
+        n_hv = len(hv_lines)
+        parent = list(range(n_hv))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i, j):
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[rj] = ri
+
+        grid = defaultdict(list)
+        cell = 1.0
+        for hi, (_, p1, p2, _, _, _) in enumerate(hv_lines):
+            for pt in (p1, p2):
+                kx, ky = int(math.floor(pt.x / cell)), int(math.floor(pt.y / cell))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for oj in grid.get((kx + dx, ky + dy), []):
+                            union(hi, oj)
+                grid[(kx, ky)].append(hi)
+
+        comps = defaultdict(list)
+        for hi in range(n_hv):
+            comps[find(hi)].append(hv_lines[hi])
+
+        excluded_indices = set(frame_border_indices)
+        fx0, fy0, fx1, fy1 = frame
+        table_rects = []
+
+        for bx0, by0, bx1, by1 in to_asm_blocks:
+            right_edge = (fx1 + 2.0) if fx1 is not None else pw
+            table_rects.append((bx0 - 15.0, by0 - 12.0, right_edge, min(by1 + 65.0, ph * 0.26)))
+
+        for comp in comps.values():
+            xs = [pt.x for _, p1, p2, _, _, _ in comp for pt in (p1, p2)]
+            ys = [pt.y for _, p1, p2, _, _, _ in comp for pt in (p1, p2)]
+            cx0, cx1, cy0, cy1 = min(xs), max(xs), min(ys), max(ys)
+            comp_w = cx1 - cx0
+            comp_h = cy1 - cy0
+
+            if comp_w > 0.70 * pw and comp_h > 0.70 * ph:
+                for d_idx, _, _, _, _, _ in comp:
+                    excluded_indices.add(d_idx)
+                continue
+
+            is_table = False
+            # Componentă care conține un text de antet tabel / cartuș
+            for bx0, by0, bx1, by1 in table_blocks:
+                if cx0 - 8.0 <= bx0 and bx1 <= cx1 + 8.0 and cy0 - 8.0 <= by0 and by1 <= cy1 + 8.0:
+                    is_table = True
+                    break
+
+            if is_table:
+                for d_idx, _, _, _, _, _ in comp:
+                    excluded_indices.add(d_idx)
+                if comp_h < 0.45 * ph:
+                    table_rects.append((cx0 - 1.5, cy0 - 1.5, cx1 + 1.5, cy1 + 1.5))
+
+        # Excludem orice altă linie interioară dintr-un dreptunghi de tabel identificat
+        if table_rects:
+            for idx, d in enumerate(drawings):
+                if idx in excluded_indices:
+                    continue
+                r = d["rect"]
+                for tx0, ty0, tx1, ty1 in table_rects:
+                    if tx0 <= r.x0 and r.x1 <= tx1 and ty0 <= r.y0 and r.y1 <= ty1:
+                        excluded_indices.add(idx)
+                        break
+
+        return frame, excluded_indices
+
     def extract_geometry_items(self, page, stykk_y=None, top_margin_y=20.0, only_front_view=True, meta=None):
         """
         Extrage geometria curată a piesei:
-        - Filtrează cartușul și tabelele (atât când STYKKLISTE este jos, cât și când este sus).
-        - Elimină automat liniile de cotă, cotele, săgețile și simbolurile de secțiune (cutting planes).
+        - Filtrează chenarul paginii, marcajele de centrare, tabelele (BOM, TO ASSEMBLY, revizii) și cartușul.
+        - Elimină automat liniile de cotă, axele de centrare ale găurilor (+), săgețile și simbolurile de secțiune.
         - Izolează vederea principală (Front) față de secțiunile laterale înguste și vederea Topp.
-        - Păstrează decupajele, găurile și colțurile 100% intacte.
+        - Recuperează arcele de racordare (fillet) desenate cu linie subțire atașate conturului.
         """
-        max_y = (stykk_y - 8) if stykk_y else (page.rect.height * 0.88)
-        margin_x0 = 20
-        margin_x1 = page.rect.width - 20
+        max_y = (stykk_y - 6) if stykk_y else (page.rect.height * 0.88)
+        margin_x0 = 20.0
+        margin_x1 = page.rect.width - 20.0
         margin_y0 = top_margin_y if top_margin_y else 20.0
 
         drawings = page.get_drawings()
-        graphic_drawings = [
-            d for d in drawings
-            if d["rect"].y1 < max_y and d["rect"].y0 > margin_y0 and d["rect"].x0 > margin_x0 and d["rect"].x1 < margin_x1
-        ]
+        frame, table_excluded = self._detect_frame_and_table_exclusions(page, drawings)
+        fx0, fy0, fx1, fy1 = frame
+        if fx0 is not None:
+            margin_x0 = max(margin_x0, fx0 + 1.0)
+        if fx1 is not None:
+            margin_x1 = min(margin_x1, fx1 - 1.0)
+        if fy0 is not None:
+            margin_y0 = max(margin_y0, fy0 + 1.0)
+        if fy1 is not None:
+            max_y = min(max_y, fy1 - 1.0)
+
+        graphic_drawings = []
+        holes_list = []
+        hole_drawing_indices = set()
+        for idx, d in enumerate(drawings):
+            if idx in table_excluded:
+                continue
+            r = d["rect"]
+            if not (r.y1 < max_y and r.y0 > margin_y0 and r.x0 > margin_x0 and r.x1 < margin_x1):
+                continue
+            # Excludem eventuale linii lungi de chenar rămase
+            if (r.x1 - r.x0) > page.rect.width * 0.70 or (r.y1 - r.y0) > page.rect.height * 0.70:
+                continue
+            hc = self._is_hole_circle_drawing(d)
+            if hc is not None:
+                holes_list.append(hc)
+                hole_drawing_indices.add(idx)
+            graphic_drawings.append((idx, d))
 
         if not graphic_drawings:
             return [], None
 
-        # 1. Eliminare directă a simbolurilor de secțiune / cutting planes (w > 1.05 pt)
-        non_section_drawings = [
-            d for d in graphic_drawings
-            if (d.get("width") or 0) <= 1.05
-        ]
+        # 1. Eliminare simboluri groase de secțiune (> 1.30 pt), cercuri de gaură, nori de revizie și axe de centru (+)
+        non_section_drawings = []
+        for idx, d in graphic_drawings:
+            if idx in hole_drawing_indices:
+                continue
+            w = d.get("width") or 0
+            if w <= 0 or w > 1.30:
+                continue
+            if sum(1 for it in d.get("items", []) if it[0] == "c") >= 8:
+                continue
+            if self._is_crosshair_line(d, holes_list):
+                continue
+            non_section_drawings.append(d)
 
         if not non_section_drawings:
-            non_section_drawings = graphic_drawings
+            non_section_drawings = [
+                d for idx, d in graphic_drawings
+                if idx not in hole_drawing_indices and (d.get("width") or 0) > 0
+            ]
 
-        # 2. Identificare grosime pentru conturul obiectului (Visible outline)
-        ns_widths = [round(d.get("width") or 0, 3) for d in non_section_drawings if d.get("width")]
-        
-        if any(0.65 <= w <= 0.85 for w in ns_widths):
-            target_w_min, target_w_max = 0.65, 0.85
-        elif any(0.50 <= w <= 0.65 for w in ns_widths):
-            target_w_min, target_w_max = 0.50, 0.65
-        elif ns_widths:
-            max_ns = max(ns_widths)
-            target_w_min, target_w_max = max_ns * 0.75, max_ns * 1.25
+        if not non_section_drawings:
+            return [], None
+
+        # 2. Grupare după grosime (clustere +/- 0.05 pt) și alegerea grosimii reale de contur
+        raw_widths = sorted(set(round(d.get("width") or 0, 3) for d in non_section_drawings if d.get("width")))
+        width_bands = []
+        for rw in raw_widths:
+            if rw < 0.40:
+                continue
+            if not width_bands or rw - width_bands[-1][1] > 0.05:
+                width_bands.append([rw, rw])
+            else:
+                width_bands[-1][1] = rw
+
+        def _score_width_band(w_min, w_max):
+            drs = [
+                d for d in non_section_drawings
+                if d.get("width") and (w_min - 0.01) <= round(d.get("width"), 3) <= (w_max + 0.01) and d.get("items")
+            ]
+            if not drs:
+                return -1e9, []
+            xs = [d["rect"].x0 for d in drs] + [d["rect"].x1 for d in drs]
+            ys = [d["rect"].y0 for d in drs] + [d["rect"].y1 for d in drs]
+            span_x = max(xs) - min(xs)
+            span_y = max(ys) - min(ys)
+            if span_x < 6.0 or span_y < 6.0:
+                return -1e8, drs
+
+            deg = defaultdict(int)
+            seen_segs = set()
+            h_right_end = set()
+            h_left_end = set()
+            n_items = 0
+            has_h_extent = False
+            has_v_extent = False
+            for d in drs:
+                for it in d["items"]:
+                    if it[0] in ("l", "c"):
+                        p_start = it[1]
+                        p_end = it[2] if it[0] == "l" else it[4]
+                        ks = (round(p_start.x * 2.0) / 2.0, round(p_start.y * 2.0) / 2.0)
+                        ke = (round(p_end.x * 2.0) / 2.0, round(p_end.y * 2.0) / 2.0)
+                        if ks == ke and it[0] == "l":
+                            continue
+                        seg_key = (it[0], min(ks, ke), max(ks, ke))
+                        if seg_key in seen_segs:
+                            continue
+                        seen_segs.add(seg_key)
+                        n_items += 1
+                        if abs(p_end.x - p_start.x) > 2.0:
+                            has_h_extent = True
+                        if abs(p_end.y - p_start.y) > 2.0:
+                            has_v_extent = True
+                        if it[0] == "l" and abs(p_end.y - p_start.y) < 0.5 and abs(p_end.x - p_start.x) > 2.0:
+                            if ks[0] <= ke[0]:
+                                h_left_end.add(ks)
+                                h_right_end.add(ke)
+                            else:
+                                h_left_end.add(ke)
+                                h_right_end.add(ks)
+                        deg[ks] += 1
+                        deg[ke] += 1
+
+            if n_items < 3 or not (has_h_extent and has_v_extent):
+                return -1e8, drs
+
+            clean_verts = sum(1 for v in deg.values() if v == 2)
+            # Capetele de grad 1 care formează perechi de ruptură Tekla pe orizontală sunt noduri valide
+            deg1_pts = sorted([pt for pt, v in deg.items() if v == 1])
+            used_d1 = set()
+            for idx_a in range(len(deg1_pts)):
+                if idx_a in used_d1:
+                    continue
+                pt_a = deg1_pts[idx_a]
+                if pt_a not in h_right_end:
+                    continue
+                ax, ay = pt_a
+                for idx_b in range(idx_a + 1, len(deg1_pts)):
+                    if idx_b in used_d1:
+                        continue
+                    pt_b = deg1_pts[idx_b]
+                    if pt_b not in h_left_end:
+                        continue
+                    bx, by = pt_b
+                    if abs(ay - by) <= 0.6 and 1.2 <= (bx - ax) <= 16.0:
+                        clean_verts += 2
+                        used_d1.add(idx_a)
+                        used_d1.add(idx_b)
+                        break
+
+            total_verts = max(1, len(deg))
+            clean_ratio = clean_verts / float(total_verts)
+            w_mid = (w_min + w_max) / 2.0
+            score = (
+                clean_ratio * 1000.0
+                + (200.0 if w_mid >= 0.54 else 0.0)
+                + min(span_x, 600.0) * 0.8
+                + w_mid * 50.0
+                - max(0, sum(1 for v in deg.values() if v >= 3)) * 25.0
+            )
+            return score, drs
+
+        contour_drawings = []
+        if width_bands:
+            scored_bands = [(_score_width_band(b[0], b[1]), b) for b in width_bands]
+            scored_bands.sort(key=lambda x: x[0][0], reverse=True)
+            best_score, contour_drawings = scored_bands[0][0]
+            target_w_min = scored_bands[0][1][0] - 0.01
         else:
-            target_w_min, target_w_max = 0.1, 1.0
-
-        contour_drawings = [
-            d for d in non_section_drawings
-            if d.get("width") and target_w_min <= round(d.get("width"), 3) <= target_w_max and d.get("items")
-        ]
+            target_w_min = 0.40
 
         if not contour_drawings:
             contour_drawings = [d for d in non_section_drawings if d.get("width") and d.get("items")]
@@ -355,8 +717,6 @@ class PdfToCadConverter:
                     cur_drawings_y = [dr]
             clusters_y.append((cur_y0, cur_y1, cur_drawings_y))
 
-            # Sortăm clusterele pe Y pentru a alege vederea principală Front (fața piesei)
-            # și a elimina vederile de cant (grosime t), vederile de sus/jos (Topp/Bunn) sau secțiuni laterale (A-A)
             def _cluster_x_span(c):
                 dr_list = c[2]
                 return max(d["rect"].x1 for d in dr_list) - min(d["rect"].x0 for d in dr_list)
@@ -378,7 +738,6 @@ class PdfToCadConverter:
 
             def _view_score(c):
                 span = _cluster_x_span(c)
-                # Dacă lățimea orizontală e mult mai mică decât max_span, e o secțiune îngustă gen A-A
                 if max_span > 0 and span < 0.65 * max_span:
                     return -100000.0 + span
 
@@ -386,7 +745,6 @@ class PdfToCadConverter:
                 h_pt = max(0.1, c[1] - c[0])
                 h_mm = h_pt * base_scale
 
-                # Prioritizăm fața plăcii conform profil_width și deprioritizăm cantul conform profil_thickness
                 if target_pw and target_pw > 0:
                     if abs(h_mm - target_pw) <= max(5.0, target_pw * 0.15):
                         score += 50000.0
@@ -394,7 +752,6 @@ class PdfToCadConverter:
                     if abs(h_mm - target_th) <= max(2.0, target_th * 0.2):
                         score -= 25000.0
 
-                # Verificăm proximitatea față de eticheta text "Front"
                 c_min_x = min(d["rect"].x0 for d in c[2])
                 c_max_x = max(d["rect"].x1 for d in c[2])
                 c_y0, c_y1 = c[0], c[1]
@@ -406,7 +763,6 @@ class PdfToCadConverter:
                         elif 0 <= c_y0 - fl["y1"] <= 60.0:
                             score += 10000.0
 
-                # În caz de egalitate între două vederi orizontale lungi, fața piesei are înălțimea mult mai mare decât cantul
                 score += h_pt * 2.0
                 return score
 
@@ -443,6 +799,82 @@ class PdfToCadConverter:
             "min_y": min(p.y for p in pts),
             "max_y": max(p.y for p in pts),
         }
+
+        # 5.1 Recuperare arce de racordare (fillet) desenate cu linie subțire (w < target_w_min)
+        # care unesc două capete deschise (grad 1) ale conturului (ex. R10 în HSQP.1002)
+        end_counts = defaultdict(list)
+        for it in items:
+            if it[0] in ("l", "c"):
+                p_s = it[1]
+                p_e = it[2] if it[0] == "l" else it[4]
+                ks = (round(p_s.x, 1), round(p_s.y, 1))
+                ke = (round(p_e.x, 1), round(p_e.y, 1))
+                end_counts[ks].append(p_s)
+                end_counts[ke].append(p_e)
+
+        open_pts = [pts_list[0] for pts_list in end_counts.values() if len(pts_list) == 1]
+        if len(open_pts) >= 2:
+            thin_items = []
+            for d in non_section_drawings:
+                w_d = d.get("width") or 0
+                if w_d >= target_w_min:
+                    continue
+                r = d["rect"]
+                if not (bbox["min_x"] - 3.0 <= r.x0 and r.x1 <= bbox["max_x"] + 3.0 and
+                        bbox["min_y"] - 3.0 <= r.y0 and r.y1 <= bbox["max_y"] + 3.0):
+                    continue
+                for it in d.get("items", []):
+                    if it[0] == "c":
+                        thin_items.append((it, it[1], it[4]))
+                    elif it[0] == "l" and math.hypot(it[2].x - it[1].x, it[2].y - it[1].y) <= 8.0:
+                        thin_items.append((it, it[1], it[2]))
+
+            if thin_items:
+                used_thin = set()
+                recovered = []
+                for idx_s in range(len(open_pts)):
+                    p_src = open_pts[idx_s]
+                    # BFS până la max 6 segmente pentru a atinge un alt capăt deschis
+                    queue = [(p_src, [], set())]
+                    found_path = None
+                    while queue and not found_path:
+                        curr_pt, path_idxs, visited_local = queue.pop(0)
+                        if len(path_idxs) > 0:
+                            for idx_t in range(len(open_pts)):
+                                if idx_t == idx_s:
+                                    continue
+                                if math.hypot(curr_pt.x - open_pts[idx_t].x, curr_pt.y - open_pts[idx_t].y) <= 0.35:
+                                    if any(thin_items[ti][0][0] == "c" for ti in path_idxs):
+                                        found_path = path_idxs
+                                        break
+                        if found_path or len(path_idxs) >= 6:
+                            continue
+                        for ti, (it, ts, te) in enumerate(thin_items):
+                            if ti in used_thin or ti in visited_local:
+                                continue
+                            if math.hypot(curr_pt.x - ts.x, curr_pt.y - ts.y) <= 0.25:
+                                queue.append((te, path_idxs + [ti], visited_local | {ti}))
+                            elif math.hypot(curr_pt.x - te.x, curr_pt.y - te.y) <= 0.25:
+                                queue.append((ts, path_idxs + [ti], visited_local | {ti}))
+                    if found_path:
+                        for ti in found_path:
+                            used_thin.add(ti)
+                            recovered.append(thin_items[ti][0])
+
+                if recovered:
+                    items.extend(recovered)
+                    for it in recovered:
+                        if it[0] == "l":
+                            pts.extend([it[1], it[2]])
+                        elif it[0] == "c":
+                            pts.extend([it[1], it[2], it[3], it[4]])
+                    bbox = {
+                        "min_x": min(p.x for p in pts),
+                        "max_x": max(p.x for p in pts),
+                        "min_y": min(p.y for p in pts),
+                        "max_y": max(p.y for p in pts),
+                    }
+
         bbox["width"] = bbox["max_x"] - bbox["min_x"]
         bbox["height"] = bbox["max_y"] - bbox["min_y"]
 
@@ -453,8 +885,8 @@ class PdfToCadConverter:
         """
         Detectează dacă vederea este scurtată de Tekla (view shortening break)
         și localizează stațiile de ruptură (break stations) de-a lungul axei X.
-        O ruptură Tekla are un spațiu strict între 7.0 și 10.5 pt (~3.0 mm pe hârtie)
-        și NU are linii de contur verticale la capete (spre deosebire de decupaje/notches).
+        O ruptură Tekla are un spațiu între 1.2 și 16.0 pt (~0.4 - 5.6 mm pe hârtie, acoperind șabloane SUEDIA și NORVEGIA)
+        și NU are linii de contur verticale/curbe conectate la capete.
         Returnează: listă de stații [{'xl': ..., 'xr': ..., 'center': ..., 'pairs': [...]}]
         """
         h_lines = []
@@ -474,11 +906,10 @@ class PdfToCadConverter:
                     continue
                 if abs(y1 - y2) < 0.3:
                     gap = x2_min - x1_max
-                    # Ruptura Tekla este strict de 7.0 - 10.5 pt (3.0 mm). Decupajele au gap >= 20 pt.
-                    if 7.0 <= gap <= 10.5:
+                    # Ruptura Tekla: 1.0 mm (2.835 pt) în șabloane suedeze sau 3.0 mm (8.5 pt) în cele norvegiene, până la 16 pt
+                    if 1.2 <= gap <= 16.0:
                         # Verificăm ca niciun capăt al rupturii să nu aibă alte linii sau curbe conectate.
                         # Într-o ruptură Tekla reală, capetele de linie sunt libere în aer.
-                        # Dacă de la capăt pleacă o linie sau o curbă (ex. decupaj semicircular R35), este un contur real, NU o ruptură.
                         p_left = fitz.Point(x1_max, y1)
                         p_right = fitz.Point(x2_min, y2)
                         has_conn = False
@@ -525,6 +956,8 @@ class PdfToCadConverter:
                     "pairs": [(xl, xr, y, idx1, idx2)]
                 })
 
+        # O ruptură Tekla validă taie secțiunea pe verticală (cel puțin 2 perechi aliniate: latura de sus și latura de jos)
+        clusters = [c for c in clusters if len(c["pairs"]) >= 2]
         clusters.sort(key=lambda c: c["center"])
         return clusters
 
@@ -545,13 +978,15 @@ class PdfToCadConverter:
                 continue
 
             items = d.get("items", [])
-            if len(items) == 4 and all(it[0] == "c" for it in items):
+            n_curves = sum(1 for it in items if it[0] == "c")
+            if (n_curves == 4 and len(items) <= 6) or (len(items) == 6 and n_curves == 6):
                 cx = (r.x0 + r.x1) / 2.0
                 cy = (r.y0 + r.y1) / 2.0
                 rx = (r.x1 - r.x0) / 2.0
                 ry = (r.y1 - r.y0) / 2.0
-                if rx > 0 and ry > 0 and abs(rx - ry) < 0.35 * max(rx, ry) and 0.4 <= rx <= 45.0:
-                    rad = (rx + ry) / 2.0
+                min_r = 0.8 if len(items) > 4 else 0.4
+                if rx > 0 and ry > 0 and abs(rx - ry) < 0.35 * max(rx, ry) and min_r <= rx <= 45.0:
+                    rad = min(rx, ry) if n_curves == 6 else (rx + ry) / 2.0
                     if not any(math.hypot(cx - h["center"][0], cy - h["center"][1]) < 1.0 for h in holes):
                         holes.append({
                             "center": (cx, cy),
@@ -851,6 +1286,8 @@ class PdfToCadConverter:
         """
         Extrage toate ciclurile închise (contur exterior + decupaje / găuri interioare).
         Fiecare ciclu este o listă ordonată de vertexuri (x, y, 0, 0, bulge) gata pentru LWPOLYLINE.
+        Elimină micro-liniile parazite agățate de colțuri și închide automat eventualele
+        goluri minore rămase la exportul PDF (< 25 mm) pentru a garanta contururi 100% închise.
         """
         adj = defaultdict(list)
         edges = []
@@ -858,6 +1295,8 @@ class PdfToCadConverter:
         for p1, p2 in lines:
             p1_r = (round(p1[0], 2), round(p1[1], 2))
             p2_r = (round(p2[0], 2), round(p2[1], 2))
+            if p1_r == p2_r:
+                continue
             e_idx = len(edges)
             edges.append((p1_r, p2_r, False))
             adj[p1_r].append((p2_r, 0.0, e_idx))
@@ -867,6 +1306,8 @@ class PdfToCadConverter:
             for p_start, p_end, center, mid in arcs:
                 s_r = (round(p_start[0], 2), round(p_start[1], 2))
                 e_r = (round(p_end[0], 2), round(p_end[1], 2))
+                if s_r == e_r:
+                    continue
                 b_fwd = cls.calculate_arc_bulge(s_r, e_r, center, mid)
                 b_rev = cls.calculate_arc_bulge(e_r, s_r, center, mid)
                 e_idx = len(edges)
@@ -875,37 +1316,204 @@ class PdfToCadConverter:
                 adj[e_r].append((s_r, b_rev, e_idx))
 
         visited_edges = set()
+
+        # Colectăm componentele conexe ale grafului
+        all_comps = []
+        visited_comp_nodes = set()
+        for start_node in list(adj.keys()):
+            if start_node in visited_comp_nodes:
+                continue
+            comp_nodes = set()
+            comp_edges = set()
+            stack = [start_node]
+            visited_comp_nodes.add(start_node)
+            while stack:
+                curr = stack.pop()
+                comp_nodes.add(curr)
+                for nxt, _, e_idx in adj[curr]:
+                    if e_idx in visited_edges:
+                        continue
+                    comp_edges.add(e_idx)
+                    if nxt not in visited_comp_nodes:
+                        visited_comp_nodes.add(nxt)
+                        stack.append(nxt)
+            all_comps.append((comp_nodes, comp_edges))
+
+        # Eliminăm componentele parazite exterioare minuscule (ex. săgeata de sudură din HSQP.1018)
+        if len(all_comps) > 1:
+            comp_bboxes = []
+            for c_nodes, c_edges in all_comps:
+                cxs = [n[0] for n in c_nodes]
+                cys = [n[1] for n in c_nodes]
+                cx0, cx1 = min(cxs), max(cxs)
+                cy0, cy1 = min(cys), max(cys)
+                comp_bboxes.append((cx0, cy0, cx1, cy1, (cx1 - cx0) + (cy1 - cy0)))
+            main_idx = max(range(len(comp_bboxes)), key=lambda i: comp_bboxes[i][4])
+            mx0, my0, mx1, my1, m_span = comp_bboxes[main_idx]
+            for i, (c_nodes, c_edges) in enumerate(all_comps):
+                if i == main_idx:
+                    continue
+                cx0, cy0, cx1, cy1, c_span = comp_bboxes[i]
+                outside_main = (
+                    cx1 < mx0 - 2.0 or cx0 > mx1 + 2.0 or
+                    cy1 < my0 - 2.0 or cy0 > my1 + 2.0
+                )
+                if outside_main and c_span < 0.25 * m_span:
+                    visited_edges.update(c_edges)
+
+        # Eliminăm ramurile deschise (mustăți/teșituri oprite în T-joncțiuni):
+        # - Pe componentele conexe care conțin cicluri (n_edges >= n_nodes),
+        #   reducem la 2-core eliminând iterativ orice nod de grad 1 (inclusiv lanțuri prin noduri de grad 2).
+        # - Pe componentele fără cicluri (arbori, ex. contur cu mic gap de închidere),
+        #   eliminăm doar mustățile de grad 1 lipite direct de un nod cu grad >= 3.
+        for comp_nodes, comp_edges in all_comps:
+            if not comp_edges or comp_edges.issubset(visited_edges):
+                continue
+            has_cycle = len(comp_edges) >= len(comp_nodes)
+            changed = True
+            while changed:
+                changed = False
+                for node in list(comp_nodes):
+                    active = [c for c in adj[node] if c[2] not in visited_edges]
+                    if len(active) == 1:
+                        nxt, _, e_idx = active[0]
+                        if has_cycle:
+                            visited_edges.add(e_idx)
+                            changed = True
+                        else:
+                            nxt_active = [c for c in adj[nxt] if c[2] not in visited_edges]
+                            if len(nxt_active) >= 3:
+                                visited_edges.add(e_idx)
+                                changed = True
+
         loops = []
+
+        # Faza 1: Procesăm mai întâi lanțurile care au capete deschise (deg == 1),
+        # astfel încât să fie parcurse cap-coadă și închise dacă golul <= 25 mm
+        deg1_nodes = [
+            n for n in sorted(adj.keys())
+            if len([c for c in adj[n] if c[2] not in visited_edges]) == 1
+        ]
+        for node in deg1_nodes:
+            active_here = [c for c in adj[node] if c[2] not in visited_edges]
+            if not active_here:
+                continue
+
+            chain = []
+            curr = node
+            start_loop = node
+            while True:
+                candidates = [c for c in adj[curr] if c[2] not in visited_edges]
+                if not candidates:
+                    break
+                nxt, b_val, edge_num = candidates[0]
+                visited_edges.add(edge_num)
+                chain.append((curr[0], curr[1], 0, 0, b_val))
+                curr = nxt
+                if curr == start_loop:
+                    break
+
+            if curr == start_loop and len(chain) >= 3:
+                loops.append(chain)
+            elif len(chain) >= 2:
+                gap_dist = math.hypot(curr[0] - start_loop[0], curr[1] - start_loop[1])
+                if gap_dist <= 25.0:
+                    chain.append((curr[0], curr[1], 0, 0, 0.0))
+                    if len(chain) >= 3:
+                        loops.append(chain)
+
+        # Faza 2: Extragem toate ciclurile complet închise (deg >= 2) prin căutare DFS de ciclu simplu
+        def _find_simple_cycle(start_node, first_nxt, first_bulge, first_e_idx):
+            steps = [0]
+
+            def _dfs(curr_node, chain_acc, edge_acc, vis_nodes):
+                local_added_nodes = []
+                local_chain = list(chain_acc)
+                local_edges = list(edge_acc)
+                curr = curr_node
+
+                while True:
+                    steps[0] += 1
+                    if steps[0] > 50000:
+                        for n in local_added_nodes:
+                            vis_nodes.remove(n)
+                        return None
+
+                    cands = [
+                        c for c in adj[curr]
+                        if c[2] not in visited_edges and c[2] != first_e_idx
+                        and (c[0] == start_node or c[0] not in vis_nodes)
+                    ]
+                    if not cands:
+                        for n in local_added_nodes:
+                            vis_nodes.remove(n)
+                        return None
+
+                    if len(local_chain) >= 2:
+                        cands.sort(key=lambda c: 0 if c[0] == start_node else 1)
+
+                    if len(cands) == 1:
+                        nxt, b_val, edge_num = cands[0]
+                        if nxt == start_node:
+                            if len(local_chain) >= 2:
+                                return (
+                                    local_chain + [(curr[0], curr[1], 0, 0, b_val)],
+                                    local_edges + [edge_num],
+                                )
+                            for n in local_added_nodes:
+                                vis_nodes.remove(n)
+                            return None
+                        local_chain.append((curr[0], curr[1], 0, 0, b_val))
+                        local_edges.append(edge_num)
+                        vis_nodes.add(nxt)
+                        local_added_nodes.append(nxt)
+                        curr = nxt
+                    else:
+                        for nxt, b_val, edge_num in cands:
+                            if nxt == start_node:
+                                if len(local_chain) >= 2:
+                                    return (
+                                        local_chain + [(curr[0], curr[1], 0, 0, b_val)],
+                                        local_edges + [edge_num],
+                                    )
+                                continue
+                            vis_nodes.add(nxt)
+                            res = _dfs(
+                                nxt,
+                                local_chain + [(curr[0], curr[1], 0, 0, b_val)],
+                                local_edges + [edge_num],
+                                vis_nodes,
+                            )
+                            vis_nodes.remove(nxt)
+                            if res is not None:
+                                return res
+                        for n in local_added_nodes:
+                            vis_nodes.remove(n)
+                        return None
+
+            return _dfs(
+                first_nxt,
+                [(start_node[0], start_node[1], 0, 0, first_bulge)],
+                [first_e_idx],
+                {first_nxt},
+            )
 
         for node in sorted(adj.keys()):
             for next_pt, bulge, e_idx in adj[node]:
                 if e_idx in visited_edges:
                     continue
 
-                chain = []
-                curr = node
-                start_loop = node
-
-                while True:
-                    candidates = [c for c in adj[curr] if c[2] not in visited_edges]
-                    if not candidates:
-                        break
-
-                    best_cand = candidates[0]
-                    for c in candidates:
-                        if c[0] == start_loop and len(chain) >= 2:
-                            best_cand = c
-                            break
-
-                    nxt, b_val, edge_num = best_cand
-                    visited_edges.add(edge_num)
-                    chain.append((curr[0], curr[1], 0, 0, b_val))
-                    curr = nxt
-                    if curr == start_loop:
-                        break
-
-                if curr == start_loop and len(chain) >= 3:
-                    loops.append(chain)
+                res = _find_simple_cycle(node, next_pt, bulge, e_idx)
+                if res is not None:
+                    chain, c_edges = res
+                    if len(chain) >= 3:
+                        loops.append(chain)
+                        visited_edges.update(c_edges)
+                        c_nodes = {(pt[0], pt[1]) for pt in chain}
+                        for v_node in c_nodes:
+                            for nxt, _, cord_eid in adj[v_node]:
+                                if cord_eid not in visited_edges and nxt in c_nodes:
+                                    visited_edges.add(cord_eid)
 
         return loops
 
@@ -1026,18 +1634,31 @@ class PdfToCadConverter:
             is_shortened = False
             raw_stations = self._find_view_break_stations(items, bbox)
 
-            # Dacă lungimea extrasă este mai mică decât desenul existent pe foaie, a fost citit un ANTALL sau alt număr
-            if target_len and target_len <= drawn_len_mm:
+            # Dacă avem ruptură Tekla și lățimea reală a piesei (target_wid), calibrăm întâi scara de bază pe Y
+            # (necesar pentru desenele cu Scale: INGEN, ex. 1:14.142 în loc de 1:10)
+            if calibrate_1to1 and raw_stations and target_wid:
+                h_mm_at_base = drawn_h_pt * base_scale_factor
+                if h_mm_at_base > 1.0:
+                    wid_ratio = target_wid / h_mm_at_base
+                    if 0.25 <= wid_ratio <= 2.5 and abs(wid_ratio - 1.0) > 0.03:
+                        base_scale_factor *= wid_ratio
+                        drawn_len_mm = drawn_w_pt * base_scale_factor
+
+            total_break_gap_pt = sum((s["xr"] - s["xl"]) for s in raw_stations)
+            drawn_metal_mm = max(0.0, (drawn_w_pt - total_break_gap_pt) * base_scale_factor)
+
+            # Dacă avem ruptură Tekla și lungimea extrasă este mai mică decât metalul desenat efectiv, a fost citit un ANTALL sau alt număr
+            if raw_stations and target_len and target_len <= drawn_metal_mm * 0.98:
                 target_len = None
 
-            # Dacă avem ruptură Tekla dar nu avem target_len valid, căutăm cota principală deasupra vederii Front
+            # Dacă avem ruptură Tekla dar nu avem target_len valid, căutăm cota principală lângă vederea Front
             if calibrate_1to1 and raw_stations and not target_len:
                 dim_candidates = []
                 for w in page.get_text("words"):
                     clean_w = w[4].replace(",", ".")
                     if clean_w.replace(".", "", 1).isdigit():
                         v = float(clean_w)
-                        if v > drawn_len_mm * 1.2:
+                        if drawn_metal_mm * 1.02 < v < 50000:
                             dim_candidates.append((w[1], v))
                 if dim_candidates:
                     dim_candidates.sort(key=lambda item: abs(item[0] - bbox["min_y"]))
@@ -1047,7 +1668,7 @@ class PdfToCadConverter:
             # Detectare găuri circulare în interiorul vederii Front
             holes = self.detect_holes_in_bbox(page, bbox)
 
-            if calibrate_1to1 and target_len and (target_len / drawn_len_mm >= 1.35) and raw_stations:
+            if calibrate_1to1 and target_len and raw_stations and (target_len > drawn_metal_mm + 1.0):
                 stations = self._calculate_break_expansions(
                     raw_stations, items, bbox, target_len, base_scale_factor, page, meta["stykk_y"], holes=holes
                 )
@@ -1076,10 +1697,17 @@ class PdfToCadConverter:
                 scale_final = base_scale_factor
                 if calibrate_1to1 and target_len and target_wid:
                     target_max = max(target_len, target_wid)
+                    target_min = min(target_len, target_wid)
                     curr_max_mm = max(drawn_w_pt, drawn_h_pt) * base_scale_factor
-                    if curr_max_mm > 0:
+                    curr_min_mm = min(drawn_w_pt, drawn_h_pt) * base_scale_factor
+                    if curr_max_mm > 0 and curr_min_mm > 0 and target_min > 0:
                         ratio = target_max / curr_max_mm
+                        drawn_aspect = curr_max_mm / curr_min_mm
+                        target_aspect = target_max / target_min
                         if 0.85 <= ratio <= 1.15:
+                            scale_final = base_scale_factor * ratio
+                        elif (0.85 <= (drawn_aspect / target_aspect) <= 1.15) and (0.20 <= ratio <= 4.0):
+                            # Cazul desenelor fără scară numerică (ex. Scale: INGEN) cu raport de aspect corect
                             scale_final = base_scale_factor * ratio
 
                 def pt_to_cad(pt):
