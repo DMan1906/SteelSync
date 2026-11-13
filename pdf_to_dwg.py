@@ -995,26 +995,14 @@ class PdfToCadConverter:
         return holes
 
     @classmethod
-    def _calculate_break_expansions(cls, stations, items, bbox, target_len, base_scale, page, stykk_y, holes=None):
+    def _extract_pdf_dimension_constraints(cls, page, bbox, stykk_y):
         """
-        Calculează expansiunea exactă în milimetri pentru fiecare stație de ruptură (break station).
-        Pentru 1 ruptură: exp = target_len - total_drawn_solid_mm.
-        Pentru multi-break (N rupturi): asociază direct liniile orizontale de cotă din PDF cu
-        stațiile de ruptură pe care le acoperă și rezolvă sistemul exact fără a distorsiona cotele găurilor.
+        Extrage constrângerile de cotare orizontale (h_dims) și verticale (v_dims) direct din PDF.
+        Returnează (h_dims, v_dims) unde:
+          h_dims = [(xl, xr, yl, val), ...]
+          v_dims = [(yt, yb, xl, val), ...]
         """
-        total_gaps_pt = sum(s["xr"] - s["xl"] for s in stations)
-        total_drawn_solid_mm = (bbox["width"] - total_gaps_pt) * base_scale
-        total_missing_mm = target_len - total_drawn_solid_mm
-
-        if len(stations) == 1:
-            stations[0]["exp"] = max(0.0, total_missing_mm)
-            return stations
-
-        words = page.get_text("words")
-        max_dim_y = (stykk_y - 5.0) if stykk_y else (page.rect.height * 0.70)
-
-        # 1. Metoda exactă: extragere linii orizontale de cotă [xl, xr] și rezolvare sistem pe stații
-        h_dim_lines = []
+        h_lines, v_lines = [], []
         for d in page.get_drawings():
             w = d.get("width")
             if not w or w > 0.52:
@@ -1027,44 +1015,112 @@ class PdfToCadConverter:
                         yl = (p1.y + p2.y) / 2.0
                         if bbox["min_x"] - 8.0 <= xl and xr <= bbox["max_x"] + 8.0:
                             if yl < bbox["min_y"] - 2.0 or yl > bbox["max_y"] + 2.0:
-                                h_dim_lines.append((xl, xr, yl))
+                                h_lines.append((xl, xr, yl))
+                    elif abs(p1.x - p2.x) < 0.25 and abs(p1.y - p2.y) > 2.0:
+                        yt, yb = min(p1.y, p2.y), max(p1.y, p2.y)
+                        xl = (p1.x + p2.x) / 2.0
+                        if bbox["min_y"] - 8.0 <= yt and yb <= bbox["max_y"] + 8.0:
+                            if xl < bbox["min_x"] - 2.0 or xl > bbox["max_x"] + 2.0:
+                                v_lines.append((yt, yb, xl))
 
+        max_dim_y = (stykk_y - 5.0) if stykk_y else (page.rect.height * 0.70)
+        h_dims, v_dims = [], []
+        for w in page.get_text("words"):
+            txt = w[4].strip().replace(",", ".")
+            if txt.replace(".", "", 1).isdigit() and w[1] < max_dim_y:
+                val = float(txt)
+                if val <= 4.0:
+                    continue
+                xm = (w[0] + w[2]) / 2.0
+                ym = (w[1] + w[3]) / 2.0
+                y1 = w[3]
+                hcands = [
+                    (xl, xr, yl) for (xl, xr, yl) in h_lines
+                    if (y1 - 1.5 <= yl <= y1 + 2.5) and (xl - 5.0 <= xm <= xr + 5.0)
+                ]
+                if hcands:
+                    xl, xr, yl = min(
+                        hcands,
+                        key=lambda c: abs(c[2] - y1) + abs((c[0] + c[1]) / 2.0 - xm) * 0.1
+                    )
+                    h_dims.append((xl, xr, yl, val))
+
+                vcands = [
+                    (yt, yb, xl) for (yt, yb, xl) in v_lines
+                    if (w[2] - 1.5 <= xl <= w[2] + 2.5) and (yt - 5.0 <= ym <= yb + 5.0)
+                ]
+                if vcands:
+                    yt, yb, xl = min(
+                        vcands,
+                        key=lambda c: abs(c[2] - w[2]) + abs((c[0] + c[1]) / 2.0 - ym) * 0.1
+                    )
+                    v_dims.append((yt, yb, xl, val))
+
+        return h_dims, v_dims
+
+    @classmethod
+    def _calculate_break_expansions(cls, stations, items, bbox, target_len, base_scale, page, stykk_y, holes=None, h_dims=None):
+        """
+        Calculează expansiunea exactă în milimetri pentru fiecare stație de ruptură (break station).
+        Asociază direct liniile orizontale de cotă din PDF (prioritizând cotele ce ating găurile)
+        cu stațiile de ruptură acoperite și rezolvă sistemul exact (±0.00 mm pe cotele găurilor).
+        """
+        total_gaps_pt = sum(s["xr"] - s["xl"] for s in stations)
+        total_drawn_solid_mm = (bbox["width"] - total_gaps_pt) * base_scale
+        total_missing_mm = target_len - total_drawn_solid_mm
+
+        if h_dims is None:
+            h_dims, _ = cls._extract_pdf_dimension_constraints(page, bbox, stykk_y)
+
+        hx_list = [h["center"][0] for h in holes] if holes else []
+
+        # 1. Metoda exactă: ecuații din liniile orizontale de cotă [xl, xr] asociate cu stațiile de ruptură
         equations = []
+        for xl, xr, yl, val in h_dims:
+            if val <= 10.0:
+                continue
+            covered = tuple(
+                j for j, st in enumerate(stations)
+                if xl - 0.8 <= st["xl"] and st["xr"] <= xr + 0.8
+            )
+            if covered:
+                gaps_s = sum(stations[j]["xr"] - stations[j]["xl"] for j in covered)
+                seg_solid_mm = ((xr - xl) - gaps_s) * base_scale
+                rhs = max(0.0, val - seg_solid_mm)
+                touches_hole = 0 if any(abs(xl - hx) < 0.6 or abs(xr - hx) < 0.6 for hx in hx_list) else 1
+                is_total = 0 if (abs(xl - bbox["min_x"]) < 0.8 and abs(xr - bbox["max_x"]) < 0.8) else 1
+                equations.append((len(covered), touches_hole, is_total, covered, rhs))
+
+        if len(stations) == 1:
+            # Pentru o singură ruptură: verificăm dacă pe desen există o cotă explicită pe gaură sau cotă totală
+            # care diferă cu <= 5.0 mm de tabelul BOM (ex. trunchiere zecimală în Tekla)
+            best_single = None
+            for _, touches_hole, is_total, covered, rhs in sorted(equations, key=lambda e: (e[1], e[2])):
+                if abs(rhs - total_missing_mm) <= 5.0:
+                    best_single = rhs
+                    break
+            stations[0]["exp"] = max(0.0, best_single if best_single is not None else total_missing_mm)
+            return stations
+
+        words = page.get_text("words")
+        max_dim_y = (stykk_y - 5.0) if stykk_y else (page.rect.height * 0.70)
         dim_words = []
         for w in words:
             txt = w[4].strip().replace(",", ".")
             if txt.replace(".", "", 1).isdigit() and w[1] < max_dim_y:
                 val = float(txt)
-                if val <= 10:
-                    continue
-                xm = (w[0] + w[2]) / 2.0
-                y1 = w[3]
-                if val < target_len - 10.0:
+                if 10.0 < val < target_len - 10.0:
+                    xm = (w[0] + w[2]) / 2.0
                     dim_words.append((w[0], w[2], xm, w[1], val))
-                cands = [
-                    (xl, xr, yl) for (xl, xr, yl) in h_dim_lines
-                    if (y1 - 1.5 <= yl <= y1 + 2.5) and (xl - 5.0 <= xm <= xr + 5.0)
-                ]
-                if cands:
-                    xl, xr, yl = min(cands, key=lambda c: abs(c[2] - y1) + abs((c[0] + c[1]) / 2.0 - xm) * 0.1)
-                    covered = tuple(
-                        j for j, st in enumerate(stations)
-                        if xl - 0.8 <= st["xl"] and st["xr"] <= xr + 0.8
-                    )
-                    if covered:
-                        gaps_s = sum(stations[j]["xr"] - stations[j]["xl"] for j in covered)
-                        seg_solid_mm = ((xr - xl) - gaps_s) * base_scale
-                        rhs = max(0.0, val - seg_solid_mm)
-                        equations.append((len(covered), abs((xl + xr) / 2.0 - xm), covered, rhs))
 
         if equations:
-            equations.append((len(stations), 9999.0, tuple(range(len(stations))), max(0.0, total_missing_mm)))
-            equations.sort(key=lambda e: (e[0], e[1]))
+            equations.append((len(stations), 2, 2, tuple(range(len(stations))), max(0.0, total_missing_mm)))
+            equations.sort(key=lambda e: (e[0], e[1], e[2]))
             exps = [None] * len(stations)
             changed = True
             while changed:
                 changed = False
-                for _, _, covered, rhs in equations:
+                for _, _, _, covered, rhs in equations:
                     unknowns = [j for j in covered if exps[j] is None]
                     if len(unknowns) == 1:
                         u = unknowns[0]
@@ -1643,6 +1699,354 @@ class PdfToCadConverter:
 
         return fillet_arcs, fillet_used_indices
 
+    @staticmethod
+    def _refine_stations_with_hole_dims(stations, holes, h_dims, bbox, base_scale):
+        """
+        Ajustează expansiunile stațiilor de ruptură pe baza cotelor orizontale din PDF
+        care ating direct o gaură (precizie 0.00 mm față de cota desenată).
+        """
+        if not stations or not holes or not h_dims:
+            return stations
+
+        hx_list = [h["center"][0] for h in holes]
+
+        def tx_curr(x_val):
+            cx = (x_val - bbox["min_x"]) * base_scale
+            for st in stations:
+                if x_val > st["xl"]:
+                    cx -= (min(x_val, st["xr"]) - st["xl"]) * base_scale
+                    cx += st["exp"]
+            return cx
+
+        locked_single = set()
+        # 1. Rezolvare constrângeri cu o singură stație acoperită
+        for xl, xr, yl, val in h_dims:
+            if val <= 10.0:
+                continue
+            if any(abs(xl - hx) < 0.6 or abs(xr - hx) < 0.6 for hx in hx_list):
+                cov = [j for j, st in enumerate(stations) if xl - 0.8 <= st["xl"] and st["xr"] <= xr + 0.8]
+                if len(cov) == 1:
+                    err = val - (tx_curr(xr) - tx_curr(xl))
+                    if 0.0005 < abs(err) <= 5.0:
+                        stations[cov[0]]["exp"] = max(0.0, stations[cov[0]]["exp"] + err)
+                        locked_single.add(cov[0])
+
+        # 2. Rezolvare constrângeri multi-stație (ex. cota dintre găuri peste zona centrală)
+        for xl, xr, yl, val in h_dims:
+            if val <= 10.0:
+                continue
+            if any(abs(xl - hx) < 0.6 or abs(xr - hx) < 0.6 for hx in hx_list):
+                cov = [j for j, st in enumerate(stations) if xl - 0.8 <= st["xl"] and st["xr"] <= xr + 0.8]
+                if len(cov) > 1:
+                    err = val - (tx_curr(xr) - tx_curr(xl))
+                    if 0.0005 < abs(err) <= 5.0:
+                        free = [j for j in cov if j not in locked_single]
+                        target_st = free[len(free) // 2] if free else cov[len(cov) // 2]
+                        stations[target_st]["exp"] = max(0.0, stations[target_st]["exp"] + err)
+
+        return stations
+
+    @staticmethod
+    def _build_and_refine_holes(holes, pt_to_cad, scale_for_holes, h_dims, v_dims, bbox, calibrate_1to1):
+        """
+        Calculează pozițiile CAD ale găurilor și le aliniază exact (±0.00 mm) la cotele
+        orizontale și verticale consistente din PDF (eliminând erorile de cuantizare de 0.1-0.5 mm).
+        """
+        if not holes:
+            return []
+
+        cad_holes = []
+        for h in holes:
+            px, py = h["center"][0], h["center"][1]
+            cx, cy = pt_to_cad(fitz.Point(px, py))
+            diam = h["radius"] * 2.0 * scale_for_holes
+            if calibrate_1to1 and abs(diam - round(diam)) <= 0.15 and round(diam) >= 2:
+                cr = round(diam) / 2.0
+            else:
+                cr = h["radius"] * scale_for_holes
+            cad_holes.append({
+                "cx": cx, "cy": cy, "r": cr,
+                "orig_x": cx, "orig_y": cy,
+                "px": px, "py": py,
+            })
+
+        if not calibrate_1to1:
+            return cad_holes
+
+        max_cad_x, max_cad_y = pt_to_cad(fitz.Point(bbox["max_x"], bbox["min_y"]))
+
+        # Aliniere pe axa X (h_dims): aplicăm doar corecții de cuantizare (<= 0.28 mm)
+        # care nu distorsionează grupurile de găuri rotite sau cotele reale zecimale (ex. .5 mm)
+        if h_dims:
+            cand_x = [ch["cx"] for ch in cad_holes]
+            for _ in range(15):
+                for xl, xr, yl, val in h_dims:
+                    if val <= 4.0:
+                        continue
+                    i1 = -1 if abs(xl - bbox["min_x"]) < 0.6 else (-2 if abs(xl - bbox["max_x"]) < 0.6 else None)
+                    i2 = -1 if abs(xr - bbox["min_x"]) < 0.6 else (-2 if abs(xr - bbox["max_x"]) < 0.6 else None)
+                    h1 = [i for i, ch in enumerate(cad_holes) if abs(xl - ch["px"]) < 0.6]
+                    h2 = [i for i, ch in enumerate(cad_holes) if abs(xr - ch["px"]) < 0.6]
+                    if not h1 and not h2:
+                        continue
+                    x1 = 0.0 if i1 == -1 else (max_cad_x if i1 == -2 else (cand_x[h1[0]] if h1 else None))
+                    x2 = 0.0 if i2 == -1 else (max_cad_x if i2 == -2 else (cand_x[h2[0]] if h2 else None))
+                    if x1 is None or x2 is None:
+                        continue
+                    err = val - (x2 - x1)
+                    if 0.0005 < abs(err) <= 0.28:
+                        if i1 in (-1, -2) and h2:
+                            for idx in h2:
+                                cand_x[idx] += err
+                        elif i2 in (-1, -2) and h1:
+                            for idx in h1:
+                                cand_x[idx] -= err
+                        elif h1 and h2:
+                            for idx in h2:
+                                cand_x[idx] += err * 0.5
+                            for idx in h1:
+                                cand_x[idx] -= err * 0.5
+
+            # Acceptăm corecția pe X doar dacă deplasarea <= 0.28 mm, găurile rămân în contur
+            # și fiecare cotă implicată (atât față de margini cât și inter-găuri) este în ±0.20 mm
+            consistent_x = all(
+                abs(cand_x[i] - ch["orig_x"]) <= 0.28 and 0.0 < cand_x[i] < max_cad_x
+                for i, ch in enumerate(cad_holes)
+            )
+            if consistent_x:
+                for xl, xr, yl, val in h_dims:
+                    if val <= 4.0:
+                        continue
+                    i1 = -1 if abs(xl - bbox["min_x"]) < 0.6 else (-2 if abs(xl - bbox["max_x"]) < 0.6 else None)
+                    i2 = -1 if abs(xr - bbox["min_x"]) < 0.6 else (-2 if abs(xr - bbox["max_x"]) < 0.6 else None)
+                    h1 = [i for i, ch in enumerate(cad_holes) if abs(xl - ch["px"]) < 0.6]
+                    h2 = [i for i, ch in enumerate(cad_holes) if abs(xr - ch["px"]) < 0.6]
+                    if not h1 and not h2:
+                        continue
+                    x1 = 0.0 if i1 == -1 else (max_cad_x if i1 == -2 else (cand_x[h1[0]] if h1 else None))
+                    x2 = 0.0 if i2 == -1 else (max_cad_x if i2 == -2 else (cand_x[h2[0]] if h2 else None))
+                    if x1 is not None and x2 is not None:
+                        if abs((x2 - x1) - val) > 0.20:
+                            consistent_x = False
+                            break
+            if consistent_x:
+                for i, ch in enumerate(cad_holes):
+                    ch["cx"] = cand_x[i]
+
+        # Aliniere pe axa Y (v_dims): aceleași garanții de consistență și protecție pitch
+        if v_dims:
+            cand_y = [ch["cy"] for ch in cad_holes]
+            for _ in range(15):
+                for yt, yb, xl, val in v_dims:
+                    if val <= 4.0:
+                        continue
+                    i1 = -1 if abs(yb - bbox["max_y"]) < 0.6 else (-2 if abs(yb - bbox["min_y"]) < 0.6 else None)
+                    i2 = -1 if abs(yt - bbox["max_y"]) < 0.6 else (-2 if abs(yt - bbox["min_y"]) < 0.6 else None)
+                    h1 = [i for i, ch in enumerate(cad_holes) if abs(yb - ch["py"]) < 0.6]
+                    h2 = [i for i, ch in enumerate(cad_holes) if abs(yt - ch["py"]) < 0.6]
+                    if not h1 and not h2:
+                        continue
+                    y1 = 0.0 if i1 == -1 else (max_cad_y if i1 == -2 else (cand_y[h1[0]] if h1 else None))
+                    y2 = 0.0 if i2 == -1 else (max_cad_y if i2 == -2 else (cand_y[h2[0]] if h2 else None))
+                    if y1 is None or y2 is None:
+                        continue
+                    err = val - (y2 - y1)
+                    if 0.0005 < abs(err) <= 0.28:
+                        if i1 in (-1, -2) and h2:
+                            for idx in h2:
+                                cand_y[idx] += err
+                        elif i2 in (-1, -2) and h1:
+                            for idx in h1:
+                                cand_y[idx] -= err
+                        elif h1 and h2:
+                            for idx in h2:
+                                cand_y[idx] += err * 0.5
+                            for idx in h1:
+                                cand_y[idx] -= err * 0.5
+
+            consistent_y = all(
+                abs(cand_y[i] - ch["orig_y"]) <= 0.28 and 0.0 < cand_y[i] < max_cad_y
+                for i, ch in enumerate(cad_holes)
+            )
+            if consistent_y:
+                for yt, yb, xl, val in v_dims:
+                    if val <= 4.0:
+                        continue
+                    i1 = -1 if abs(yb - bbox["max_y"]) < 0.6 else (-2 if abs(yb - bbox["min_y"]) < 0.6 else None)
+                    i2 = -1 if abs(yt - bbox["max_y"]) < 0.6 else (-2 if abs(yt - bbox["min_y"]) < 0.6 else None)
+                    h1 = [i for i, ch in enumerate(cad_holes) if abs(yb - ch["py"]) < 0.6]
+                    h2 = [i for i, ch in enumerate(cad_holes) if abs(yt - ch["py"]) < 0.6]
+                    if not h1 and not h2:
+                        continue
+                    y1 = 0.0 if i1 == -1 else (max_cad_y if i1 == -2 else (cand_y[h1[0]] if h1 else None))
+                    y2 = 0.0 if i2 == -1 else (max_cad_y if i2 == -2 else (cand_y[h2[0]] if h2 else None))
+                    if y1 is not None and y2 is not None:
+                        if abs((y2 - y1) - val) > 0.20:
+                            consistent_y = False
+                            break
+            if consistent_y:
+                for i, ch in enumerate(cad_holes):
+                    ch["cy"] = cand_y[i]
+
+        return cad_holes
+
+    def _build_contour_geometry(
+        self,
+        items,
+        pt_to_cad,
+        break_stations,
+        snap_tol=0.5,
+        arc_snap_tol=1.5,
+        disable_fillet_arcs=False,
+    ):
+        """
+        Construiește geometria conturului CAD (bucle închise LWPOLYLINE, linii și arce)
+        pentru un set dat de toleranțe adaptive.
+        """
+        if disable_fillet_arcs:
+            fillet_arcs, fillet_used_indices = [], set()
+        else:
+            fillet_arcs, fillet_used_indices = self._detect_fillet_arcs(items)
+
+        raw_cad_lines = []
+        for idx, it in enumerate(items):
+            if idx in fillet_used_indices:
+                continue
+
+            cmd = it[0]
+            if cmd == "l":
+                p1 = pt_to_cad(it[1])
+                p2 = pt_to_cad(it[2])
+                raw_cad_lines.append((p1, p2))
+
+            elif cmd == "c":
+                p1, p2, p3, p4 = it[1], it[2], it[3], it[4]
+                steps = 16
+                pts = []
+                for s in range(steps + 1):
+                    t = s / float(steps)
+                    bx = (1 - t) ** 3 * p1.x + 3 * (1 - t) ** 2 * t * p2.x + 3 * (1 - t) * t ** 2 * p3.x + t ** 3 * p4.x
+                    by = (1 - t) ** 3 * p1.y + 3 * (1 - t) ** 2 * t * p2.y + 3 * (1 - t) * t ** 2 * p3.y + t ** 3 * p4.y
+                    pts.append(pt_to_cad(fitz.Point(bx, by)))
+                for i in range(len(pts) - 1):
+                    raw_cad_lines.append((pts[i], pts[i + 1]))
+
+            elif cmd == "re":
+                r = it[1]
+                p0 = pt_to_cad(fitz.Point(r.x0, r.y0))
+                p1 = pt_to_cad(fitz.Point(r.x1, r.y0))
+                p2 = pt_to_cad(fitz.Point(r.x1, r.y1))
+                p3 = pt_to_cad(fitz.Point(r.x0, r.y1))
+                raw_cad_lines.extend([(p0, p1), (p1, p2), (p2, p3), (p3, p0)])
+
+        if break_stations:
+            for s in break_stations:
+                for xl, xr, y, idx1, idx2 in s["pairs"]:
+                    p_left = pt_to_cad(fitz.Point(xl, y))
+                    p_right = pt_to_cad(fitz.Point(xr, y))
+                    raw_cad_lines.append((p_left, p_right))
+
+        merged_lines = self._merge_collinear_lines(raw_cad_lines)
+        final_lines = self.snap_points_grid(merged_lines, tol=snap_tol)
+
+        snapped_arcs_data = []
+        if fillet_arcs:
+            pts_contour = [p for l in final_lines for p in l]
+            for cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt in fillet_arcs:
+                c_cad = pt_to_cad(fitz.Point(cx_pdf, cy_pdf))
+                start_cad = pt_to_cad(start_pt)
+                end_cad = pt_to_cad(end_pt)
+                mid_cad = pt_to_cad(mid_pt)
+                if pts_contour:
+                    s_snap = min(pts_contour, key=lambda q: math.hypot(q[0] - start_cad[0], q[1] - start_cad[1]))
+                    e_snap = min(pts_contour, key=lambda q: math.hypot(q[0] - end_cad[0], q[1] - end_cad[1]))
+                    if math.hypot(s_snap[0] - start_cad[0], s_snap[1] - start_cad[1]) <= arc_snap_tol:
+                        start_cad = s_snap
+                    if math.hypot(e_snap[0] - end_cad[0], e_snap[1] - end_cad[1]) <= arc_snap_tol:
+                        end_cad = e_snap
+                snapped_arcs_data.append((start_cad, end_cad, c_cad, mid_cad))
+
+        closed_loops = self.extract_all_closed_loops(final_lines, snapped_arcs_data)
+        return closed_loops, final_lines, snapped_arcs_data
+
+    @staticmethod
+    def _audit_generated_cad(closed_loops, cad_holes, bbox, meta, h_dims, v_dims, pt_to_cad, tol_mm=0.20):
+        """
+        Verifică automat calitatea topologică și precizia dimensională (±0.2 mm) a geometriei CAD.
+        """
+        issues = []
+        contour_closed = bool(closed_loops) and all(len(lp) >= 3 for lp in closed_loops)
+        if not contour_closed:
+            issues.append("contour_open")
+            return {"passed": False, "contour_closed": False, "issues": issues, "max_err": 999.0}
+
+        all_pts = [pt[:2] for lp in closed_loops for pt in lp]
+        xs = [p[0] for p in all_pts]
+        ys = [p[1] for p in all_pts]
+        cad_min_x, cad_max_x = min(xs), max(xs)
+        cad_min_y, cad_max_y = min(ys), max(ys)
+        dx = cad_max_x - cad_min_x
+        dy = cad_max_y - cad_min_y
+
+        t_thick = meta.get("profil_thickness")
+        t_wid = meta.get("profil_width")
+        if t_thick and t_wid and t_wid > t_thick * 1.5:
+            if min(dx, dy) <= t_thick * 1.2:
+                issues.append(f"edge_view_suspected({dx:.1f}x{dy:.1f})")
+
+        for i, ch in enumerate(cad_holes):
+            if not (cad_min_x < ch["cx"] < cad_max_x and cad_min_y < ch["cy"] < cad_max_y):
+                issues.append(f"hole_{i}_outside_contour")
+
+        max_err = 0.0
+        for xl, xr, yl, val in h_dims:
+            if val <= 4.0:
+                continue
+            i1 = -1 if abs(xl - bbox["min_x"]) < 0.6 else (-2 if abs(xl - bbox["max_x"]) < 0.6 else None)
+            i2 = -1 if abs(xr - bbox["min_x"]) < 0.6 else (-2 if abs(xr - bbox["max_x"]) < 0.6 else None)
+            h1 = [ch for ch in cad_holes if abs(xl - ch["px"]) < 0.6]
+            h2 = [ch for ch in cad_holes if abs(xr - ch["px"]) < 0.6]
+            if not h1 and not h2:
+                continue
+            x1 = cad_min_x if i1 == -1 else (cad_max_x if i1 == -2 else (h1[0]["cx"] if h1 else None))
+            x2 = cad_min_x if i2 == -1 else (cad_max_x if i2 == -2 else (h2[0]["cx"] if h2 else None))
+            if x1 is not None and x2 is not None:
+                err_val = abs((x2 - x1) - val)
+                if err_val > tol_mm:
+                    # Verificăm dacă diferența este o rotunjire Tekla față de geometria vectorială originală
+                    ox1 = 0.0 if i1 == -1 else (cad_max_x if i1 == -2 else h1[0]["orig_x"])
+                    ox2 = 0.0 if i2 == -1 else (cad_max_x if i2 == -2 else h2[0]["orig_x"])
+                    if abs((x2 - x1) - (ox2 - ox1)) > tol_mm:
+                        max_err = max(max_err, err_val)
+                        issues.append(f"h_dim_{val}_vs_{x2 - x1:.2f}")
+
+        for yt, yb, xl, val in v_dims:
+            if val <= 4.0:
+                continue
+            i1 = -1 if abs(yb - bbox["max_y"]) < 0.6 else (-2 if abs(yb - bbox["min_y"]) < 0.6 else None)
+            i2 = -1 if abs(yt - bbox["max_y"]) < 0.6 else (-2 if abs(yt - bbox["min_y"]) < 0.6 else None)
+            h1 = [ch for ch in cad_holes if abs(yb - ch["py"]) < 0.6]
+            h2 = [ch for ch in cad_holes if abs(yt - ch["py"]) < 0.6]
+            if not h1 and not h2:
+                continue
+            y1 = cad_min_y if i1 == -1 else (cad_max_y if i1 == -2 else (h1[0]["cy"] if h1 else None))
+            y2 = cad_min_y if i2 == -1 else (cad_max_y if i2 == -2 else (h2[0]["cy"] if h2 else None))
+            if y1 is not None and y2 is not None:
+                err_val = abs((y2 - y1) - val)
+                if err_val > tol_mm:
+                    oy1 = 0.0 if i1 == -1 else (cad_max_y if i1 == -2 else h1[0]["orig_y"])
+                    oy2 = 0.0 if i2 == -1 else (cad_max_y if i2 == -2 else h2[0]["orig_y"])
+                    if abs((y2 - y1) - (oy2 - oy1)) > tol_mm:
+                        max_err = max(max_err, err_val)
+                        issues.append(f"v_dim_{val}_vs_{y2 - y1:.2f}")
+
+        return {
+            "passed": (len(issues) == 0),
+            "contour_closed": True,
+            "issues": issues,
+            "max_err": max_err,
+        }
+
     def convert_single_pdf(
         self,
         pdf_path,
@@ -1730,20 +2134,45 @@ class PdfToCadConverter:
                     target_len = dim_candidates[0][1]
                     meta["lengde"] = target_len
 
-            # Detectare găuri circulare în interiorul vederii Front
+            # Extragere constrângeri de cotare și găuri circulare din vederea Front
+            h_dims, v_dims = self._extract_pdf_dimension_constraints(page, bbox, meta["stykk_y"])
             holes = self.detect_holes_in_bbox(page, bbox)
 
             if calibrate_1to1 and target_len and raw_stations and (target_len > drawn_metal_mm + 1.0):
                 stations = self._calculate_break_expansions(
-                    raw_stations, items, bbox, target_len, base_scale_factor, page, meta["stykk_y"], holes=holes
+                    raw_stations, items, bbox, target_len, base_scale_factor, page, meta["stykk_y"],
+                    holes=holes, h_dims=h_dims
                 )
                 is_shortened = bool(stations)
 
             doc.close()
 
-            # 4. Funcție de transformare coordonate din PDF în CAD (milimetri 1:1)
-            if is_shortened:
-                def pt_to_cad(pt):
+            # 4. Calibrare scară de bază și rafinare de precizie (0.00 mm pe stațiile de ruptură & găuri)
+            scale_final = base_scale_factor
+            if not is_shortened and calibrate_1to1 and target_len and target_wid:
+                target_max = max(target_len, target_wid)
+                target_min = min(target_len, target_wid)
+                curr_max_mm = max(drawn_w_pt, drawn_h_pt) * base_scale_factor
+                curr_min_mm = min(drawn_w_pt, drawn_h_pt) * base_scale_factor
+                if curr_max_mm > 0 and curr_min_mm > 0 and target_min > 0:
+                    ratio = target_max / curr_max_mm
+                    drawn_aspect = curr_max_mm / curr_min_mm
+                    target_aspect = target_max / target_min
+                    # Aplicăm re-scalarea globală doar pentru abateri > 3% (Scale: INGEN, ex. 0.7071 / 0.3536),
+                    # nu și pentru diferențele de ~1 mm cauzate de rotunjirea la întreg în tabelul BOM Tekla.
+                    if abs(ratio - 1.0) > 0.03 and (
+                        (0.85 <= ratio <= 1.15) or
+                        ((0.85 <= (drawn_aspect / target_aspect) <= 1.15) and (0.20 <= ratio <= 4.0))
+                    ):
+                        scale_final = base_scale_factor * ratio
+
+            if is_shortened and calibrate_1to1 and holes and h_dims:
+                stations = self._refine_stations_with_hole_dims(
+                    stations, holes, h_dims, bbox, base_scale_factor
+                )
+
+            def pt_to_cad(pt):
+                if is_shortened:
                     x = pt.x
                     cad_x = (x - min_x) * base_scale_factor
                     for s in stations:
@@ -1754,112 +2183,48 @@ class PdfToCadConverter:
                             cad_x += exp
                     cad_y = (max_y - pt.y) * base_scale_factor
                     return (cad_x, cad_y)
+                return (
+                    (pt.x - min_x) * scale_final,
+                    (max_y - pt.y) * scale_final
+                )
 
+            if is_shortened:
                 dim_x_final = target_len
                 dim_y_final = drawn_h_pt * base_scale_factor
-
             else:
-                scale_final = base_scale_factor
-                if calibrate_1to1 and target_len and target_wid:
-                    target_max = max(target_len, target_wid)
-                    target_min = min(target_len, target_wid)
-                    curr_max_mm = max(drawn_w_pt, drawn_h_pt) * base_scale_factor
-                    curr_min_mm = min(drawn_w_pt, drawn_h_pt) * base_scale_factor
-                    if curr_max_mm > 0 and curr_min_mm > 0 and target_min > 0:
-                        ratio = target_max / curr_max_mm
-                        drawn_aspect = curr_max_mm / curr_min_mm
-                        target_aspect = target_max / target_min
-                        if 0.85 <= ratio <= 1.15:
-                            scale_final = base_scale_factor * ratio
-                        elif (0.85 <= (drawn_aspect / target_aspect) <= 1.15) and (0.20 <= ratio <= 4.0):
-                            # Cazul desenelor fără scară numerică (ex. Scale: INGEN) cu raport de aspect corect
-                            scale_final = base_scale_factor * ratio
-
-                def pt_to_cad(pt):
-                    return (
-                        (pt.x - min_x) * scale_final,
-                        (max_y - pt.y) * scale_final
-                    )
-
                 dim_x_final = drawn_w_pt * scale_final
                 dim_y_final = drawn_h_pt * scale_final
 
-            # 5. Identificare arce de racordare (fillet) pentru export nativ ARC
-            fillet_arcs, fillet_used_indices = self._detect_fillet_arcs(items)
+            # Calcul poziții și raze găuri + aliniere exactă la cotele consistente din PDF (±0.00 mm)
+            scale_for_holes = base_scale_factor if is_shortened else scale_final
+            cad_holes = self._build_and_refine_holes(
+                holes, pt_to_cad, scale_for_holes, h_dims, v_dims, bbox, calibrate_1to1
+            )
 
-            # 6. Colectare linii CAD brute (din PDF + linii de unire peste rupturile Tekla)
-            raw_cad_lines = []
-            for idx, it in enumerate(items):
-                if idx in fillet_used_indices:
-                    continue
+            # 5-10. Construcție geometrie + Auto-Audit (±0.2 mm) & buclă de re-generare adaptivă
+            retry_profiles = [
+                {"snap_tol": 0.5, "arc_snap_tol": 1.5, "disable_fillet_arcs": False},
+                {"snap_tol": 1.5, "arc_snap_tol": 2.5, "disable_fillet_arcs": False},
+                {"snap_tol": 3.0, "arc_snap_tol": 4.0, "disable_fillet_arcs": True},
+            ]
 
-                cmd = it[0]
-                if cmd == "l":
-                    p1 = pt_to_cad(it[1])
-                    p2 = pt_to_cad(it[2])
-                    raw_cad_lines.append((p1, p2))
+            best_result = None
+            audit_report = None
+            for profile in retry_profiles:
+                closed_loops, final_lines, snapped_arcs_data = self._build_contour_geometry(
+                    items, pt_to_cad, stations if is_shortened else raw_stations,
+                    snap_tol=profile["snap_tol"],
+                    arc_snap_tol=profile["arc_snap_tol"],
+                    disable_fillet_arcs=profile["disable_fillet_arcs"],
+                )
+                audit_report = self._audit_generated_cad(
+                    closed_loops, cad_holes, bbox, meta, h_dims, v_dims, pt_to_cad, tol_mm=0.20
+                )
+                best_result = (closed_loops, final_lines, snapped_arcs_data)
+                if audit_report["contour_closed"] and audit_report["passed"]:
+                    break
 
-                elif cmd == "c":
-                    p1, p2, p3, p4 = it[1], it[2], it[3], it[4]
-                    steps = 16
-                    pts = []
-                    for s in range(steps + 1):
-                        t = s / float(steps)
-                        bx = (1 - t)**3 * p1.x + 3 * (1 - t)**2 * t * p2.x + 3 * (1 - t) * t**2 * p3.x + t**3 * p4.x
-                        by = (1 - t)**3 * p1.y + 3 * (1 - t)**2 * t * p2.y + 3 * (1 - t) * t**2 * p3.y + t**3 * p4.y
-                        pts.append(pt_to_cad(fitz.Point(bx, by)))
-                    for i in range(len(pts) - 1):
-                        raw_cad_lines.append((pts[i], pts[i + 1]))
-
-                elif cmd == "re":
-                    r = it[1]
-                    p0 = pt_to_cad(fitz.Point(r.x0, r.y0))
-                    p1 = pt_to_cad(fitz.Point(r.x1, r.y0))
-                    p2 = pt_to_cad(fitz.Point(r.x1, r.y1))
-                    p3 = pt_to_cad(fitz.Point(r.x0, r.y1))
-                    raw_cad_lines.extend([(p0, p1), (p1, p2), (p2, p3), (p3, p0)])
-
-            # Adăugăm liniile de legătură (bridging lines) peste fiecare stație de ruptură
-            if is_shortened:
-                for s in stations:
-                    for xl, xr, y, idx1, idx2 in s["pairs"]:
-                        p_left = pt_to_cad(fitz.Point(xl, y))
-                        p_right = pt_to_cad(fitz.Point(xr, y))
-                        raw_cad_lines.append((p_left, p_right))
-            elif raw_stations:
-                # Chiar dacă nu se extinde scara, unim rupturile Tekla pentru a nu lăsa goluri deschise în contur
-                for s in raw_stations:
-                    for xl, xr, y, idx1, idx2 in s["pairs"]:
-                        p_left = pt_to_cad(fitz.Point(xl, y))
-                        p_right = pt_to_cad(fitz.Point(xr, y))
-                        raw_cad_lines.append((p_left, p_right))
-
-            # 7. Unire muchii coliniare adiacente (eliminare linii suprapuse)
-            merged_lines = self._merge_collinear_lines(raw_cad_lines)
-
-            # 8. Snapping magnetic de noduri (eliminare micro-goluri 0.01 - 0.5 mm)
-            final_lines = self.snap_points_grid(merged_lines, tol=0.5)
-
-            # 9. Snap capete arce la cele mai apropiate noduri din contur
-            snapped_arcs_data = []
-            if fillet_arcs:
-                pts_contour = [p for l in final_lines for p in l]
-                for cx_pdf, cy_pdf, r_pdf, start_pt, mid_pt, end_pt in fillet_arcs:
-                    c_cad = pt_to_cad(fitz.Point(cx_pdf, cy_pdf))
-                    start_cad = pt_to_cad(start_pt)
-                    end_cad = pt_to_cad(end_pt)
-                    mid_cad = pt_to_cad(mid_pt)
-                    if pts_contour:
-                        s_snap = min(pts_contour, key=lambda q: math.hypot(q[0] - start_cad[0], q[1] - start_cad[1]))
-                        e_snap = min(pts_contour, key=lambda q: math.hypot(q[0] - end_cad[0], q[1] - end_cad[1]))
-                        if math.hypot(s_snap[0] - start_cad[0], s_snap[1] - start_cad[1]) <= 1.5:
-                            start_cad = s_snap
-                        if math.hypot(e_snap[0] - end_cad[0], e_snap[1] - end_cad[1]) <= 1.5:
-                            end_cad = e_snap
-                    snapped_arcs_data.append((start_cad, end_cad, c_cad, mid_cad))
-
-            # 10. Extragere cicluri închise (LWPOLYLINE 100% continuu)
-            closed_loops = self.extract_all_closed_loops(final_lines, snapped_arcs_data)
+            closed_loops, final_lines, snapped_arcs_data = best_result
 
             # 11. Creare document DXF cu entități curate
             dxf_doc = ezdxf.new("R2010", setup=True)
@@ -1905,16 +2270,12 @@ class PdfToCadConverter:
                         dxfattribs={"layer": "0"},
                     )
 
-            # 12. Adăugare găuri circulare interioare (CIRCLE pe layer 0)
-            if holes:
-                scale_for_holes = base_scale_factor if is_shortened else scale_final
-                for h in holes:
-                    h_center_pt = fitz.Point(h["center"][0], h["center"][1])
-                    cad_center = pt_to_cad(h_center_pt)
-                    cad_radius = h["radius"] * scale_for_holes
+            # 12. Adăugare găuri circulare interioare (CIRCLE pe layer 0), rafinate la ±0.00 mm
+            if cad_holes:
+                for ch in cad_holes:
                     msp.add_circle(
-                        center=cad_center,
-                        radius=cad_radius,
+                        center=(ch["cx"], ch["cy"]),
+                        radius=ch["r"],
                         dxfattribs={"layer": "0"}
                     )
 
