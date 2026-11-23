@@ -203,6 +203,7 @@ class ChesonConfig:
     arc_segments_per_90deg: int = 16
     strip_cnc_corner_loops: bool = True
     corner_relief_radius_max_mm: float = 5.0
+    strip_residual_fragments: bool = True
     min_segment_length_mm: float = 0.05
     lowercase_piece_prefix: bool = True
     flange_letter: str = "C"
@@ -215,12 +216,14 @@ class ChesonConfig:
         exact_gabarit_lock: bool = True,
         target_length_mm: Optional[float] = None,
         override_web_height_mm: Optional[float] = None,
+        strip_residual_fragments: bool = True,
     ) -> "ChesonConfig":
         key = (preset or "auto").strip().lower()
         common = {
             "exact_gabarit_lock": exact_gabarit_lock,
             "target_length_mm": target_length_mm,
             "override_web_height_mm": override_web_height_mm,
+            "strip_residual_fragments": strip_residual_fragments,
         }
         if key in ("auto", "auto_detect"):
             return cls(cheson_type="auto", **common)
@@ -285,6 +288,7 @@ class ExtractedPlate:
     inner_contours: list[list[tuple[float, float]]] = field(default_factory=list)
     markings: list[DSTVMarking] = field(default_factory=list)
     source_bounds: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    removed_residuals: int = 0
 
     @property
     def bounds(self) -> tuple[float, float, float, float]:
@@ -546,6 +550,229 @@ def mirror_ring(
 
 def translate_ring(ring: Ring, dx: float, dy: float) -> Ring:
     return [(x + dx, y + dy) for x, y in ring]
+
+
+def _cw_angle_from_back(dx_in: float, dy_in: float, dx_out: float, dy_out: float) -> float:
+    ang_back = math.atan2(-dy_in, -dx_in)
+    ang_out = math.atan2(dy_out, dx_out)
+    cw = (ang_back - ang_out) % (2.0 * math.pi)
+    return cw if cw > 1e-9 else 2.0 * math.pi
+
+
+def _prune_thin_horizontal_slabs(
+    ring: Ring,
+    max_sliver_mm: float,
+    min_seg_len: float = 0.05,
+) -> tuple[list[Ring], int]:
+    """Remove horizontal sliver strips (height <= max_sliver_mm) via vertical X-slab decomposition."""
+    if len(ring) < 3 or max_sliver_mm <= 0.0:
+        return [ring] if len(ring) >= 3 else [], 0
+
+    minx, miny, maxx, maxy = polygon_bounds(ring)
+    if min(maxx - minx, maxy - miny) <= max_sliver_mm:
+        return [], 1
+
+    raw_xs = sorted(p[0] for p in ring)
+    xs: list[float] = [raw_xs[0]]
+    for x in raw_xs[1:]:
+        if x - xs[-1] > 1e-6:
+            xs.append(x)
+    if len(xs) < 2:
+        return [ring], 0
+
+    # (x_l, x_r, bot_yl, bot_yr, top_yl, top_yr)
+    kept: list[tuple[float, float, float, float, float, float]] = []
+    dropped_count = 0
+    n = len(ring)
+
+    for idx in range(len(xs) - 1):
+        x_l, x_r = xs[idx], xs[idx + 1]
+        dx = x_r - x_l
+        if dx <= 1e-5:
+            continue
+        x_mid = 0.5 * (x_l + x_r)
+        crossings: list[tuple[float, float, float, float]] = []
+        for i in range(n):
+            x1, y1 = ring[i]
+            x2, y2 = ring[(i + 1) % n]
+            lo_x, hi_x = (x1, x2) if x1 < x2 else (x2, x1)
+            if lo_x < x_mid < hi_x:
+                inv_dx = 1.0 / (x2 - x1)
+                y_l = y1 + (x_l - x1) * (y2 - y1) * inv_dx
+                y_m = y1 + (x_mid - x1) * (y2 - y1) * inv_dx
+                y_r = y1 + (x_r - x1) * (y2 - y1) * inv_dx
+                slope = (y2 - y1) * inv_dx
+                crossings.append((y_m, y_l, y_r, slope))
+        if len(crossings) < 2:
+            continue
+        crossings.sort(key=lambda c: c[0])
+        for j in range(0, len(crossings) - 1, 2):
+            _, bot_yl, bot_yr, bot_slope = crossings[j]
+            _, top_yl, top_yr, top_slope = crossings[j + 1]
+            h_l = top_yl - bot_yl
+            h_r = top_yr - bot_yr
+            is_sliver = (
+                min(h_l, h_r) > 0.05
+                and max(h_l, h_r) <= max_sliver_mm
+                and max(abs(bot_slope), abs(top_slope)) < 0.25
+            )
+            if is_sliver:
+                dropped_count += 1
+            else:
+                kept.append((x_l, x_r, bot_yl, bot_yr, top_yl, top_yr))
+
+    if dropped_count == 0:
+        return [ring], 0
+    if not kept:
+        return [], dropped_count
+
+    def _vkey(pt: tuple[float, float]) -> tuple[float, float]:
+        return (round(pt[0], 4), round(pt[1], 4))
+
+    edges: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    slab_xs_raw = sorted({t[0] for t in kept} | {t[1] for t in kept})
+    slab_xs: list[float] = []
+    for x in slab_xs_raw:
+        if not slab_xs or x - slab_xs[-1] > 1e-6:
+            slab_xs.append(x)
+
+    for x_l, x_r, bot_yl, bot_yr, top_yl, top_yr in kept:
+        edges.append(((x_l, bot_yl), (x_r, bot_yr)))
+        edges.append(((x_r, top_yr), (x_l, top_yl)))
+
+    for x_k in slab_xs:
+        up_iv = [
+            (byr, tyr)
+            for xl, xr, _, byr, _, tyr in kept
+            if abs(xr - x_k) <= 1e-6 and tyr - byr > 1e-6
+        ]
+        dn_iv = [
+            (byl, tyl)
+            for xl, xr, byl, _, tyl, _ in kept
+            if abs(xl - x_k) <= 1e-6 and tyl - byl > 1e-6
+        ]
+        if not up_iv and not dn_iv:
+            continue
+        ys_raw = sorted(
+            [v for a, b in up_iv for v in (a, b)]
+            + [v for a, b in dn_iv for v in (a, b)]
+        )
+        ys_k: list[float] = [ys_raw[0]]
+        for yv in ys_raw[1:]:
+            if yv - ys_k[-1] > 1e-6:
+                ys_k.append(yv)
+
+        up_segs: list[list[float]] = []
+        dn_segs: list[list[float]] = []
+        for idx_y in range(len(ys_k) - 1):
+            ya, yb = ys_k[idx_y], ys_k[idx_y + 1]
+            if yb - ya <= 1e-6:
+                continue
+            ym = 0.5 * (ya + yb)
+            net = sum(1 for a, b in up_iv if a < ym < b) - sum(1 for a, b in dn_iv if a < ym < b)
+            if net > 0:
+                if up_segs and abs(up_segs[-1][1] - ya) <= 1e-6:
+                    up_segs[-1][1] = yb
+                else:
+                    up_segs.append([ya, yb])
+            elif net < 0:
+                if dn_segs and abs(dn_segs[-1][1] - ya) <= 1e-6:
+                    dn_segs[-1][1] = yb
+                else:
+                    dn_segs.append([ya, yb])
+
+        for ya, yb in up_segs:
+            edges.append(((x_k, ya), (x_k, yb)))
+        for ya, yb in dn_segs:
+            edges.append(((x_k, yb), (x_k, ya)))
+
+    if len(edges) < 3:
+        return [], dropped_count
+
+    adj: dict[tuple[float, float], list[int]] = {}
+    for e_idx, (p_start, _) in enumerate(edges):
+        adj.setdefault(_vkey(p_start), []).append(e_idx)
+
+    used = [False] * len(edges)
+    loops: list[Ring] = []
+
+    for start_idx in range(len(edges)):
+        if used[start_idx]:
+            continue
+        loop_pts: Ring = []
+        curr_idx = start_idx
+        start_key = _vkey(edges[start_idx][0])
+        steps = 0
+        max_steps = len(edges) + 2
+        closed = False
+
+        while steps < max_steps:
+            steps += 1
+            used[curr_idx] = True
+            p_a, p_b = edges[curr_idx]
+            loop_pts.append(p_a)
+            next_key = _vkey(p_b)
+            if next_key == start_key:
+                closed = True
+                break
+            candidates = [i for i in adj.get(next_key, []) if not used[i]]
+            if not candidates:
+                break
+            if len(candidates) == 1:
+                curr_idx = candidates[0]
+            else:
+                dx_in = p_b[0] - p_a[0]
+                dy_in = p_b[1] - p_a[1]
+                curr_idx = min(
+                    candidates,
+                    key=lambda ci: _cw_angle_from_back(
+                        dx_in,
+                        dy_in,
+                        edges[ci][1][0] - edges[ci][0][0],
+                        edges[ci][1][1] - edges[ci][0][1],
+                    ),
+                )
+
+        if closed and len(loop_pts) >= 3 and polygon_area(loop_pts) > 0.1:
+            cleaned = clean_ring(loop_pts, min_seg_len=min_seg_len, ccw=True)
+            if len(cleaned) >= 3 and abs(polygon_area(cleaned)) > 0.1:
+                b = polygon_bounds(cleaned)
+                if min(b[2] - b[0], b[3] - b[1]) <= max_sliver_mm:
+                    dropped_count += 1
+                else:
+                    loops.append(cleaned)
+
+    return loops, dropped_count
+
+
+def remove_residual_fragments(
+    ring: Ring,
+    plate_thickness_mm: float,
+    min_seg_len: float = 0.05,
+) -> tuple[list[Ring], int]:
+    """Strip residual ears/tabs whose thickness is <= plate_thickness_mm (both axes)."""
+    if len(ring) < 3 or plate_thickness_mm <= 0.0:
+        return [ring] if len(ring) >= 3 else [], 0
+
+    max_sliver = float(plate_thickness_mm) + 0.01
+    rings_x, rem_x = _prune_thin_horizontal_slabs(ring, max_sliver, min_seg_len=min_seg_len)
+
+    rings_xy: list[Ring] = []
+    rem_y = 0
+    for r in rings_x:
+        # Reflect (x, y) -> (y, x) and reverse order so CCW orientation is preserved
+        swapped = [(y, x) for x, y in reversed(r)]
+        sub_y, cnt_y = _prune_thin_horizontal_slabs(swapped, max_sliver, min_seg_len=min_seg_len)
+        rem_y += cnt_y
+        for sr in sub_y:
+            restored = [(y, x) for x, y in reversed(sr)]
+            cleaned = clean_ring(restored, min_seg_len=min_seg_len, ccw=True)
+            if len(cleaned) >= 3 and abs(polygon_area(cleaned)) > 0.1:
+                rings_xy.append(cleaned)
+
+    if rem_x == 0 and rem_y == 0:
+        return [ring], 0
+    return rings_xy, rem_x + rem_y
 
 
 def clean_piece_name(piece_id: str, lowercase: bool = True) -> str:
@@ -1087,8 +1314,8 @@ def detect_cheson_type(
 
     dy_o = _face_y_span(dstv, "o", cfg) or spec.b_top
     dy_u = _face_y_span(dstv, "u", cfg) or spec.b_bot
-    bot_wider = (spec.b_bot > spec.b_top + 2.0 * tw + 1.0) or (dy_u > dy_o + 2.0 * tw + 1.0)
-    top_wider = (spec.b_top > spec.b_bot + 2.0 * tw + 1.0) or (dy_o > dy_u + 2.0 * tw + 1.0)
+    bot_wider = (spec.b_bot >= spec.b_top + 2.0 * tw - 0.5) or (dy_u > dy_o + 2.0 * tw + 1.0)
+    top_wider = (spec.b_top >= spec.b_bot + 2.0 * tw - 0.5) or (dy_o > dy_u + 2.0 * tw + 1.0)
     talpa_side = "top" if top_wider and not bot_wider else ("bottom" if bot_wider else "none")
 
     if explicit != "auto":
@@ -1167,12 +1394,13 @@ def _apply_gabarit_x_lock_to_rings(
     x_min_env: float,
     l_nc1: float,
     l_gabarit: float,
+    max_delta_mm: float = 20.0,
 ) -> dict[str, list[Ring]]:
     """Shift right-half vertices by delta_L and snap non-skewed left boundary jitter (<=0.25mm) to x_min_env."""
     if l_nc1 <= 1e-3:
         return rings_by_face
     delta_l = l_gabarit - l_nc1
-    apply_delta = abs(delta_l) <= 10.0
+    apply_delta = abs(delta_l) <= max_delta_mm
     mid_x = x_min_env + 0.5 * l_nc1
 
     # Determine if left/right ends have intentional skew on flanges
@@ -1215,17 +1443,21 @@ def _estimate_end_skew_angles(
             for ring in rings_by_face.get(face, []):
                 if len(ring) < 3:
                     continue
-                minx, _, maxx, _ = polygon_bounds(ring)
+                minx, miny, maxx, maxy = polygon_bounds(ring)
                 n = len(ring)
                 for i in range(n):
                     p1, p2 = ring[i], ring[(i + 1) % n]
                     dy = abs(p2[1] - p1[1])
                     dx = abs(p2[0] - p1[0])
-                    if dy > 20.0 and dx > 0.5:
-                        x_mid = 0.5 * (p1[0] + p2[0])
-                        if start_tan == 0.0 and abs(x_mid - minx) < 0.25 * (maxx - minx):
+                    if (
+                        dy > 20.0
+                        and dx > 0.5
+                        and min(p1[1], p2[1]) <= miny + 1.0
+                        and max(p1[1], p2[1]) >= maxy - 1.0
+                    ):
+                        if start_tan == 0.0 and min(p1[0], p2[0]) <= minx + 1.0:
                             start_tan = dx / dy
-                        elif end_tan == 0.0 and abs(x_mid - maxx) < 0.25 * (maxx - minx):
+                        elif end_tan == 0.0 and max(p1[0], p2[0]) >= maxx - 1.0:
                             end_tan = dx / dy
     return start_tan, end_tan
 
@@ -1592,7 +1824,11 @@ def verify_cheson_decomposition(
             len_edge_b = max(bot_xs) - min(bot_xs)
             f_long = max(len_edge_a, len_edge_b)
             f_short = min(len_edge_a, len_edge_b)
-            web_lens = sorted({round(wp.bounds[2] - wp.bounds[0], 4) for wp in webs})
+            full_webs = [
+                wp for wp in webs
+                if wp.removed_residuals == 0 and (wp.bounds[2] - wp.bounds[0]) >= f_short - 5.0
+            ]
+            web_lens = sorted({round(wp.bounds[2] - wp.bounds[0], 4) for wp in full_webs})
             if len(web_lens) == 1:
                 contact_err = max(abs(web_lens[0] - f_long), abs(web_lens[0] - f_short))
             elif len(web_lens) >= 2:
@@ -1649,7 +1885,10 @@ def decompose_compound_nc1(
     l_gabarit, l_source_label = _resolve_gabarit_length(l_nc1_raw, cfg)
 
     if cfg.exact_gabarit_lock:
-        locked_rings = _apply_gabarit_x_lock_to_rings(raw_rings, x_min_env, l_nc1_raw, l_gabarit)
+        max_delta = 100.0 if (cfg.target_length_mm is not None and cfg.target_length_mm > 0.0) else 20.0
+        locked_rings = _apply_gabarit_x_lock_to_rings(
+            raw_rings, x_min_env, l_nc1_raw, l_gabarit, max_delta_mm=max_delta
+        )
     else:
         locked_rings = raw_rings
 
@@ -1695,7 +1934,8 @@ def decompose_compound_nc1(
         ("u", u_role, spec.tf_bot, bot_over, cfg.mirror_flange_u_y, u_suffix),
     ]
     for face, role, thick, is_over, mirror_y, suffix in flange_specs:
-        for idx_c, ring in enumerate(locked_rings.get(face, [])):
+        flange_part_idx = 0
+        for ring in locked_rings.get(face, []):
             _, f_miny, _, f_maxy = polygon_bounds(ring)
             f_span = f_maxy - f_miny
             if (not is_over) and f_span > 2.0 * tw + 1.0:
@@ -1709,31 +1949,42 @@ def decompose_compound_nc1(
             if len(ring) < 3 or abs(polygon_area(ring)) <= 0.1:
                 continue
             ring = _apply_length_offset(ring, cfg.length_offset_mm)
-            clipped_flanges_by_face[face].append(ring)
-
-            plate_suffix = suffix if idx_c == 0 else f"{suffix}_{idx_c + 1}"
-            s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
-                ring, face=face, dstv=dstv, cfg=cfg, mirror_x=False, mirror_y=mirror_y
-            )
-            t_int = int(round(thick))
-            plates.append(
-                ExtractedPlate(
-                    name=f"{piece_clean}{plate_suffix}",
-                    folder=f"T{t_int}",
-                    role=role,
-                    face=face,
-                    thickness=thick,
-                    piece_id=header.piece_id,
-                    piece_clean=piece_clean,
-                    material=header.material,
-                    quantity=header.quantity,
-                    exterior=s_ext,
-                    holes=s_holes,
-                    inner_contours=s_inners,
-                    markings=s_marks,
-                    source_bounds=orig_b,
+            if cfg.strip_residual_fragments:
+                sub_rings, rem_cnt = remove_residual_fragments(
+                    ring, thick, min_seg_len=cfg.min_segment_length_mm
                 )
-            )
+            else:
+                sub_rings, rem_cnt = [ring], 0
+
+            for sub_ring in sub_rings:
+                if len(sub_ring) < 3 or abs(polygon_area(sub_ring)) <= 0.1:
+                    continue
+                clipped_flanges_by_face[face].append(sub_ring)
+                plate_suffix = suffix if flange_part_idx == 0 else f"{suffix}_{flange_part_idx + 1}"
+                flange_part_idx += 1
+                s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
+                    sub_ring, face=face, dstv=dstv, cfg=cfg, mirror_x=False, mirror_y=mirror_y
+                )
+                t_int = int(round(thick))
+                plates.append(
+                    ExtractedPlate(
+                        name=f"{piece_clean}{plate_suffix}",
+                        folder=f"T{t_int}",
+                        role=role,
+                        face=face,
+                        thickness=thick,
+                        piece_id=header.piece_id,
+                        piece_clean=piece_clean,
+                        material=header.material,
+                        quantity=header.quantity,
+                        exterior=s_ext,
+                        holes=s_holes,
+                        inner_contours=s_inners,
+                        markings=s_marks,
+                        source_bounds=orig_b,
+                        removed_residuals=rem_cnt,
+                    )
+                )
 
     # Reference flange contact intersections for skewed ends (prefer top capac 'o' or 'u')
     ref_flange_face = "o" if (clipped_flanges_by_face["o"] and not top_over) else (
@@ -1752,8 +2003,11 @@ def decompose_compound_nc1(
     v_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("v", [])), default=0.0)
     h_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("h", [])), default=0.0)
 
+    eff_start_tan = start_tan if abs(v_xmin - h_xmin) > 0.5 else 0.0
+    eff_end_tan = end_tan if abs(v_xmax - h_xmax) > 0.5 else 0.0
+
     # 3. Webs: v (front) and h (back)
-    raw_webs: list[tuple[str, Ring]] = []
+    raw_webs: list[tuple[str, Ring, int]] = []
     is_multi_band = _has_vertical_web_gap(dstv.ak_contours.get("v", []), cfg) or _has_vertical_web_gap(
         dstv.ak_contours.get("h", []), cfg
     )
@@ -1762,13 +2016,11 @@ def decompose_compound_nc1(
 
     for face in ("v", "h"):
         sync_lx = None
-        if left_contact_pair is not None and start_tan > 1e-6:
-            if abs(v_xmin - h_xmin) > 0.5:
-                sync_lx = left_contact_pair[0] if ((face == "v" and v_xmin < h_xmin) or (face == "h" and h_xmin < v_xmin)) else left_contact_pair[1]
+        if left_contact_pair is not None and eff_start_tan > 1e-6:
+            sync_lx = left_contact_pair[0] if ((face == "v" and v_xmin < h_xmin) or (face == "h" and h_xmin < v_xmin)) else left_contact_pair[1]
         sync_rx = None
-        if right_contact_pair is not None and end_tan > 1e-6:
-            if abs(v_xmax - h_xmax) > 0.5:
-                sync_rx = right_contact_pair[1] if ((face == "v" and v_xmax > h_xmax) or (face == "h" and h_xmax > v_xmax)) else right_contact_pair[0]
+        if right_contact_pair is not None and eff_end_tan > 1e-6:
+            sync_rx = right_contact_pair[1] if ((face == "v" and v_xmax > h_xmax) or (face == "h" and h_xmax > v_xmax)) else right_contact_pair[0]
 
         for ring in locked_rings.get(face, []):
             if is_multi_band:
@@ -1807,8 +2059,8 @@ def decompose_compound_nc1(
                 ring,
                 face=face,
                 tw=tw,
-                start_tan=start_tan,
-                end_tan=end_tan,
+                start_tan=eff_start_tan,
+                end_tan=eff_end_tan,
                 skew_plane=cfg.web_skew_plane,
                 rounding_mm=cfg.web_length_rounding_mm,
                 sync_left_x=sync_lx if cfg.exact_gabarit_lock else None,
@@ -1816,7 +2068,15 @@ def decompose_compound_nc1(
             )
             ring = _apply_length_offset(ring, cfg.length_offset_mm)
             if len(ring) >= 3 and abs(polygon_area(ring)) > 0.1:
-                raw_webs.append((face, ring))
+                if cfg.strip_residual_fragments:
+                    sub_rings, rem_cnt = remove_residual_fragments(
+                        ring, tw, min_seg_len=cfg.min_segment_length_mm
+                    )
+                else:
+                    sub_rings, rem_cnt = [ring], 0
+                for sr in sub_rings:
+                    if len(sr) >= 3 and abs(polygon_area(sr)) > 0.1:
+                        raw_webs.append((face, sr, rem_cnt))
 
     if (cfg.web_ordering or "").lower() == "v_then_h_upper_first":
         raw_webs.sort(
@@ -1836,7 +2096,7 @@ def decompose_compound_nc1(
         )
 
     tw_int = int(round(tw))
-    for w_idx, (face, w_ring) in enumerate(raw_webs, start=1):
+    for w_idx, (face, w_ring, rem_cnt) in enumerate(raw_webs, start=1):
         mirror_x = cfg.mirror_web_h_x if face == "h" else False
         s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
             w_ring, face=face, dstv=dstv, cfg=cfg, mirror_x=mirror_x, mirror_y=False
@@ -1857,6 +2117,7 @@ def decompose_compound_nc1(
                 inner_contours=s_inners,
                 markings=s_marks,
                 source_bounds=orig_b,
+                removed_residuals=rem_cnt,
             )
         )
 
@@ -1897,37 +2158,53 @@ def extract_single_plate_nc1(
 
     plates: list[ExtractedPlate] = []
     contours = dstv.ak_contours[primary_face]
-    for idx, c in enumerate(contours):
+    max_delta = 100.0 if (cfg.target_length_mm is not None and cfg.target_length_mm > 0.0) else 20.0
+    part_idx = 0
+    for c in contours:
         ring = contour_to_ring(c, cfg)
         if len(ring) < 3 or abs(polygon_area(ring)) <= 0.1:
             continue
-        x0, x1, l_raw = _compute_raw_x_envelope({primary_face: [ring]})
+        x0, _, l_raw = _compute_raw_x_envelope({primary_face: [ring]})
         l_gab, _ = _resolve_gabarit_length(l_raw, cfg)
         if cfg.exact_gabarit_lock:
-            ring = _apply_gabarit_x_lock_to_rings({primary_face: [ring]}, x0, l_raw, l_gab)[primary_face][0]
+            ring = _apply_gabarit_x_lock_to_rings(
+                {primary_face: [ring]}, x0, l_raw, l_gab, max_delta_mm=max_delta
+            )[primary_face][0]
         ring = _apply_length_offset(ring, cfg.length_offset_mm)
-        s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
-            ring, face=primary_face, dstv=dstv, cfg=cfg
-        )
-        name = piece_clean if len(contours) == 1 else f"{piece_clean}_{idx + 1}"
-        plates.append(
-            ExtractedPlate(
-                name=name,
-                folder=f"T{t_int}",
-                role="single_plate",
-                face=primary_face,
-                thickness=thick,
-                piece_id=header.piece_id,
-                piece_clean=piece_clean,
-                material=header.material,
-                quantity=header.quantity,
-                exterior=s_ext,
-                holes=s_holes,
-                inner_contours=s_inners,
-                markings=s_marks,
-                source_bounds=orig_b,
+        if cfg.strip_residual_fragments:
+            sub_rings, rem_cnt = remove_residual_fragments(
+                ring, thick, min_seg_len=cfg.min_segment_length_mm
             )
-        )
+        else:
+            sub_rings, rem_cnt = [ring], 0
+
+        for sub_ring in sub_rings:
+            if len(sub_ring) < 3 or abs(polygon_area(sub_ring)) <= 0.1:
+                continue
+            s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
+                sub_ring, face=primary_face, dstv=dstv, cfg=cfg
+            )
+            name = piece_clean if (len(contours) == 1 and len(sub_rings) == 1 and part_idx == 0) else f"{piece_clean}_{part_idx + 1}"
+            part_idx += 1
+            plates.append(
+                ExtractedPlate(
+                    name=name,
+                    folder=f"T{t_int}",
+                    role="single_plate",
+                    face=primary_face,
+                    thickness=thick,
+                    piece_id=header.piece_id,
+                    piece_clean=piece_clean,
+                    material=header.material,
+                    quantity=header.quantity,
+                    exterior=s_ext,
+                    holes=s_holes,
+                    inner_contours=s_inners,
+                    markings=s_marks,
+                    source_bounds=orig_b,
+                    removed_residuals=rem_cnt,
+                )
+            )
     return plates
 
 
@@ -2393,12 +2670,76 @@ def parse_plate_profile(profile_str: str) -> Optional[tuple[float, float]]:
     return float(m.group(1).replace(",", ".")), float(m.group(2).replace(",", "."))
 
 
-def find_assembly_a_drawing(folder: Path) -> Optional[Path]:
-    pdfs = sorted(folder.glob("*.pdf"))
-    for p in pdfs:
-        low = p.stem.lower()
-        if "a-drawing" in low or "a_drawing" in low:
-            return p
+def _is_w_drawing_pdf_name(stem_lower: str) -> bool:
+    return bool(
+        "w-drawing" in stem_lower
+        or "w_drawing" in stem_lower
+        or re.search(r"[-_\s]w$", stem_lower)
+    )
+
+
+def find_assembly_a_drawing(
+    folder: Path,
+    target_piece_keys: Optional[set[str]] = None,
+) -> Optional[Path]:
+    candidate_dirs = [folder]
+    if folder.parent != folder:
+        candidate_dirs.append(folder.parent)
+
+    for cand_idx, cand_dir in enumerate(candidate_dirs):
+        if not cand_dir.is_dir():
+            continue
+        pdfs = sorted(cand_dir.glob("*.pdf"))
+        if not pdfs:
+            continue
+
+        # Pass 1: explicit A-drawing / assembly filenames
+        preferred = [
+            p for p in pdfs
+            if not _is_w_drawing_pdf_name(p.stem.lower())
+            and (
+                "a-drawing" in p.stem.lower()
+                or "a_drawing" in p.stem.lower()
+                or "assembly" in p.stem.lower()
+            )
+        ]
+        for p in preferred:
+            if pymupdf is None:
+                return p
+            bom = extract_bom_from_pdf(p)
+            if bom is not None and bom.rows:
+                return p
+        if preferred and pymupdf is None:
+            return preferred[0]
+
+        # Pass 2: fallback scan of any non-W PDF containing a STYKKLISTE table
+        if pymupdf is not None:
+            others = [
+                p for p in pdfs
+                if p not in preferred and not _is_w_drawing_pdf_name(p.stem.lower())
+            ]
+            max_scan = 20 if cand_idx == 0 else 12
+            best_pdf: Optional[Path] = None
+            best_score = (-1, -1)
+            for p in others[:max_scan]:
+                try:
+                    bom = extract_bom_from_pdf(p)
+                except Exception:
+                    bom = None
+                if bom is not None and bom.rows:
+                    matched = 0
+                    if target_piece_keys:
+                        row_keys = {clean_piece_name(r.pos_no, lowercase=True) for r in bom.rows}
+                        matched = len(target_piece_keys & row_keys)
+                    score = (matched, len(bom.rows))
+                    if score > best_score:
+                        best_score = score
+                        best_pdf = p
+                    if target_piece_keys and matched > 0:
+                        return p
+            if best_pdf is not None:
+                return best_pdf
+
     return None
 
 
@@ -2486,8 +2827,9 @@ def _collect_inputs(
     if not nc1_files and scope_mode == "cheson_only":
         raise FileNotFoundError(f"Nu s-au găsit fișiere .nc1 în {src}")
 
-    # Always read A-drawing BOM silently if present so exact STYKKLISTE LENGDE is available
-    a_pdf = find_assembly_a_drawing(search_root) if search_root.is_dir() else None
+    # Always read A-drawing / STYKKLISTE BOM silently if present so exact LENGDE is available
+    target_keys = {clean_piece_name(p.stem, lowercase=True) for p in nc1_files}
+    a_pdf = find_assembly_a_drawing(search_root, target_piece_keys=target_keys) if search_root.is_dir() else None
     bom = extract_bom_from_pdf(a_pdf) if a_pdf is not None else None
     w_map = discover_w_drawings(search_root) if (search_root.is_dir() and scope_mode != "cheson_only") else {}
     return src, search_root, nc1_files, a_pdf, bom, w_map
@@ -2502,6 +2844,7 @@ def preview_cheson_pipeline(
     override_length_mm: Optional[float] = None,
     override_web_height_mm: Optional[float] = None,
     recursive: bool = False,
+    strip_residual_fragments: bool = True,
 ) -> dict[str, Any]:
     """Dry-run inspection: detects cheson type, STYKKLISTE LENGDE, and verifies <= 0.001 mm tolerance."""
     _, _, nc1_files, a_pdf, bom, w_map = _collect_inputs(
@@ -2527,6 +2870,7 @@ def preview_cheson_pipeline(
             exact_gabarit_lock=exact_gabarit_lock,
             target_length_mm=target_len,
             override_web_height_mm=override_web_height_mm,
+            strip_residual_fragments=strip_residual_fragments,
         )
         plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
         if not ver.passed:
@@ -2544,6 +2888,7 @@ def preview_cheson_pipeline(
                         "thickness": p.thickness,
                         "length_mm": round(p.bounds[2] - p.bounds[0], 4),
                         "width_mm": round(p.bounds[3] - p.bounds[1], 4),
+                        "removed_residuals": p.removed_residuals,
                     }
                     for p in plates
                 ],
@@ -2578,6 +2923,7 @@ def run_cheson_pipeline(
     oda_path: Optional[str] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
     log_callback: Optional[Callable[[str], None]] = None,
+    strip_residual_fragments: bool = True,
 ) -> dict[str, Any]:
     """Run box-beam (.nc1) plate extraction with exact gabarit verification (±0.001 mm)."""
     def _log(msg: str) -> None:
@@ -2595,7 +2941,10 @@ def run_cheson_pipeline(
     out_root.mkdir(parents=True, exist_ok=True)
     effective_oda = find_oda_exe(oda_path)
 
-    _log(f"🚀 Pornire Cheson / HSQ Extractor (Mod: {scope_mode}, Preset: {preset}, GabaritFix={exact_gabarit_lock})")
+    _log(
+        f"🚀 Pornire Cheson / HSQ Extractor (Mod: {scope_mode}, Preset: {preset}, "
+        f"GabaritFix={exact_gabarit_lock}, FărăReziduuri={strip_residual_fragments})"
+    )
     _log(f"📁 Sursă: {src}")
     _log(f"📁 Destinație: {out_root}")
     if a_pdf is not None and bom is not None:
@@ -2643,6 +2992,7 @@ def run_cheson_pipeline(
                 exact_gabarit_lock=exact_gabarit_lock,
                 target_length_mm=target_len,
                 override_web_height_mm=override_web_height_mm,
+                strip_residual_fragments=strip_residual_fragments,
             )
             plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
             verifications.append(asdict(ver))
@@ -2675,7 +3025,12 @@ def run_cheson_pipeline(
                 nc1_plate_count += 1
                 minx, miny, maxx, maxy = plate.bounds
                 dim_l, dim_w = round(maxx - minx, 4), round(maxy - miny, 4)
-                _log(f"   📄 {rel} ({dim_l:.3f} × {dim_w:.3f} mm, T{int(round(plate.thickness))})")
+                res_msg = (
+                    f" | 🧹 {plate.removed_residuals} reziduuri ≤ {plate.thickness:g} mm eliminate"
+                    if plate.removed_residuals > 0
+                    else ""
+                )
+                _log(f"   📄 {rel} ({dim_l:.3f} × {dim_w:.3f} mm, T{int(round(plate.thickness))}){res_msg}")
                 entries.append(
                     ManifestEntry(
                         pos_no=dstv.header.piece_id or nc1_path.stem,
@@ -2905,6 +3260,7 @@ def run_cheson_pipeline(
                 "scope_mode": scope_mode,
                 "preset": preset,
                 "exact_gabarit_lock": exact_gabarit_lock,
+                "strip_residual_fragments": strip_residual_fragments,
                 "export_format": export_format,
             },
             "verifications": verifications,

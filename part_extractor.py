@@ -390,7 +390,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1186,6 +1186,7 @@ class UnifiedApp(ctk.CTk):
         self.cheson_preset_label = ctk.StringVar(value="Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)")
         self.cheson_format = ctk.StringVar(value="DWG (.dwg cu fallback .dxf)")
         self.cheson_exact_gabarit = ctk.BooleanVar(value=True)
+        self.cheson_strip_residuals = ctk.BooleanVar(value=True)
         self.cheson_override_length = ctk.StringVar(value="")
         self.cheson_override_web_h = ctk.StringVar(value="")
         self.cheson_use_layers = ctk.BooleanVar(value=True)
@@ -1366,6 +1367,7 @@ class UnifiedApp(ctk.CTk):
             self.cheson_preset_label.set(s.get("cheson_preset_label", "Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)"))
             self.cheson_format.set(s.get("cheson_format", "DWG (.dwg cu fallback .dxf)"))
             self.cheson_exact_gabarit.set(s.get("cheson_exact_gabarit", True))
+            self.cheson_strip_residuals.set(s.get("cheson_strip_residuals", True))
             self.cheson_override_length.set(s.get("cheson_override_length", ""))
             self.cheson_override_web_h.set(s.get("cheson_override_web_h", ""))
             self.cheson_use_layers.set(s.get("cheson_use_layers", True))
@@ -1553,6 +1555,7 @@ class UnifiedApp(ctk.CTk):
             "cheson_preset_label": self.cheson_preset_label.get(),
             "cheson_format": self.cheson_format.get(),
             "cheson_exact_gabarit": self.cheson_exact_gabarit.get(),
+            "cheson_strip_residuals": self.cheson_strip_residuals.get(),
             "cheson_override_length": self.cheson_override_length.get(),
             "cheson_override_web_h": self.cheson_override_web_h.get(),
             "cheson_use_layers": self.cheson_use_layers.get(),
@@ -7330,10 +7333,16 @@ class UnifiedApp(ctk.CTk):
         gab_frame.grid(row=5, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
         ctk.CTkCheckBox(
             gab_frame,
-            text="Blocare gabarit fix din STYKKLISTE / .nc1 (±0.001 mm)",
+            text="Blocare gabarit fix (±0.001 mm)",
             variable=self.cheson_exact_gabarit,
             font=("Segoe UI", 11, "bold"),
-        ).pack(side="left", padx=(10, 16), pady=5)
+        ).pack(side="left", padx=(10, 12), pady=5)
+        ctk.CTkCheckBox(
+            gab_frame,
+            text="Elimină reziduuri (≤ grosime)",
+            variable=self.cheson_strip_residuals,
+            font=("Segoe UI", 11, "bold"),
+        ).pack(side="left", padx=(0, 14), pady=5)
         ctk.CTkLabel(gab_frame, text="Lungime fixă (mm):", font=("Segoe UI", 11)).pack(side="left", padx=(4, 4), pady=5)
         ctk.CTkEntry(
             gab_frame,
@@ -7578,6 +7587,7 @@ class UnifiedApp(ctk.CTk):
                 override_length_mm=ovr_len,
                 override_web_height_mm=ovr_web_h,
                 recursive=self.cheson_recursive.get(),
+                strip_residual_fragments=self.cheson_strip_residuals.get(),
             )
         except Exception as exc:
             messagebox.showerror("Eroare Previzualizare", str(exc))
@@ -7607,8 +7617,9 @@ class UnifiedApp(ctk.CTk):
                 f"   Audit        : {badge} | Eroare max gabarit = {v['max_gabarit_error_mm']:.4f} mm | Contact talpă-laterală = {v['flange_web_contact_error_mm']:.4f} mm"
             )
             for pl in item["plates"]:
+                res_msg = f" | 🧹 {pl['removed_residuals']} reziduuri eliminate" if pl.get("removed_residuals", 0) > 0 else ""
                 self.cheson_log(
-                    f"      • {pl['folder']}/{pl['name']}: {pl['length_mm']:.3f} × {pl['width_mm']:.3f} mm (T{int(round(pl['thickness']))}, {pl['role']})"
+                    f"      • {pl['folder']}/{pl['name']}: {pl['length_mm']:.3f} × {pl['width_mm']:.3f} mm (T{int(round(pl['thickness']))}, {pl['role']}){res_msg}"
                 )
 
     def start_cheson_process(self):
@@ -7651,6 +7662,7 @@ class UnifiedApp(ctk.CTk):
         recursive = self.cheson_recursive.get()
         gen_reports = self.cheson_generate_reports.get()
         exact_gab = self.cheson_exact_gabarit.get()
+        strip_res = self.cheson_strip_residuals.get()
 
         def _worker():
             try:
@@ -7672,6 +7684,7 @@ class UnifiedApp(ctk.CTk):
                     oda_path=oda_path,
                     progress_callback=lambda p: self.after(0, lambda val=p: self.cheson_progress.set(val)),
                     log_callback=lambda m: self.after(0, lambda msg=m: self.cheson_log(msg)),
+                    strip_residual_fragments=strip_res,
                 )
                 self.after(0, lambda: self._on_cheson_complete(res, None))
             except Exception as exc:
