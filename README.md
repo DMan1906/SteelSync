@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.11.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.2/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.11.2)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.11.3)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.3/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.11.3)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.11.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.2/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.11.3)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.3/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,11 +16,12 @@
 
 ## 🚀 Funcționalități
 
-- **📦 Cheson / HSQ Extractor (Actualizat în v1.11.2 — Calibrare 3D Skew `45°`/`8.7°`, Eliminare Reziduuri ≤ Grosime & Gabarit Fix ±0.001 mm)**:
+- **📦 Cheson / HSQ Extractor (Actualizat în v1.11.3 — Găuri Ovale/Alungite DSTV `BO`, Calibrare 3D Skew & Gabarit Fix ±0.001 mm)**:
   - **Auto-Detecție pentru toate cele 3 tipuri reale de secțiune**:
     1. **Tip 1 (Cheson cu Talpă):** talpă lată (`T`) + capac între inimi (`C`) + 2 laterale cu lățimea exactă `H - tf - tw`.
     2. **Tip 2 (Cheson fără Talpă):** 2 capace între inimi (`C1`, `C2`) + 2 laterale cu lățimea `H - 2*tw`.
     3. **Tip 3 (Cheson Dublu cu Talpă la Mijloc):** 2 capace (`C1`, `C2`) + 4 laterale (`L1..L4`) cu retragere `tw`.
+  - **Suport Complet Găuri Alungite / Ovale (`BO ... l`) și Rotunde:** citește și exportă nativ ca `LWPOLYLINE` închise cu arce (`bulge`) găurile ovale verticale, orizontale, rotite sau decupajele dreptunghiulare cu colțuri rotunjite din DSTV `.nc1` (inclusiv oglindire exactă pe tălpi/inimi).
   - **Calibrare Exactă pentru Capete Oblice (3D Skew) & Trepte + Aliniere Găuri:** conservă cota maximă pe laterala lungă (`0.00`/`L_gabarit`), aliniază laterala scurtă la muchia interioară a capacului (`tw·tan(θ)`), păstrează exact pasul treptelor de capăt (ex. `70.710 mm` la `45°`) și sincronizează poziția găurilor (`BO`) la `±0.001 mm`.
   - **Eliminare Automată Fragmente Reziduale (`≤ grosime tablă`):** curăță automat mustățile/urechile subțiri de tablă rămase la capetele decupajelor de pe toată înălțimea chesonului (când fâșia are lățimea ≤ `tw`/`tf`), cu opțiune de activare/dezactivare direct în tab.
   - **Blocare Gabarit Fix (`±0.001 mm`) din `STYKKLISTE` / `.nc1`:** scanează automat PDF-urile de ansamblu din folder/părinte pentru tabelul `STYKKLISTE`, aliniază exact lungimea totală și decupajele interioare și include buton de **Previzualizare & Verificare Cote** înainte de export.

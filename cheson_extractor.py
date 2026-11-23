@@ -987,9 +987,10 @@ def parse_dstv_text(content: str, source_path: Optional[Path] = None) -> DSTVFil
                     if rest and rest[0].lower() in ("l", "g", "m", "k"):
                         hole_type = rest[0].lower()
                         rest = rest[1:]
-            if hole_type == "l" and len(rest) >= 2:
+            if hole_type == "l" and len(rest) >= 1:
                 slot_len = _parse_coord_token(rest[0])[0]
-                slot_w = _parse_coord_token(rest[1])[0]
+                if len(rest) >= 2:
+                    slot_w = _parse_coord_token(rest[1])[0]
                 if len(rest) >= 3:
                     slot_ang = _parse_coord_token(rest[2])[0]
 
@@ -1583,8 +1584,63 @@ def _transform_and_normalize_plate(
     mapped_holes: list[DSTVHole] = []
     for hole in dstv.holes.get(face, []):
         hx = _shift_x(hole.x)
-        if point_in_polygon(hx, hole.y, ring, tol=0.05):
-            nx, ny = _m_pt(hx, hole.y)
+        hy = hole.y
+        is_slot = hole.hole_type == "l" and (abs(hole.slot_length) > 0.05 or abs(hole.slot_width) > 0.05)
+        if is_slot:
+            rad = math.radians(hole.slot_angle)
+            ux, uy = math.cos(rad), math.sin(rad)
+            vx, vy = -uy, ux
+            dx_s, dy_s = float(hole.slot_length), float(hole.slot_width)
+            c1 = (hx, hy)
+            mid_check = (hx + 0.5 * (dx_s * ux + dy_s * vx), hy + 0.5 * (dx_s * uy + dy_s * vy))
+            if not (
+                point_in_polygon(c1[0], c1[1], ring, tol=0.05)
+                or point_in_polygon(mid_check[0], mid_check[1], ring, tol=0.05)
+            ):
+                continue
+
+            if abs(dx_s) > 0.05 and abs(dy_s) > 0.05:
+                k0 = c1
+                k1 = (c1[0] + dx_s * ux, c1[1] + dx_s * uy)
+                k3 = (c1[0] + dy_s * vx, c1[1] + dy_s * vy)
+                mk0 = _m_pt(*k0)
+                mk1 = _m_pt(*k1)
+                mk3 = _m_pt(*k3)
+                nx, ny = mk0
+                if bool(mirror_x) != bool(mirror_y):
+                    out_len = math.hypot(mk3[0] - mk0[0], mk3[1] - mk0[1])
+                    out_wid = math.hypot(mk1[0] - mk0[0], mk1[1] - mk0[1])
+                    ang_out = math.degrees(math.atan2(mk3[1] - mk0[1], mk3[0] - mk0[0])) % 360.0
+                else:
+                    out_len = math.hypot(mk1[0] - mk0[0], mk1[1] - mk0[1])
+                    out_wid = math.hypot(mk3[0] - mk0[0], mk3[1] - mk0[1])
+                    ang_out = math.degrees(math.atan2(mk1[1] - mk0[1], mk1[0] - mk0[0])) % 360.0
+            else:
+                c2 = (hx + dx_s * ux + dy_s * vx, hy + dx_s * uy + dy_s * vy)
+                mc1 = _m_pt(*c1)
+                mc2 = _m_pt(*c2)
+                nx, ny = mc1
+                out_len = math.hypot(mc2[0] - mc1[0], mc2[1] - mc1[1])
+                out_wid = 0.0
+                ang_out = math.degrees(math.atan2(mc2[1] - mc1[1], mc2[0] - mc1[0])) % 360.0
+
+            mapped_holes.append(
+                DSTVHole(
+                    face=hole.face,
+                    x=nx,
+                    y=ny,
+                    diameter=hole.diameter,
+                    depth=hole.depth,
+                    hole_type=hole.hole_type,
+                    slot_length=out_len,
+                    slot_width=out_wid,
+                    slot_angle=ang_out,
+                    x_flag=hole.x_flag,
+                    y_flag=hole.y_flag,
+                )
+            )
+        elif point_in_polygon(hx, hy, ring, tol=0.05):
+            nx, ny = _m_pt(hx, hy)
             ang = hole.slot_angle
             if mirror_x:
                 ang = 180.0 - ang
@@ -2310,22 +2366,52 @@ def _interior_label_point(ring: Ring) -> tuple[float, float]:
 
 
 def _add_slot_lwpolyline(msp, hole: DSTVHole, layer: str) -> None:
-    width = hole.slot_width if hole.slot_width > 0 else hole.diameter
-    r = 0.5 * width
-    straight = max(0.0, hole.slot_length - width)
-    if straight < 0.05:
-        msp.add_circle((hole.x, hole.y), radius=0.5 * hole.diameter, dxfattribs={"layer": layer})
+    """Emit closed CCW LWPOLYLINE for DSTV BO 'l' slotted/rounded-rect holes."""
+    r = 0.5 * hole.diameter
+    if r <= 1e-6:
         return
-    half_s = 0.5 * straight
+    dx_s = float(hole.slot_length)
+    dy_s = float(hole.slot_width)
     rad = math.radians(hole.slot_angle)
     ux, uy = math.cos(rad), math.sin(rad)
-    nx, ny = -uy, ux
-    cx, cy = hole.x, hole.y
+    vx, vy = -uy, ux
+
+    # Case B: 2D rounded-rectangle slot (both dx_s > 0.05 and dy_s > 0.05)
+    if abs(dx_s) > 0.05 and abs(dy_s) > 0.05:
+        k0 = (hole.x, hole.y)
+        k1 = (k0[0] + dx_s * ux, k0[1] + dx_s * uy)
+        k2 = (k1[0] + dy_s * vx, k1[1] + dy_s * vy)
+        k3 = (k0[0] + dy_s * vx, k0[1] + dy_s * vy)
+        bulge90 = math.tan(math.pi / 8.0)
+        pts = [
+            (k0[0] - r * vx, k0[1] - r * vy, 0.0),
+            (k1[0] - r * vx, k1[1] - r * vy, bulge90),
+            (k1[0] + r * ux, k1[1] + r * uy, 0.0),
+            (k2[0] + r * ux, k2[1] + r * uy, bulge90),
+            (k2[0] + r * vx, k2[1] + r * vy, 0.0),
+            (k3[0] + r * vx, k3[1] + r * vy, bulge90),
+            (k3[0] - r * ux, k3[1] - r * uy, 0.0),
+            (k0[0] - r * ux, k0[1] - r * uy, bulge90),
+        ]
+        msp.add_lwpolyline(pts, format="xyb", close=True, dxfattribs={"layer": layer})
+        return
+
+    # Case A: 1D oval / stadium slot (one extension > 0.05)
+    c1 = (hole.x, hole.y)
+    c2 = (hole.x + dx_s * ux + dy_s * vx, hole.y + dx_s * uy + dy_s * vy)
+    span = math.hypot(c2[0] - c1[0], c2[1] - c1[1])
+    if span < 0.05:
+        msp.add_circle(c1, radius=r, dxfattribs={"layer": layer})
+        return
+
+    ax = (c2[0] - c1[0]) / span
+    ay = (c2[1] - c1[1]) / span
+    nx, ny = -ay, ax
     pts = [
-        (cx - half_s * ux - r * nx, cy - half_s * uy - r * ny, 0.0),
-        (cx + half_s * ux - r * nx, cy + half_s * uy - r * ny, 1.0),
-        (cx + half_s * ux + r * nx, cy + half_s * uy + r * ny, 0.0),
-        (cx - half_s * ux + r * nx, cy - half_s * uy + r * ny, 1.0),
+        (c1[0] - r * nx, c1[1] - r * ny, 0.0),
+        (c2[0] - r * nx, c2[1] - r * ny, 1.0),
+        (c2[0] + r * nx, c2[1] + r * ny, 0.0),
+        (c1[0] + r * nx, c1[1] + r * ny, 1.0),
     ]
     msp.add_lwpolyline(pts, format="xyb", close=True, dxfattribs={"layer": layer})
 
@@ -2366,7 +2452,7 @@ def write_plate_dxf(
             msp.add_lwpolyline(ik_pts, format="xy", close=True, dxfattribs={"layer": inner_layer})
 
     for hole in plate.holes:
-        if hole.hole_type == "l" and hole.slot_length > hole.diameter:
+        if hole.hole_type == "l" and (abs(hole.slot_length) > 0.05 or abs(hole.slot_width) > 0.05):
             _add_slot_lwpolyline(msp, hole, layer=inner_layer)
         elif hole.diameter > 0.0:
             msp.add_circle((hole.x, hole.y), radius=0.5 * hole.diameter, dxfattribs={"layer": inner_layer})
