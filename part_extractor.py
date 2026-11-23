@@ -390,7 +390,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1193,6 +1193,7 @@ class UnifiedApp(ctk.CTk):
         self.cheson_include_marking = ctk.BooleanVar(value=False)
         self.cheson_organize_thickness = ctk.BooleanVar(value=True)
         self.cheson_recursive = ctk.BooleanVar(value=False)
+        self.cheson_save_in_subfolders = ctk.BooleanVar(value=False)
         self.cheson_generate_reports = ctk.BooleanVar(value=True)
         self.cheson_open_folder = ctk.BooleanVar(value=True)
         self.cheson_running = False
@@ -1374,6 +1375,7 @@ class UnifiedApp(ctk.CTk):
             self.cheson_include_marking.set(s.get("cheson_include_marking", False))
             self.cheson_organize_thickness.set(s.get("cheson_organize_thickness", True))
             self.cheson_recursive.set(s.get("cheson_recursive", False))
+            self.cheson_save_in_subfolders.set(s.get("cheson_save_in_subfolders", False))
             self.cheson_generate_reports.set(s.get("cheson_generate_reports", True))
             self.cheson_open_folder.set(s.get("cheson_open_folder", True))
 
@@ -1562,6 +1564,7 @@ class UnifiedApp(ctk.CTk):
             "cheson_include_marking": self.cheson_include_marking.get(),
             "cheson_organize_thickness": self.cheson_organize_thickness.get(),
             "cheson_recursive": self.cheson_recursive.get(),
+            "cheson_save_in_subfolders": self.cheson_save_in_subfolders.get(),
             "cheson_generate_reports": self.cheson_generate_reports.get(),
             "cheson_open_folder": self.cheson_open_folder.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
@@ -7280,7 +7283,7 @@ class UnifiedApp(ctk.CTk):
         ctk.CTkEntry(
             cfg_card,
             textvariable=self.cheson_dest_dir,
-            placeholder_text="Implicit: subfolder Cheson_Output în folderul sursă",
+            placeholder_text="Implicit: subfolder Cheson_Output în sursă (sau în fiecare subfolder dacă bifezi mai jos)",
             height=32,
             corner_radius=6,
         ).grid(row=3, column=1, sticky="ew", padx=8, pady=5)
@@ -7362,15 +7365,26 @@ class UnifiedApp(ctk.CTk):
             corner_radius=4,
         ).pack(side="left", padx=(0, 10), pady=5)
 
-        # Row 6: Compact checkboxes
-        chk_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
-        chk_frame.grid(row=6, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
+        # Row 6: Compact checkboxes (2 rows so all controls fit cleanly)
+        chk_wrap = ctk.CTkFrame(cfg_card, fg_color="transparent")
+        chk_wrap.grid(row=6, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
+        chk_frame = ctk.CTkFrame(chk_wrap, fg_color="transparent")
+        chk_frame.pack(fill="x", anchor="w")
         ctk.CTkCheckBox(chk_frame, text="Layere extra (implicit: Layer 0)", variable=self.cheson_use_layers).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Text Marcare (MARKING)", variable=self.cheson_include_marking).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Subfoldere Grosimi (T8/T25)", variable=self.cheson_organize_thickness).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Recursiv (.nc1)", variable=self.cheson_recursive).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Raport CSV/JSON", variable=self.cheson_generate_reports).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Deschide folder la final", variable=self.cheson_open_folder).pack(side="left")
+
+        chk_frame2 = ctk.CTkFrame(chk_wrap, fg_color="transparent")
+        chk_frame2.pack(fill="x", anchor="w", pady=(5, 0))
+        ctk.CTkCheckBox(
+            chk_frame2,
+            text="Salvează direct în folderul fiecărui cheson (pentru Batch multi-folder)",
+            variable=self.cheson_save_in_subfolders,
+            font=("Segoe UI", 11, "bold"),
+        ).pack(side="left")
 
         # Row 7: Shared ODA status strip
         oda_frame = ctk.CTkFrame(cfg_card, fg_color=("#eef2f6", "#182335"), corner_radius=6)
@@ -7596,18 +7610,30 @@ class UnifiedApp(ctk.CTk):
 
         self.cheson_log_box.delete("1.0", "end")
         self.cheson_log("🔍 PREVIZUALIZARE, REVERIFICARE POST-DESENARE & SIMULARE 3D")
-        if prev["a_drawing"]:
+        if prev.get("is_multi_folder_batch"):
+            self.cheson_log(
+                f"🗂️ BATCH MULTI-FOLDER DETECTAT: {prev.get('folders_count', 0)} foldere cheson izolate "
+                f"({prev.get('a_drawing') or '-'}, {prev.get('bom_rows_count', 0)} repere STYKKLISTE)"
+            )
+        elif prev["a_drawing"]:
             self.cheson_log(f"📋 A-drawing STYKKLISTE: {prev['a_drawing']} ({prev['bom_assembly_id']}, {prev['bom_rows_count']} repere)")
         else:
             self.cheson_log("📋 A-drawing STYKKLISTE: nedetectat în folder (folosire cote .nc1 / override manual)")
         if scope_mode != "cheson_only":
             self.cheson_log(f"📐 W-drawings detectate în folder: {prev['w_drawings_count']}")
 
+        last_folder = None
         for item in prev["nc1_items"]:
             v = item["verification"]
             pda = item.get("post_draw_audit") or {}
             s3 = pda.get("sim_3d") or {}
             badge = "✅ PASS" if (v["passed"] and pda.get("passed", True)) else "⚠ CHECK"
+            folder_nm = item.get("folder_name")
+            if folder_nm and folder_nm != last_folder:
+                last_folder = folder_nm
+                pdf_info = item.get("a_drawing") or "fără A-drawing"
+                bom_info = f" ({item['bom_assembly_id']})" if item.get("bom_assembly_id") else ""
+                self.cheson_log(f"\n📁 Folder: {folder_nm} | PDF: {pdf_info}{bom_info}")
             self.cheson_log(f"\n🧩 {item['file']} | {item['profile']}")
             self.cheson_log(f"   Tip detectat : {v['detected_type_label']}")
             self.cheson_log(
@@ -7664,7 +7690,8 @@ class UnifiedApp(ctk.CTk):
                 return
             default_dest = os.path.join(src_path, "Cheson_Output")
 
-        dest_dir = self.cheson_dest_dir.get().strip() or default_dest
+        save_in_subfolders = self.cheson_save_in_subfolders.get() if source_mode != "single_file" else False
+        dest_dir = src_path if save_in_subfolders else (self.cheson_dest_dir.get().strip() or default_dest)
         self.cheson_last_dest_dir = dest_dir
         self.save_settings()
 
@@ -7703,6 +7730,7 @@ class UnifiedApp(ctk.CTk):
                     progress_callback=lambda p: self.after(0, lambda val=p: self.cheson_progress.set(val)),
                     log_callback=lambda m: self.after(0, lambda msg=m: self.cheson_log(msg)),
                     strip_residual_fragments=strip_res,
+                    save_in_source_subfolders=save_in_subfolders,
                 )
                 self.after(0, lambda: self._on_cheson_complete(res, None))
             except Exception as exc:
@@ -7732,8 +7760,15 @@ class UnifiedApp(ctk.CTk):
                 f"• Reverificare Post-Desenare + Sim 3D: {passed_cnt}/{len(audits)} PASS "
                 f"(Fidelitate 3D {avg_sim:.2f}%, Layer 0={'OK' if all_l0 else 'Extra'})\n"
             )
+        batch_line = ""
+        if res.get("is_multi_folder_batch"):
+            batch_line = (
+                f"• Foldere cheson procesate: {res.get('folders_processed', 0)} "
+                f"({res.get('batch_pass_count', 0)} PASS, {res.get('batch_check_count', 0)} CHECK)\n"
+            )
         summary = (
             f"Extragere finalizată!\n\n"
+            f"{batch_line}"
             f"• Piese cheson (.nc1): {res['plates_generated']}\n"
             f"• W-drawings convertite: {res['w_drawings_converted']}\n"
             f"• Plăci BOM sintetizate: {res['bom_plates_generated']}\n"

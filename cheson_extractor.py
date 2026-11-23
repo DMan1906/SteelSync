@@ -4006,6 +4006,73 @@ def _export_plate_cad(
     return [dxf_path], rel, dxf_audit, re_read_ring
 
 
+_EXCLUDED_BATCH_DIR_NAMES = {
+    "cheson_output",
+    "test",
+    "tests",
+    "backup",
+    "old",
+    "tmp",
+    "temp",
+    "w_drawing",
+}
+_THICKNESS_DIR_RE = re.compile(r"^t\d+(?:[.,]\d+)?$", re.IGNORECASE)
+
+
+def _is_excluded_batch_dir(dir_name: str) -> bool:
+    norm = dir_name.strip().lower()
+    return (
+        norm in _EXCLUDED_BATCH_DIR_NAMES
+        or norm.startswith(".")
+        or bool(_THICKNESS_DIR_RE.match(norm))
+    )
+
+
+def discover_cheson_batch_folders(root: Path, recursive: bool = False) -> list[Path]:
+    """Discover isolated cheson folders under `root` containing direct .nc1 files.
+
+    - Walks non-excluded subdirectories under `root` (skipping `test`, `T5..T25`,
+      `Cheson_Output`, etc.). If any cheson subdirectories are found, returns them
+      even if `root` also contains loose .nc1 files alongside the subfolders.
+    - Otherwise, if `root` itself directly contains .nc1 files, returns `[root]`.
+    """
+    root = Path(root).resolve()
+    if not root.is_dir():
+        return []
+
+    discovered_subdirs: list[Path] = []
+    try:
+        top_children = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return []
+
+    stack: list[Path] = [
+        c for c in top_children if c.is_dir() and not _is_excluded_batch_dir(c.name)
+    ]
+    while stack:
+        current = stack.pop(0)
+        try:
+            children = sorted(current.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+
+        direct_nc1 = any(c.is_file() and c.suffix.lower() == ".nc1" for c in children)
+        if direct_nc1:
+            discovered_subdirs.append(current)
+
+        subdirs = [c for c in children if c.is_dir() and not _is_excluded_batch_dir(c.name)]
+        stack = subdirs + stack
+
+    if discovered_subdirs:
+        return discovered_subdirs
+
+    has_direct_nc1 = any(p.is_file() and p.suffix.lower() == ".nc1" for p in top_children)
+    if has_direct_nc1:
+        return [root]
+
+    return []
+
+
 def _collect_inputs(
     source_path: str | Path,
     source_mode: str,
@@ -4048,6 +4115,56 @@ def preview_cheson_pipeline(
     use_nesting_layers: bool = False,
 ) -> dict[str, Any]:
     """Dry-run inspection: detects cheson type, STYKKLISTE LENGDE, DXF audit, PDF check & 3D sim."""
+    src_path = Path(source_path).resolve()
+    if source_mode != "single_file" and src_path.is_dir():
+        batch_folders = discover_cheson_batch_folders(src_path, recursive=recursive)
+        is_multi = len(batch_folders) > 1 or (len(batch_folders) == 1 and batch_folders[0] != src_path)
+        if is_multi:
+            all_items: list[dict[str, Any]] = []
+            all_passed = True
+            total_bom_rows = 0
+            total_w_count = 0
+            a_drawings_count = 0
+            folder_names: list[str] = []
+            for sub_dir in batch_folders:
+                rel_name = str(sub_dir.relative_to(src_path)).replace("\\", "/")
+                folder_names.append(rel_name)
+                sub_prev = preview_cheson_pipeline(
+                    source_path=sub_dir,
+                    source_mode="folder",
+                    scope_mode=scope_mode,
+                    preset=preset,
+                    exact_gabarit_lock=exact_gabarit_lock,
+                    override_length_mm=override_length_mm,
+                    override_web_height_mm=override_web_height_mm,
+                    recursive=False,
+                    strip_residual_fragments=strip_residual_fragments,
+                    use_nesting_layers=use_nesting_layers,
+                )
+                if sub_prev.get("a_drawing"):
+                    a_drawings_count += 1
+                total_bom_rows += int(sub_prev.get("bom_rows_count", 0))
+                total_w_count += int(sub_prev.get("w_drawings_count", 0))
+                if not sub_prev.get("all_passed", True):
+                    all_passed = False
+                for item in sub_prev.get("nc1_items", []):
+                    item["folder_name"] = rel_name
+                    item["a_drawing"] = sub_prev.get("a_drawing")
+                    item["bom_assembly_id"] = sub_prev.get("bom_assembly_id")
+                    all_items.append(item)
+
+            return {
+                "is_multi_folder_batch": True,
+                "folders_count": len(batch_folders),
+                "folders": folder_names,
+                "a_drawing": f"{a_drawings_count}/{len(batch_folders)} foldere cu A-drawing",
+                "bom_assembly_id": None,
+                "bom_rows_count": total_bom_rows,
+                "w_drawings_count": total_w_count,
+                "all_passed": all_passed,
+                "nc1_items": all_items,
+            }
+
     _, _, nc1_files, a_pdf, bom, w_map = _collect_inputs(
         source_path, source_mode, scope_mode, recursive
     )
@@ -4122,6 +4239,8 @@ def preview_cheson_pipeline(
             )
 
     return {
+        "is_multi_folder_batch": False,
+        "folders_count": 1,
         "a_drawing": a_pdf.name if a_pdf else None,
         "bom_assembly_id": bom.assembly_id if bom else None,
         "bom_rows_count": len(bom.rows) if bom else 0,
@@ -4131,7 +4250,7 @@ def preview_cheson_pipeline(
     }
 
 
-def run_cheson_pipeline(
+def _run_cheson_single_folder(
     source_path: str | Path,
     dest_dir: str | Path,
     source_mode: str = "folder",
@@ -4151,7 +4270,7 @@ def run_cheson_pipeline(
     log_callback: Optional[Callable[[str], None]] = None,
     strip_residual_fragments: bool = True,
 ) -> dict[str, Any]:
-    """Run box-beam (.nc1) plate extraction with post-draw audit (NC1+PDF) & 3D assembly simulation."""
+    """Run box-beam (.nc1) plate extraction on a single file or isolated cheson folder."""
     def _log(msg: str) -> None:
         if log_callback:
             log_callback(msg)
@@ -4591,4 +4710,243 @@ def run_cheson_pipeline(
         "csv_path": str(csv_path) if csv_path else None,
         "dest_dir": str(out_root),
         "errors": errors,
+        "_entries": [asdict(e) for e in entries],
     }
+
+
+def run_cheson_pipeline(
+    source_path: str | Path,
+    dest_dir: str | Path,
+    source_mode: str = "folder",
+    scope_mode: str = "cheson_only",
+    preset: str = "auto",
+    export_format: str = "dwg_fallback",
+    use_nesting_layers: bool = False,
+    include_marking: bool = False,
+    organize_by_thickness: bool = True,
+    recursive: bool = False,
+    generate_reports: bool = True,
+    exact_gabarit_lock: bool = True,
+    override_length_mm: Optional[float] = None,
+    override_web_height_mm: Optional[float] = None,
+    oda_path: Optional[str] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
+    strip_residual_fragments: bool = True,
+    save_in_source_subfolders: bool = False,
+) -> dict[str, Any]:
+    """Run box-beam (.nc1) extraction on a single file, single folder, or multi-folder cheson batch."""
+    def _log(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
+
+    def _prog(val: float) -> None:
+        if progress_callback:
+            progress_callback(max(0.0, min(1.0, val)))
+
+    src = Path(source_path).resolve()
+    out_root = Path(dest_dir).resolve()
+
+    if source_mode != "single_file" and src.is_dir():
+        batch_folders = discover_cheson_batch_folders(src, recursive=recursive)
+        is_multi = len(batch_folders) > 1 or (len(batch_folders) == 1 and batch_folders[0] != src)
+        if is_multi:
+            report_root = src if save_in_source_subfolders else out_root
+            report_root.mkdir(parents=True, exist_ok=True)
+            _log(f"🗂️ BATCH AUTOMAT CHESON: {len(batch_folders)} foldere detectate în {src}")
+            _log(
+                "   Mod salvare: Direct în folderul fiecărui cheson"
+                if save_in_source_subfolders
+                else f"   Mod salvare: Mirror organizat în {out_root}"
+            )
+
+            all_verifications: list[dict[str, Any]] = []
+            all_audits: list[dict[str, Any]] = []
+            all_files: list[str] = []
+            all_errors: list[str] = []
+            all_entries: list[dict[str, Any]] = []
+            folder_summaries: list[dict[str, Any]] = []
+
+            total_nc1_plates = 0
+            total_w = 0
+            total_bom = 0
+            total_skipped = 0
+            batch_pass_count = 0
+            batch_check_count = 0
+
+            n_folders = len(batch_folders)
+            for idx, sub_dir in enumerate(batch_folders, start=1):
+                rel_folder = str(sub_dir.relative_to(src)).replace("\\", "/")
+                sub_out = sub_dir if save_in_source_subfolders else (out_root / sub_dir.relative_to(src))
+                _log(f"\n═══ [{idx}/{n_folders}] Folder cheson: {rel_folder} ═══")
+
+                def _sub_prog(p: float, i: int = idx - 1, n: int = n_folders) -> None:
+                    _prog((i + max(0.0, min(1.0, p))) / max(1, n))
+
+                try:
+                    sub_res = _run_cheson_single_folder(
+                        source_path=sub_dir,
+                        dest_dir=sub_out,
+                        source_mode="folder",
+                        scope_mode=scope_mode,
+                        preset=preset,
+                        export_format=export_format,
+                        use_nesting_layers=use_nesting_layers,
+                        include_marking=include_marking,
+                        organize_by_thickness=organize_by_thickness,
+                        recursive=False,
+                        generate_reports=generate_reports,
+                        exact_gabarit_lock=exact_gabarit_lock,
+                        override_length_mm=override_length_mm,
+                        override_web_height_mm=override_web_height_mm,
+                        oda_path=oda_path,
+                        progress_callback=_sub_prog,
+                        log_callback=_log,
+                        strip_residual_fragments=strip_residual_fragments,
+                    )
+                    sub_entries = sub_res.pop("_entries", [])
+                    sub_vers = sub_res.get("verifications") or []
+                    sub_audits = sub_res.get("post_draw_audits") or []
+                    sub_errs = sub_res.get("errors") or []
+
+                    for v in sub_vers:
+                        v["folder"] = rel_folder
+                    for a in sub_audits:
+                        a["folder"] = rel_folder
+                    for e in sub_entries:
+                        e_with_folder = {"cheson_folder": rel_folder, **e}
+                        if e.get("output_file") and not save_in_source_subfolders:
+                            e_with_folder["output_file"] = f"{rel_folder}/{e['output_file']}"
+                        all_entries.append(e_with_folder)
+
+                    all_verifications.extend(sub_vers)
+                    all_audits.extend(sub_audits)
+                    all_files.extend(sub_res.get("files") or [])
+                    all_errors.extend(f"[{rel_folder}] {er}" for er in sub_errs)
+
+                    total_nc1_plates += int(sub_res.get("plates_generated", 0))
+                    total_w += int(sub_res.get("w_drawings_converted", 0))
+                    total_bom += int(sub_res.get("bom_plates_generated", 0))
+                    total_skipped += int(sub_res.get("skipped", 0))
+
+                    folder_ok = (
+                        not sub_errs
+                        and all(v.get("passed", True) for v in sub_vers)
+                        and all(a.get("passed", True) for a in sub_audits)
+                    )
+                    if folder_ok:
+                        batch_pass_count += 1
+                    else:
+                        batch_check_count += 1
+
+                    folder_summaries.append({
+                        "folder": rel_folder,
+                        "status": "PASS" if folder_ok else "CHECK",
+                        "plates_generated": int(sub_res.get("plates_generated", 0)),
+                        "errors_count": len(sub_errs),
+                    })
+                except Exception as exc:
+                    batch_check_count += 1
+                    err_msg = f"[{rel_folder}] Eroare folder: {exc}"
+                    all_errors.append(err_msg)
+                    _log(f"❌ {err_msg}")
+                    folder_summaries.append({
+                        "folder": rel_folder,
+                        "status": "ERROR",
+                        "plates_generated": 0,
+                        "errors_count": 1,
+                    })
+                _prog(idx / max(1, n_folders))
+
+            manifest_path: Optional[Path] = None
+            csv_path: Optional[Path] = None
+            if generate_reports:
+                manifest_path = report_root / "batch_manifest.json"
+                batch_payload = {
+                    "batch_root": str(src),
+                    "save_in_source_subfolders": save_in_source_subfolders,
+                    "folders_processed": n_folders,
+                    "batch_pass_count": batch_pass_count,
+                    "batch_check_count": batch_check_count,
+                    "totals": {
+                        "plates_generated": total_nc1_plates,
+                        "w_drawings_converted": total_w,
+                        "bom_plates_generated": total_bom,
+                        "skipped": total_skipped,
+                    },
+                    "folders": folder_summaries,
+                    "verifications": all_verifications,
+                    "post_draw_audits": all_audits,
+                    "items": all_entries,
+                }
+                manifest_path.write_text(json.dumps(batch_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                csv_path = report_root / "batch_report.csv"
+                fieldnames = [
+                    "cheson_folder", "pos_no", "plate_name", "profile", "material",
+                    "thickness_mm", "width_mm", "length_mm", "qty_per_assembly",
+                    "assembly_qty", "total_qty", "classification", "status",
+                    "source_file", "output_folder", "output_file", "notes",
+                ]
+                with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
+                    writer = csv.DictWriter(fh, fieldnames=fieldnames)
+                    writer.writeheader()
+                    for row_d in all_entries:
+                        writer.writerow(row_d)
+
+            _prog(1.0)
+            _log(
+                f"\n🏁 BATCH FINALIZAT: {n_folders} foldere cheson ({batch_pass_count} PASS, {batch_check_count} CHECK) | "
+                f"{total_nc1_plates} piese NC1, {total_w} W-drawings, {total_bom} plăci BOM."
+            )
+            return {
+                "is_multi_folder_batch": True,
+                "folders_processed": n_folders,
+                "batch_pass_count": batch_pass_count,
+                "batch_check_count": batch_check_count,
+                "plates_generated": total_nc1_plates,
+                "w_drawings_converted": total_w,
+                "bom_plates_generated": total_bom,
+                "skipped": total_skipped,
+                "verifications": all_verifications,
+                "post_draw_audits": all_audits,
+                "files": all_files,
+                "manifest_path": str(manifest_path) if manifest_path else None,
+                "csv_path": str(csv_path) if csv_path else None,
+                "dest_dir": str(report_root),
+                "errors": all_errors,
+            }
+
+    res = _run_cheson_single_folder(
+        source_path=source_path,
+        dest_dir=dest_dir,
+        source_mode=source_mode,
+        scope_mode=scope_mode,
+        preset=preset,
+        export_format=export_format,
+        use_nesting_layers=use_nesting_layers,
+        include_marking=include_marking,
+        organize_by_thickness=organize_by_thickness,
+        recursive=recursive,
+        generate_reports=generate_reports,
+        exact_gabarit_lock=exact_gabarit_lock,
+        override_length_mm=override_length_mm,
+        override_web_height_mm=override_web_height_mm,
+        oda_path=oda_path,
+        progress_callback=progress_callback,
+        log_callback=log_callback,
+        strip_residual_fragments=strip_residual_fragments,
+    )
+    res.pop("_entries", None)
+    auds = res.get("post_draw_audits") or []
+    vers = res.get("verifications") or []
+    folder_ok = bool(
+        not res.get("errors")
+        and all(v.get("passed", True) for v in vers)
+        and all(a.get("passed", True) for a in auds)
+    )
+    res["is_multi_folder_batch"] = False
+    res["folders_processed"] = 1
+    res["batch_pass_count"] = 1 if folder_ok else 0
+    res["batch_check_count"] = 0 if folder_ok else 1
+    return res

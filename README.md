@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.12.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.12.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.12.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.13.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.13.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.13.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.12.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.12.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.13.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.13.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,8 @@
 
 ## 🚀 Funcționalități
 
-- **📦 Cheson / HSQ Extractor (Actualizat în v1.12.0 — Layer `0` Default, Reverificare Post-Desenare & Simulare Asamblare 3D)**:
+- **📦 Cheson / HSQ Extractor (Actualizat în v1.13.0 — Batch Automat Multi-Folder, Layer `0` Default, Reverificare Post-Desenare & Simulare Asamblare 3D)**:
+  - **Batch Automat Multi-Folder (`CHESON/<nume_cheson>/`)**: selectând folderul părinte în modul **`Folder Întreg (Batch)`**, aplicația descoperă automat toate subfolderele de chesoane (ex. `DSB-2094`, `DSB-2273`, ...), ignoră folderele de test/grosimi (`test`, `T5..T25`, `Cheson_Output`), procesează fiecare cheson complet izolat cu propriul `.nc1` + `A-drawing.pdf` (`STYKKLISTE`), și poate salva fie într-un mirror organizat la destinație, fie **direct în folderul fiecărui cheson** (plus rapoarte centrale `batch_manifest.json` și `batch_report.csv`).
   - **Auto-Detecție pentru toate cele 3 tipuri reale de secțiune**:
     1. **Tip 1 (Cheson cu Talpă):** talpă lată (`T`) + capac între inimi (`C`) + 2 laterale cu lățimea exactă `H - tf - tw`.
     2. **Tip 2 (Cheson fără Talpă):** 2 capace între inimi (`C1`, `C2`) + 2 laterale cu lățimea `H - 2*tw`.
