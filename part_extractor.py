@@ -390,7 +390,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1183,8 +1183,11 @@ class UnifiedApp(ctk.CTk):
         self.cheson_batch_dir = ctk.StringVar()
         self.cheson_dest_dir = ctk.StringVar()
         self.cheson_scope_mode = ctk.StringVar(value="Doar Piese Cheson (.nc1)")
-        self.cheson_preset_label = ctk.StringVar(value="Sudură colț atelier (184mm / -tw)")
+        self.cheson_preset_label = ctk.StringVar(value="Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)")
         self.cheson_format = ctk.StringVar(value="DWG (.dwg cu fallback .dxf)")
+        self.cheson_exact_gabarit = ctk.BooleanVar(value=True)
+        self.cheson_override_length = ctk.StringVar(value="")
+        self.cheson_override_web_h = ctk.StringVar(value="")
         self.cheson_use_layers = ctk.BooleanVar(value=True)
         self.cheson_include_marking = ctk.BooleanVar(value=False)
         self.cheson_organize_thickness = ctk.BooleanVar(value=True)
@@ -1360,8 +1363,11 @@ class UnifiedApp(ctk.CTk):
             self.cheson_batch_dir.set(s.get("cheson_batch_dir", ""))
             self.cheson_dest_dir.set(s.get("cheson_dest_dir", ""))
             self.cheson_scope_mode.set(s.get("cheson_scope_mode", "Doar Piese Cheson (.nc1)"))
-            self.cheson_preset_label.set(s.get("cheson_preset_label", "Sudură colț atelier (184mm / -tw)"))
+            self.cheson_preset_label.set(s.get("cheson_preset_label", "Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)"))
             self.cheson_format.set(s.get("cheson_format", "DWG (.dwg cu fallback .dxf)"))
+            self.cheson_exact_gabarit.set(s.get("cheson_exact_gabarit", True))
+            self.cheson_override_length.set(s.get("cheson_override_length", ""))
+            self.cheson_override_web_h.set(s.get("cheson_override_web_h", ""))
             self.cheson_use_layers.set(s.get("cheson_use_layers", True))
             self.cheson_include_marking.set(s.get("cheson_include_marking", False))
             self.cheson_organize_thickness.set(s.get("cheson_organize_thickness", True))
@@ -1546,6 +1552,9 @@ class UnifiedApp(ctk.CTk):
             "cheson_scope_mode": self.cheson_scope_mode.get(),
             "cheson_preset_label": self.cheson_preset_label.get(),
             "cheson_format": self.cheson_format.get(),
+            "cheson_exact_gabarit": self.cheson_exact_gabarit.get(),
+            "cheson_override_length": self.cheson_override_length.get(),
+            "cheson_override_web_h": self.cheson_override_web_h.get(),
             "cheson_use_layers": self.cheson_use_layers.get(),
             "cheson_include_marking": self.cheson_include_marking.get(),
             "cheson_organize_thickness": self.cheson_organize_thickness.get(),
@@ -7291,13 +7300,14 @@ class UnifiedApp(ctk.CTk):
         ctk.CTkOptionMenu(
             rule_frame,
             values=[
-                "Sudură colț atelier (184mm / -tw)",
-                "Nominal profil HSQ (NC1)",
-                "Ambele tălpi peste inimi (BOX)",
-                "Ambele tălpi între inimi (fără retragere)",
+                "Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)",
+                "Tip 1: Cheson cu Talpă (H - tf - tw)",
+                "Tip 2: Cheson fără Talpă (H - 2*tw)",
+                "Tip 3: Cheson Dublu cu Talpă Mijloc",
+                "Nominal profil HSQ (fără retragere tw)",
             ],
             variable=self.cheson_preset_label,
-            width=265,
+            width=320,
             height=30,
             corner_radius=6,
         ).pack(side="left", padx=(0, 10))
@@ -7315,9 +7325,37 @@ class UnifiedApp(ctk.CTk):
             corner_radius=6,
         ).pack(side="left", padx=(0, 8))
 
-        # Row 5: Compact checkboxes
+        # Row 5: Exact Gabarit Lock & Optional Manual Overrides (±0.001 mm)
+        gab_frame = ctk.CTkFrame(cfg_card, fg_color=("#eef2f6", "#182335"), corner_radius=6)
+        gab_frame.grid(row=5, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
+        ctk.CTkCheckBox(
+            gab_frame,
+            text="Blocare gabarit fix din STYKKLISTE / .nc1 (±0.001 mm)",
+            variable=self.cheson_exact_gabarit,
+            font=("Segoe UI", 11, "bold"),
+        ).pack(side="left", padx=(10, 16), pady=5)
+        ctk.CTkLabel(gab_frame, text="Lungime fixă (mm):", font=("Segoe UI", 11)).pack(side="left", padx=(4, 4), pady=5)
+        ctk.CTkEntry(
+            gab_frame,
+            textvariable=self.cheson_override_length,
+            placeholder_text="Auto",
+            width=85,
+            height=26,
+            corner_radius=4,
+        ).pack(side="left", padx=(0, 12), pady=5)
+        ctk.CTkLabel(gab_frame, text="Lățime laterală (mm):", font=("Segoe UI", 11)).pack(side="left", padx=(4, 4), pady=5)
+        ctk.CTkEntry(
+            gab_frame,
+            textvariable=self.cheson_override_web_h,
+            placeholder_text="Auto",
+            width=80,
+            height=26,
+            corner_radius=4,
+        ).pack(side="left", padx=(0, 10), pady=5)
+
+        # Row 6: Compact checkboxes
         chk_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
-        chk_frame.grid(row=5, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
+        chk_frame.grid(row=6, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
         ctk.CTkCheckBox(chk_frame, text="Layere Nesting (CUT_OUTER/INNER)", variable=self.cheson_use_layers).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Text Marcare (MARKING)", variable=self.cheson_include_marking).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Subfoldere Grosimi (T8/T25)", variable=self.cheson_organize_thickness).pack(side="left", padx=(0, 12))
@@ -7325,9 +7363,9 @@ class UnifiedApp(ctk.CTk):
         ctk.CTkCheckBox(chk_frame, text="Raport CSV/JSON", variable=self.cheson_generate_reports).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Deschide folder la final", variable=self.cheson_open_folder).pack(side="left")
 
-        # Row 6: Shared ODA status strip
+        # Row 7: Shared ODA status strip
         oda_frame = ctk.CTkFrame(cfg_card, fg_color=("#eef2f6", "#182335"), corner_radius=6)
-        oda_frame.grid(row=6, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 10))
+        oda_frame.grid(row=7, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 10))
         oda_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(oda_frame, text="ODA File Converter (DWG nativ):", font=("Segoe UI", 11)).grid(row=0, column=0, sticky="w", padx=10, pady=5)
         ctk.CTkEntry(
@@ -7361,18 +7399,31 @@ class UnifiedApp(ctk.CTk):
         )
         self.btn_cheson_start.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
+        self.btn_cheson_preview = ctk.CTkButton(
+            btn_row,
+            text="🔍 Verifică & Previzualizează Cote",
+            font=("Segoe UI", 12, "bold"),
+            width=235,
+            height=38,
+            corner_radius=8,
+            fg_color=("#0284c7", "#0369a1"),
+            hover_color=("#0369a1", "#0284c7"),
+            command=self.preview_cheson_process,
+        )
+        self.btn_cheson_preview.grid(row=0, column=1, sticky="e", padx=(0, 8))
+
         self.btn_cheson_open = ctk.CTkButton(
             btn_row,
             text="📂 Deschide Rezultate",
             font=("Segoe UI", 12, "bold"),
-            width=170,
+            width=165,
             height=38,
             corner_radius=8,
             fg_color=("#475569", "#334155"),
             hover_color=("#334155", "#475569"),
             command=self.open_cheson_output_folder,
         )
-        self.btn_cheson_open.grid(row=0, column=1, sticky="e")
+        self.btn_cheson_open.grid(row=0, column=2, sticky="e")
 
         self.cheson_progress = ctk.CTkProgressBar(act_card, height=10, corner_radius=5)
         self.cheson_progress.pack(fill="x", pady=2)
@@ -7461,14 +7512,20 @@ class UnifiedApp(ctk.CTk):
             scope_mode = "cheson_only"
 
         preset_raw = self.cheson_preset_label.get().lower()
-        if "nominal" in preset_raw:
+        if "tip 1" in preset_raw or "cu talpă" in preset_raw:
+            preset = "cheson_cu_talpa"
+        elif "tip 2" in preset_raw or "fără talpă" in preset_raw:
+            preset = "cheson_fara_talpa"
+        elif "tip 3" in preset_raw or "dublu" in preset_raw or "sudură colț" in preset_raw:
+            preset = "cheson_dublu"
+        elif "nominal" in preset_raw:
             preset = "nominal_parametric"
         elif "peste inimi" in preset_raw:
             preset = "box_both_over"
         elif "fără retragere" in preset_raw:
             preset = "box_both_between"
         else:
-            preset = "workshop_corner_weld"
+            preset = "auto"
 
         fmt_raw = self.cheson_format.get().lower()
         if "ambele" in fmt_raw:
@@ -7480,11 +7537,91 @@ class UnifiedApp(ctk.CTk):
 
         return source_mode, scope_mode, preset, export_fmt
 
+    def _parse_cheson_overrides(self):
+        def _opt_float(raw):
+            s = (raw or "").strip().replace(",", ".")
+            if not s:
+                return None
+            val = float(s)
+            return val if val > 0.0 else None
+
+        try:
+            ovr_len = _opt_float(self.cheson_override_length.get())
+        except ValueError:
+            raise ValueError(f"Lungime fixă invalidă: {self.cheson_override_length.get()!r}")
+        try:
+            ovr_web_h = _opt_float(self.cheson_override_web_h.get())
+        except ValueError:
+            raise ValueError(f"Lățime laterală invalidă: {self.cheson_override_web_h.get()!r}")
+        return ovr_len, ovr_web_h
+
+    def preview_cheson_process(self):
+        if self.cheson_running:
+            return
+        source_mode, scope_mode, preset, _ = self._resolve_cheson_params()
+        src_path = (
+            self.cheson_single_file.get().strip()
+            if source_mode == "single_file"
+            else self.cheson_batch_dir.get().strip()
+        )
+        if not src_path or not os.path.exists(src_path):
+            messagebox.showerror("Eroare", "Te rog selectează o sursă validă (.nc1 sau folder).")
+            return
+        try:
+            ovr_len, ovr_web_h = self._parse_cheson_overrides()
+            prev = cheson_extractor.preview_cheson_pipeline(
+                source_path=src_path,
+                source_mode=source_mode,
+                scope_mode=scope_mode,
+                preset=preset,
+                exact_gabarit_lock=self.cheson_exact_gabarit.get(),
+                override_length_mm=ovr_len,
+                override_web_height_mm=ovr_web_h,
+                recursive=self.cheson_recursive.get(),
+            )
+        except Exception as exc:
+            messagebox.showerror("Eroare Previzualizare", str(exc))
+            return
+
+        self.cheson_log_box.delete("1.0", "end")
+        self.cheson_log("🔍 PREVIZUALIZARE & VERIFICARE COTE GABARIT (±0.001 mm)")
+        if prev["a_drawing"]:
+            self.cheson_log(f"📋 A-drawing STYKKLISTE: {prev['a_drawing']} ({prev['bom_assembly_id']}, {prev['bom_rows_count']} repere)")
+        else:
+            self.cheson_log("📋 A-drawing STYKKLISTE: nedetectat în folder (folosire cote .nc1 / override manual)")
+        if scope_mode != "cheson_only":
+            self.cheson_log(f"📐 W-drawings detectate în folder: {prev['w_drawings_count']}")
+
+        for item in prev["nc1_items"]:
+            v = item["verification"]
+            badge = "✅ PASS" if v["passed"] else "⚠ CHECK"
+            self.cheson_log(f"\n🧩 {item['file']} | {item['profile']}")
+            self.cheson_log(f"   Tip detectat : {v['detected_type_label']}")
+            self.cheson_log(
+                f"   Gabarit      : L={v['l_assembled_mm']:.3f} mm (țintă {v['l_gabarit_target_mm']:.3f} [{v['l_source_label']}], brut NC1 {v['l_nc1_raw_mm']:.2f})"
+            )
+            self.cheson_log(
+                f"   Secțiune     : H={v['h_assembled_mm']:.3f}/{v['h_target_mm']:.3f} mm | B={v['w_assembled_mm']:.3f}/{v['w_target_mm']:.3f} mm"
+            )
+            self.cheson_log(
+                f"   Audit        : {badge} | Eroare max gabarit = {v['max_gabarit_error_mm']:.4f} mm | Contact talpă-laterală = {v['flange_web_contact_error_mm']:.4f} mm"
+            )
+            for pl in item["plates"]:
+                self.cheson_log(
+                    f"      • {pl['folder']}/{pl['name']}: {pl['length_mm']:.3f} × {pl['width_mm']:.3f} mm (T{int(round(pl['thickness']))}, {pl['role']})"
+                )
+
     def start_cheson_process(self):
         if self.cheson_running:
             return
 
         source_mode, scope_mode, preset, export_fmt = self._resolve_cheson_params()
+        try:
+            ovr_len, ovr_web_h = self._parse_cheson_overrides()
+        except ValueError as exc:
+            messagebox.showerror("Eroare Parametri", str(exc))
+            return
+
         if source_mode == "single_file":
             src_path = self.cheson_single_file.get().strip()
             if not src_path or not os.path.isfile(src_path):
@@ -7513,6 +7650,7 @@ class UnifiedApp(ctk.CTk):
         org_thick = self.cheson_organize_thickness.get()
         recursive = self.cheson_recursive.get()
         gen_reports = self.cheson_generate_reports.get()
+        exact_gab = self.cheson_exact_gabarit.get()
 
         def _worker():
             try:
@@ -7528,6 +7666,9 @@ class UnifiedApp(ctk.CTk):
                     organize_by_thickness=org_thick,
                     recursive=recursive,
                     generate_reports=gen_reports,
+                    exact_gabarit_lock=exact_gab,
+                    override_length_mm=ovr_len,
+                    override_web_height_mm=ovr_web_h,
                     oda_path=oda_path,
                     progress_callback=lambda p: self.after(0, lambda val=p: self.cheson_progress.set(val)),
                     log_callback=lambda m: self.after(0, lambda msg=m: self.cheson_log(msg)),

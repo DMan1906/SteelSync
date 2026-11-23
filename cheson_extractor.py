@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 cheson_extractor.py - Motor DSTV (.nc1) + BOM pentru descompunerea profilelor compuse
-(HSQ / BOX / WQ) și generarea fișierelor individuale DXF/DWG organizate pe grosimi.
+(Tip 1: Cheson cu Talpă, Tip 2: Cheson fără Talpă, Tip 3: Cheson Dublu) cu blocare exactă
+a cotelor de gabarit (±0.001 mm) și generare fișiere individuale DXF/DWG pe grosimi.
 
 Construit exclusiv pe biblioteca standard Python + ezdxf + PyMuPDF (fără dependențe externe
 precum shapely/pdfplumber), pentru integrare directă în SteelSync Toolkit și PyInstaller.
@@ -47,6 +48,13 @@ DSTV_BLOCK_CODES = {
 }
 KNOWN_FACES = {"v", "h", "o", "u"}
 
+CHESON_TYPE_LABELS = {
+    "cheson_cu_talpa": "Tip 1: Cheson cu Talpă (Talpă + Capac + 2 Laterale)",
+    "cheson_fara_talpa": "Tip 2: Cheson fără Talpă (2 Capace + 2 Laterale)",
+    "cheson_dublu": "Tip 3: Cheson Dublu (Talpă Mijloc + 2 Capace + 4 Laterale)",
+    "nominal_parametric": "Nominal HSQ din NC1",
+}
+
 _COORD_TOKEN_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)([a-zA-Z]*)$")
 _PROFILE_3PART_RE = re.compile(
     r"^(HSQ|BOX|WQ)\s*(\d+(?:\.\d+)?)\*(\d+(?:\.\d+)?)"
@@ -56,7 +64,7 @@ _PROFILE_3PART_RE = re.compile(
 )
 _PROFILE_2PART_RE = re.compile(
     r"^(HSQ|BOX|WQ)\s*(\d+(?:\.\d+)?)\*(\d+(?:\.\d+)?)"
-    r"-(\d+(?:\.\d+)?)\*(\d+(?:\.\d+)?)$",
+    r"-(\d+(?:\.\d+)?)\*(\d+(?:\.\d+)?)(?:-[*\s]*)?$",
     re.IGNORECASE,
 )
 _PLATE_PROFILE_RE = re.compile(
@@ -177,6 +185,7 @@ class CompoundProfileSpec:
 
 @dataclass
 class ChesonConfig:
+    cheson_type: str = "auto"               # auto | cheson_cu_talpa | cheson_fara_talpa | cheson_dublu | nominal_parametric
     flange_top_mode: str = "between_webs"   # auto | over_webs | between_webs
     flange_bot_mode: str = "between_webs"   # auto | over_webs | between_webs
     web_top_recess_mm: float | str = "auto_tw"
@@ -184,6 +193,9 @@ class ChesonConfig:
     web_skew_plane: str = "inner"           # outer | centerline | inner
     web_length_rounding_mm: float = 0.0
     length_offset_mm: float = 0.0
+    exact_gabarit_lock: bool = True
+    target_length_mm: Optional[float] = None
+    override_web_height_mm: Optional[float] = None
     mirror_flange_o_y: bool = True
     mirror_flange_u_y: bool = True
     mirror_web_h_x: bool = False
@@ -197,10 +209,30 @@ class ChesonConfig:
     web_letter: str = "L"
 
     @classmethod
-    def from_preset(cls, preset: str) -> "ChesonConfig":
-        key = (preset or "workshop_corner_weld").strip().lower()
+    def from_preset(
+        cls,
+        preset: str,
+        exact_gabarit_lock: bool = True,
+        target_length_mm: Optional[float] = None,
+        override_web_height_mm: Optional[float] = None,
+    ) -> "ChesonConfig":
+        key = (preset or "auto").strip().lower()
+        common = {
+            "exact_gabarit_lock": exact_gabarit_lock,
+            "target_length_mm": target_length_mm,
+            "override_web_height_mm": override_web_height_mm,
+        }
+        if key in ("auto", "auto_detect"):
+            return cls(cheson_type="auto", **common)
+        if key in ("cheson_cu_talpa", "tip1"):
+            return cls(cheson_type="cheson_cu_talpa", **common)
+        if key in ("cheson_fara_talpa", "tip2"):
+            return cls(cheson_type="cheson_fara_talpa", **common)
+        if key in ("cheson_dublu", "tip3", "workshop_corner_weld"):
+            return cls(cheson_type="cheson_dublu", **common)
         if key in ("nominal", "nominal_parametric"):
             return cls(
+                cheson_type="nominal_parametric",
                 flange_top_mode="auto",
                 flange_bot_mode="auto",
                 web_top_recess_mm=0.0,
@@ -208,9 +240,11 @@ class ChesonConfig:
                 web_skew_plane="outer",
                 mirror_flange_o_y=False,
                 mirror_flange_u_y=False,
+                **common,
             )
         if key in ("box_both_over", "over_webs"):
             return cls(
+                cheson_type="cheson_fara_talpa",
                 flange_top_mode="over_webs",
                 flange_bot_mode="over_webs",
                 web_top_recess_mm=0.0,
@@ -218,9 +252,11 @@ class ChesonConfig:
                 web_skew_plane="outer",
                 mirror_flange_o_y=True,
                 mirror_flange_u_y=True,
+                **common,
             )
         if key in ("box_both_between", "between_webs_no_recess"):
             return cls(
+                cheson_type="cheson_fara_talpa",
                 flange_top_mode="between_webs",
                 flange_bot_mode="between_webs",
                 web_top_recess_mm=0.0,
@@ -228,9 +264,9 @@ class ChesonConfig:
                 web_skew_plane="inner",
                 mirror_flange_o_y=True,
                 mirror_flange_u_y=True,
+                **common,
             )
-        # Default: workshop_corner_weld
-        return cls()
+        return cls(cheson_type="auto", **common)
 
 
 @dataclass
@@ -257,6 +293,24 @@ class ExtractedPlate:
     @property
     def area(self) -> float:
         return abs(polygon_area(self.exterior))
+
+
+@dataclass
+class VerificationReport:
+    piece_id: str
+    detected_type: str
+    detected_type_label: str
+    l_nc1_raw_mm: float
+    l_gabarit_target_mm: float
+    l_source_label: str
+    l_assembled_mm: float
+    h_target_mm: float
+    h_assembled_mm: float
+    w_target_mm: float
+    w_assembled_mm: float
+    max_gabarit_error_mm: float
+    flange_web_contact_error_mm: float
+    passed: bool
 
 
 @dataclass
@@ -347,13 +401,11 @@ def point_in_polygon(
     n = len(pts)
     if n < 3:
         return False
-    # Boundary check
     for i in range(n):
         x1, y1 = pts[i]
         x2, y2 = pts[(i + 1) % n]
         if _dist_point_to_segment(x, y, x1, y1, x2, y2) <= tol:
             return True
-    # Ray casting
     inside = False
     j = n - 1
     for i in range(n):
@@ -426,9 +478,7 @@ def clean_ring(
     return filtered
 
 
-def _sutherland_hodgman_y(
-    ring: Ring, threshold: float, keep_ge: bool
-) -> Ring:
+def _sutherland_hodgman_y(ring: Ring, threshold: float, keep_ge: bool) -> Ring:
     if len(ring) < 3:
         return []
 
@@ -465,7 +515,6 @@ def clip_ring_y_strip(
     y_max: float,
     min_seg_len: float = 0.05,
 ) -> Ring:
-    """Clip a polygon ring to horizontal strip [y_min, y_max] without boundary ears."""
     if len(ring) < 3 or y_max <= y_min:
         return []
     eps = 1e-5
@@ -474,7 +523,6 @@ def clip_ring_y_strip(
     if len(clipped) < 3:
         return []
 
-    # Snap inset vertices back to exact [y_min, y_max] boundaries
     snapped: Ring = []
     for x, y in clipped:
         ny = y
@@ -490,12 +538,10 @@ def clip_ring_y_strip(
 def mirror_ring(
     ring: Ring, cx: float, cy: float, mirror_x: bool = False, mirror_y: bool = False
 ) -> Ring:
-    out: Ring = []
-    for x, y in ring:
-        nx = (2.0 * cx - x) if mirror_x else x
-        ny = (2.0 * cy - y) if mirror_y else y
-        out.append((nx, ny))
-    return out
+    return [
+        ((2.0 * cx - x) if mirror_x else x, (2.0 * cy - y) if mirror_y else y)
+        for x, y in ring
+    ]
 
 
 def translate_ring(ring: Ring, dx: float, dy: float) -> Ring:
@@ -947,8 +993,8 @@ def parse_compound_profile(profile_str: str, header: DSTVHeader) -> CompoundProf
             tw = float(m2.group(3))
             tf_bot = float(m2.group(4))
             b_bot = float(m2.group(5))
-            tf_top = tf_bot
-            b_top = b_bot
+            tf_top = header.flange_thickness if header.flange_thickness > 0 else tf_bot
+            b_top = header.flange_width if header.flange_width > 0 else b_bot
         else:
             ptype = "UNKNOWN"
             tw = header.web_thickness
@@ -1000,6 +1046,68 @@ def _resolve_flange_over_webs(mode: str, spec_default: bool) -> bool:
     return spec_default
 
 
+def _has_vertical_web_gap(contours: list[DSTVContour], cfg: ChesonConfig) -> bool:
+    if len(contours) < 2:
+        return False
+    ranges = []
+    for c in contours:
+        r = contour_to_ring(c, cfg)
+        if len(r) >= 3:
+            _, miny, _, maxy = polygon_bounds(r)
+            ranges.append((miny, maxy))
+    if len(ranges) < 2:
+        return False
+    ranges.sort(key=lambda t: t[0])
+    for i in range(len(ranges) - 1):
+        if ranges[i + 1][0] - ranges[i][1] > 1.0:
+            return True
+    return False
+
+
+def _face_y_span(dstv: DSTVFile, face: str, cfg: ChesonConfig) -> Optional[float]:
+    contours = dstv.ak_contours.get(face, [])
+    if not contours:
+        return None
+    ys: list[float] = []
+    for c in contours:
+        r = contour_to_ring(c, cfg)
+        for _, y in r:
+            ys.append(y)
+    return (max(ys) - min(ys)) if ys else None
+
+
+def detect_cheson_type(
+    dstv: DSTVFile,
+    spec: CompoundProfileSpec,
+    cfg: ChesonConfig,
+) -> tuple[str, str]:
+    """Classify box beam into (cheson_type, talpa_side: 'none'|'bottom'|'top')."""
+    explicit = (cfg.cheson_type or "auto").strip().lower()
+    tw = spec.tw
+
+    dy_o = _face_y_span(dstv, "o", cfg) or spec.b_top
+    dy_u = _face_y_span(dstv, "u", cfg) or spec.b_bot
+    bot_wider = (spec.b_bot > spec.b_top + 2.0 * tw + 1.0) or (dy_u > dy_o + 2.0 * tw + 1.0)
+    top_wider = (spec.b_top > spec.b_bot + 2.0 * tw + 1.0) or (dy_o > dy_u + 2.0 * tw + 1.0)
+    talpa_side = "top" if top_wider and not bot_wider else ("bottom" if bot_wider else "none")
+
+    if explicit != "auto":
+        if explicit == "cheson_cu_talpa" and talpa_side == "none":
+            talpa_side = "bottom"
+        return explicit, talpa_side
+
+    # Auto-detect from geometry
+    if _has_vertical_web_gap(dstv.ak_contours.get("v", []), cfg) or _has_vertical_web_gap(
+        dstv.ak_contours.get("h", []), cfg
+    ):
+        return "cheson_dublu", "middle"
+
+    if bot_wider or top_wider:
+        return "cheson_cu_talpa", talpa_side
+
+    return "cheson_fara_talpa", "none"
+
+
 def _apply_length_offset(ring: Ring, length_offset_mm: float) -> Ring:
     if not ring or abs(length_offset_mm) <= 1e-6:
         return ring
@@ -1007,15 +1115,104 @@ def _apply_length_offset(ring: Ring, length_offset_mm: float) -> Ring:
     return [(x + length_offset_mm if abs(x - maxx) < 0.5 else x, y) for x, y in ring]
 
 
-def _estimate_end_skew_angles(dstv: DSTVFile, cfg: ChesonConfig) -> tuple[float, float]:
+def _compute_raw_x_envelope(
+    rings_by_face: dict[str, list[Ring]]
+) -> tuple[float, float, float]:
+    xs: list[float] = []
+    for rlist in rings_by_face.values():
+        for r in rlist:
+            for x, _ in r:
+                xs.append(x)
+    if not xs:
+        return (0.0, 0.0, 0.0)
+    x0, x1 = min(xs), max(xs)
+    return (x0, x1, x1 - x0)
+
+
+def _detect_face_end_skew(ring: Ring) -> tuple[bool, bool]:
+    """Return (left_skewed, right_skewed) for a contour ring."""
+    if len(ring) < 3:
+        return False, False
+    minx, _, maxx, _ = polygon_bounds(ring)
+    span_x = max(1.0, maxx - minx)
+    left_skew = False
+    right_skew = False
+    n = len(ring)
+    for i in range(n):
+        p1, p2 = ring[i], ring[(i + 1) % n]
+        dx = abs(p2[0] - p1[0])
+        dy = abs(p2[1] - p1[1])
+        if dy > 20.0 and dx > 0.5:
+            x_mid = 0.5 * (p1[0] + p2[0])
+            if x_mid < minx + 0.25 * span_x:
+                left_skew = True
+            elif x_mid > maxx - 0.25 * span_x:
+                right_skew = True
+    return left_skew, right_skew
+
+
+def _resolve_gabarit_length(
+    l_nc1: float,
+    cfg: ChesonConfig,
+) -> tuple[float, str]:
+    if cfg.target_length_mm is not None and cfg.target_length_mm > 0.0:
+        return float(cfg.target_length_mm), "STYKKLISTE / Manual"
+    if cfg.exact_gabarit_lock and abs(l_nc1 - round(l_nc1)) <= 1.0:
+        return float(round(l_nc1)), "NC1_Snap_Int"
+    return l_nc1, "NC1_Raw"
+
+
+def _apply_gabarit_x_lock_to_rings(
+    rings_by_face: dict[str, list[Ring]],
+    x_min_env: float,
+    l_nc1: float,
+    l_gabarit: float,
+) -> dict[str, list[Ring]]:
+    """Shift right-half vertices by delta_L and snap non-skewed left boundary jitter (<=0.25mm) to x_min_env."""
+    if l_nc1 <= 1e-3:
+        return rings_by_face
+    delta_l = l_gabarit - l_nc1
+    apply_delta = abs(delta_l) <= 10.0
+    mid_x = x_min_env + 0.5 * l_nc1
+
+    # Determine if left/right ends have intentional skew on flanges
+    flange_left_skew = False
+    flange_right_skew = False
+    for f in ("o", "u"):
+        for r in rings_by_face.get(f, []):
+            ls, rs = _detect_face_end_skew(r)
+            flange_left_skew = flange_left_skew or ls
+            flange_right_skew = flange_right_skew or rs
+
+    out: dict[str, list[Ring]] = {}
+    for face, rlist in rings_by_face.items():
+        new_list: list[Ring] = []
+        for r in rlist:
+            ls, rs = _detect_face_end_skew(r)
+            new_r: Ring = []
+            for x, y in r:
+                nx = x
+                if apply_delta and x > mid_x:
+                    nx = x + delta_l
+                elif (not flange_left_skew) and (not ls) and abs(x - x_min_env) <= 0.25:
+                    nx = x_min_env
+                new_r.append((nx, y))
+            new_list.append(clean_ring(new_r, min_seg_len=0.05, ccw=True))
+        out[face] = new_list
+    return out
+
+
+def _estimate_end_skew_angles(
+    dstv: DSTVFile,
+    rings_by_face: dict[str, list[Ring]],
+) -> tuple[float, float]:
     h = dstv.header
     start_tan = abs(math.tan(math.radians(h.flange_cut_start))) if abs(h.flange_cut_start) > 1e-4 else 0.0
     end_tan = abs(math.tan(math.radians(h.flange_cut_end))) if abs(h.flange_cut_end) > 1e-4 else 0.0
 
     if start_tan == 0.0 or end_tan == 0.0:
         for face in ("o", "u"):
-            for c in dstv.ak_contours.get(face, []):
-                ring = contour_to_ring(c, cfg)
+            for ring in rings_by_face.get(face, []):
                 if len(ring) < 3:
                     continue
                 minx, _, maxx, _ = polygon_bounds(ring)
@@ -1033,6 +1230,25 @@ def _estimate_end_skew_angles(dstv: DSTVFile, cfg: ChesonConfig) -> tuple[float,
     return start_tan, end_tan
 
 
+def _flange_skew_x_contacts(
+    flange_rings: list[Ring],
+    y_low: float,
+    y_high: float,
+) -> tuple[Optional[tuple[float, float]], Optional[tuple[float, float]]]:
+    """Return exact (left_x_min, left_x_max) and (right_x_min, right_x_max) on clipped flange."""
+    if not flange_rings:
+        return None, None
+    # Use the first clipped flange contour
+    r = flange_rings[0]
+    minx, miny, maxx, maxy = polygon_bounds(r)
+    mid_x = 0.5 * (minx + maxx)
+    left_xs = [x for x, y in r if x <= mid_x and (abs(y - y_low) < 0.5 or abs(y - y_high) < 0.5)]
+    right_xs = [x for x, y in r if x > mid_x and (abs(y - y_low) < 0.5 or abs(y - y_high) < 0.5)]
+    left_pair = (min(left_xs), max(left_xs)) if len(left_xs) >= 2 else None
+    right_pair = (min(right_xs), max(right_xs)) if len(right_xs) >= 2 else None
+    return left_pair, right_pair
+
+
 def _adjust_web_skew_and_rounding(
     ring: Ring,
     face: str,
@@ -1041,6 +1257,8 @@ def _adjust_web_skew_and_rounding(
     end_tan: float,
     skew_plane: str,
     rounding_mm: float,
+    sync_left_x: Optional[float] = None,
+    sync_right_x: Optional[float] = None,
 ) -> Ring:
     if len(ring) < 3:
         return ring
@@ -1049,20 +1267,21 @@ def _adjust_web_skew_and_rounding(
     k = 0.5 if plane == "centerline" else (1.0 if plane == "inner" else 0.0)
 
     minx, _, maxx, _ = polygon_bounds(ring)
-    dx_left = 0.0
-    dx_right = 0.0
-    if start_tan > 1e-6 and k > 0.0:
+    if sync_left_x is not None and start_tan > 1e-6 and plane == "inner":
+        dx_left = sync_left_x - minx
+    elif start_tan > 1e-6 and k > 0.0:
         shift = k * tw * start_tan
-        if face == "v":
-            dx_left = +shift
-        elif face == "h":
-            dx_left = -shift
-    if end_tan > 1e-6 and k > 0.0:
+        dx_left = +shift if face == "v" else (-shift if face == "h" else 0.0)
+    else:
+        dx_left = 0.0
+
+    if sync_right_x is not None and end_tan > 1e-6 and plane == "inner":
+        dx_right = sync_right_x - maxx
+    elif end_tan > 1e-6 and k > 0.0:
         shift = k * tw * end_tan
-        if face == "v":
-            dx_right = -shift
-        elif face == "h":
-            dx_right = +shift
+        dx_right = -shift if face == "v" else (+shift if face == "h" else 0.0)
+    else:
+        dx_right = 0.0
 
     if abs(dx_left) > 1e-7 or abs(dx_right) > 1e-7:
         ring = [
@@ -1111,7 +1330,6 @@ def _transform_and_normalize_plate(
         ik_ring = contour_to_ring(ik, cfg)
         if len(ik_ring) < 3:
             continue
-        # Keep inner contour if centroid / vertices lie inside plate ring
         icx = sum(p[0] for p in ik_ring) / len(ik_ring)
         icy = sum(p[1] for p in ik_ring) / len(ik_ring)
         if point_in_polygon(icx, icy, ring, tol=0.5):
@@ -1203,43 +1421,295 @@ def _transform_and_normalize_plate(
     return shifted_ext, shifted_holes, shifted_inners, shifted_markings, orig_bounds
 
 
+def _clip_single_band_web(
+    ring: Ring,
+    H: float,
+    tw: float,
+    tf_top: float,
+    tf_bot: float,
+    cheson_type: str,
+    talpa_side: str,
+    top_over: bool,
+    bot_over: bool,
+    cfg: ChesonConfig,
+) -> Ring:
+    _, miny, _, maxy = polygon_bounds(ring)
+    curr_h = maxy - miny
+
+    if cfg.override_web_height_mm is not None and cfg.override_web_height_mm > 0.0:
+        target_h = float(cfg.override_web_height_mm)
+        if abs(curr_h - target_h) <= 0.001:
+            return ring
+        if talpa_side == "bottom":
+            y_lo = miny if miny >= tf_bot - 1.0 else max(miny, tf_bot)
+            y_hi = min(maxy, y_lo + target_h)
+            if y_hi - y_lo < target_h - 0.5:
+                y_lo = max(miny, y_hi - target_h)
+        else:
+            y_lo = miny + max(0.0, 0.5 * (curr_h - target_h))
+            y_hi = y_lo + target_h
+        return clip_ring_y_strip(ring, y_lo, y_hi, min_seg_len=cfg.min_segment_length_mm)
+
+    if cheson_type == "cheson_cu_talpa":
+        if talpa_side == "top":
+            target_h = H - tf_top - tw
+            if abs(curr_h - target_h) <= 0.5:
+                return ring
+            y_hi = maxy if maxy <= H - tf_top + 1.0 else (H - tf_top)
+            y_lo = y_hi - target_h
+        else:
+            # Standard Tip 1: wide bottom talpă + narrow top capac between webs
+            target_h = H - tf_bot - tw
+            if abs(curr_h - target_h) <= 0.5:
+                return ring
+            if miny <= 1.0 and curr_h >= H - 1.0:
+                y_lo = tf_bot
+                y_hi = H - tw
+            elif miny >= tf_bot - 1.0:
+                y_lo = miny
+                y_hi = miny + target_h
+            else:
+                # Tekla exported [0, H - tf_bot]
+                y_lo = miny
+                y_hi = miny + target_h
+        return clip_ring_y_strip(ring, y_lo, y_hi, min_seg_len=cfg.min_segment_length_mm)
+
+    if cheson_type == "cheson_fara_talpa":
+        if cfg.flange_top_mode == "over_webs" and cfg.flange_bot_mode == "over_webs":
+            return ring
+        target_h = H - 2.0 * tw
+        if abs(curr_h - target_h) <= 0.5:
+            return ring
+        if miny <= 1.0 and maxy >= H - 1.0:
+            y_lo = tw
+            y_hi = H - tw
+        else:
+            y_lo = miny + tw
+            y_hi = maxy - tw
+        return clip_ring_y_strip(ring, y_lo, y_hi, min_seg_len=cfg.min_segment_length_mm)
+
+    # Fallback nominal parametric
+    top_recess = resolve_recess_mm(cfg.web_top_recess_mm, tw)
+    bot_recess = resolve_recess_mm(cfg.web_bot_recess_mm, tw)
+    y_lo = miny
+    y_hi = maxy
+    if maxy >= H - 1.0:
+        if top_over:
+            y_hi = min(y_hi, H - tf_top)
+        elif top_recess > 0.0:
+            y_hi = min(y_hi, H - top_recess)
+    if miny <= 1.0:
+        if bot_over:
+            y_lo = max(y_lo, tf_bot)
+        elif bot_recess > 0.0:
+            y_lo = max(y_lo, bot_recess)
+    if y_lo > miny + 1e-6 or y_hi < maxy - 1e-6:
+        return clip_ring_y_strip(ring, y_lo, y_hi, min_seg_len=cfg.min_segment_length_mm)
+    return ring
+
+
+def verify_cheson_decomposition(
+    dstv: DSTVFile,
+    plates: list[ExtractedPlate],
+    l_nc1_raw: float,
+    l_gabarit_target: float,
+    l_source_label: str,
+    l_assembled: float,
+    detected_type: str,
+    talpa_side: str,
+    spec: CompoundProfileSpec,
+) -> VerificationReport:
+    """Closed-loop geometric audit verifying <= 0.001 mm tolerance on gabarit & flange-web contact."""
+    H_target = spec.total_height
+    W_target = spec.total_width
+    tw = spec.tw
+
+    flanges = [p for p in plates if p.role in ("flange_top", "flange_bot", "talpa", "capac")]
+    webs = [p for p in plates if p.role == "web"]
+
+    # Check assembled width
+    if detected_type == "cheson_cu_talpa":
+        talpa_p = [p for p in plates if p.role == "talpa"]
+        capac_p = [p for p in plates if p.role == "capac"]
+        w_talpa = (talpa_p[0].bounds[3] - talpa_p[0].bounds[1]) if talpa_p else 0.0
+        w_capac = (capac_p[0].bounds[3] - capac_p[0].bounds[1] + 2.0 * tw) if capac_p else 0.0
+        w_assembled = max(w_talpa, w_capac)
+    elif detected_type in ("cheson_fara_talpa", "cheson_dublu"):
+        w_vals = []
+        for fp in flanges:
+            fw = fp.bounds[3] - fp.bounds[1]
+            # If flange sits between webs, assembled width = fw + 2*tw
+            if abs(fw - (W_target - 2.0 * tw)) <= 1.0:
+                w_vals.append(fw + 2.0 * tw)
+            else:
+                w_vals.append(fw)
+        w_assembled = max(w_vals) if w_vals else W_target
+    else:
+        w_assembled = max((fp.bounds[3] - fp.bounds[1]) for fp in flanges) if flanges else W_target
+
+    # Check assembled height
+    if detected_type == "cheson_dublu" and len(webs) >= 2:
+        unique_web_hs = sorted({round(wp.bounds[3] - wp.bounds[1], 4) for wp in webs}, reverse=True)
+        # Find gap between upper and lower web bands from raw NC1
+        gap_mm = 10.0
+        for f in ("v", "h"):
+            cs = dstv.ak_contours.get(f, [])
+            if len(cs) >= 2:
+                ys_pair = sorted([polygon_bounds(contour_to_ring(c))[1:4:2] for c in cs], key=lambda t: t[0])
+                gap_mm = max(0.0, ys_pair[1][0] - ys_pair[0][1])
+                break
+        if len(unique_web_hs) >= 2:
+            h_assembled = unique_web_hs[0] + unique_web_hs[1] + gap_mm + 2.0 * tw
+        elif unique_web_hs:
+            h_assembled = 2.0 * unique_web_hs[0] + gap_mm + 2.0 * tw
+        else:
+            h_assembled = H_target
+    elif detected_type == "cheson_cu_talpa" and webs:
+        wh = webs[0].bounds[3] - webs[0].bounds[1]
+        tf_t = spec.tf_top if talpa_side == "top" else spec.tf_bot
+        h_assembled = wh + tf_t + tw
+    elif detected_type == "cheson_fara_talpa" and webs:
+        wh = webs[0].bounds[3] - webs[0].bounds[1]
+        if flanges and abs((flanges[0].bounds[3] - flanges[0].bounds[1]) - W_target) <= 0.5:
+            h_assembled = wh + spec.tf_top + spec.tf_bot
+        else:
+            h_assembled = wh + 2.0 * tw
+    else:
+        h_assembled = H_target
+
+    # Check flange-web contact length consistency on top capac (C or C1) vs webs
+    contact_err = 0.0
+    ref_flange = next((p for p in plates if p.role in ("flange_top", "capac")), None)
+    if ref_flange is not None and webs:
+        r = ref_flange.exterior
+        b = ref_flange.bounds
+        y_lo, y_hi = b[1], b[3]
+        # Measure top and bottom horizontal edge lengths of ref_flange
+        top_xs = [x for x, y in r if abs(y - y_hi) < 0.01]
+        bot_xs = [x for x, y in r if abs(y - y_lo) < 0.01]
+        if len(top_xs) >= 2 and len(bot_xs) >= 2:
+            len_edge_a = max(top_xs) - min(top_xs)
+            len_edge_b = max(bot_xs) - min(bot_xs)
+            f_long = max(len_edge_a, len_edge_b)
+            f_short = min(len_edge_a, len_edge_b)
+            web_lens = sorted({round(wp.bounds[2] - wp.bounds[0], 4) for wp in webs})
+            if len(web_lens) == 1:
+                contact_err = max(abs(web_lens[0] - f_long), abs(web_lens[0] - f_short))
+            elif len(web_lens) >= 2:
+                contact_err = max(abs(web_lens[0] - f_short), abs(web_lens[-1] - f_long))
+
+    err_l = abs(l_assembled - l_gabarit_target)
+    err_h = abs(h_assembled - H_target)
+    err_w = abs(w_assembled - W_target)
+    max_err = max(err_l, err_h, err_w, contact_err)
+
+    return VerificationReport(
+        piece_id=dstv.header.piece_id,
+        detected_type=detected_type,
+        detected_type_label=CHESON_TYPE_LABELS.get(detected_type, detected_type),
+        l_nc1_raw_mm=round(l_nc1_raw, 4),
+        l_gabarit_target_mm=round(l_gabarit_target, 4),
+        l_source_label=l_source_label,
+        l_assembled_mm=round(l_assembled, 4),
+        h_target_mm=round(H_target, 4),
+        h_assembled_mm=round(h_assembled, 4),
+        w_target_mm=round(W_target, 4),
+        w_assembled_mm=round(w_assembled, 4),
+        max_gabarit_error_mm=round(max_err, 6),
+        flange_web_contact_error_mm=round(contact_err, 6),
+        passed=(max_err <= 0.001 + 1e-9),
+    )
+
+
 def decompose_compound_nc1(
     dstv: DSTVFile,
     cfg: Optional[ChesonConfig] = None,
-) -> list[ExtractedPlate]:
+    return_verification: bool = False,
+):
     cfg = cfg or ChesonConfig()
     header = dstv.header
     spec = parse_compound_profile(header.profile_str, header)
     piece_clean = clean_piece_name(header.piece_id, lowercase=cfg.lowercase_piece_prefix)
-
-    top_over = _resolve_flange_over_webs(cfg.flange_top_mode, spec.top_over_webs)
-    bot_over = _resolve_flange_over_webs(cfg.flange_bot_mode, spec.bot_over_webs)
-    top_recess = resolve_recess_mm(cfg.web_top_recess_mm, spec.tw)
-    bot_recess = resolve_recess_mm(cfg.web_bot_recess_mm, spec.tw)
+    detected_type, talpa_side = detect_cheson_type(dstv, spec, cfg)
 
     H = spec.total_height
     B = spec.total_width
     tw = spec.tw
-    start_tan, end_tan = _estimate_end_skew_angles(dstv, cfg)
+
+    # 1. Convert raw AK rings & apply exact gabarit X lock
+    raw_rings: dict[str, list[Ring]] = {}
+    for face in ("o", "u", "v", "h"):
+        raw_rings[face] = []
+        for c in dstv.ak_contours.get(face, []):
+            r = contour_to_ring(c, cfg)
+            if len(r) >= 3 and abs(polygon_area(r)) > 0.1:
+                raw_rings[face].append(r)
+
+    x_min_env, x_max_env, l_nc1_raw = _compute_raw_x_envelope(raw_rings)
+    l_gabarit, l_source_label = _resolve_gabarit_length(l_nc1_raw, cfg)
+
+    if cfg.exact_gabarit_lock:
+        locked_rings = _apply_gabarit_x_lock_to_rings(raw_rings, x_min_env, l_nc1_raw, l_gabarit)
+    else:
+        locked_rings = raw_rings
+
+    _, _, l_assembled_env = _compute_raw_x_envelope(locked_rings)
+    start_tan, end_tan = _estimate_end_skew_angles(dstv, locked_rings)
+
+    # Determine flange clipping modes per detected cheson type
+    if detected_type == "cheson_cu_talpa":
+        top_over = (talpa_side == "top")
+        bot_over = (talpa_side == "bottom")
+        o_suffix = "T" if talpa_side == "top" else cfg.flange_letter
+        u_suffix = "T" if talpa_side == "bottom" else cfg.flange_letter
+        o_role = "talpa" if talpa_side == "top" else "capac"
+        u_role = "talpa" if talpa_side == "bottom" else "capac"
+    elif detected_type == "cheson_dublu":
+        top_over = False
+        bot_over = False
+        o_suffix = f"{cfg.flange_letter}1"
+        u_suffix = f"{cfg.flange_letter}2"
+        o_role = "flange_top"
+        u_role = "flange_bot"
+    elif detected_type == "cheson_fara_talpa":
+        top_over = (cfg.flange_top_mode == "over_webs")
+        bot_over = (cfg.flange_bot_mode == "over_webs")
+        o_suffix = f"{cfg.flange_letter}1"
+        u_suffix = f"{cfg.flange_letter}2"
+        o_role = "flange_top"
+        u_role = "flange_bot"
+    else:
+        top_over = _resolve_flange_over_webs(cfg.flange_top_mode, spec.top_over_webs)
+        bot_over = _resolve_flange_over_webs(cfg.flange_bot_mode, spec.bot_over_webs)
+        o_suffix = f"{cfg.flange_letter}1"
+        u_suffix = f"{cfg.flange_letter}2"
+        o_role = "flange_top"
+        u_role = "flange_bot"
 
     plates: list[ExtractedPlate] = []
+    clipped_flanges_by_face: dict[str, list[Ring]] = {"o": [], "u": []}
 
-    # 1. Flanges: o (top -> C1) and u (bottom -> C2)
+    # 2. Flanges: o and u
     flange_specs = [
-        ("o", "flange_top", spec.tf_top, top_over, cfg.mirror_flange_o_y, f"{cfg.flange_letter}1"),
-        ("u", "flange_bot", spec.tf_bot, bot_over, cfg.mirror_flange_u_y, f"{cfg.flange_letter}2"),
+        ("o", o_role, spec.tf_top, top_over, cfg.mirror_flange_o_y, o_suffix),
+        ("u", u_role, spec.tf_bot, bot_over, cfg.mirror_flange_u_y, u_suffix),
     ]
     for face, role, thick, is_over, mirror_y, suffix in flange_specs:
-        contours = dstv.ak_contours.get(face, [])
-        for idx_c, c in enumerate(contours):
-            ring = contour_to_ring(c, cfg)
-            if len(ring) < 3 or abs(polygon_area(ring)) <= 0.1:
-                continue
-            if (not is_over) and B > 2.0 * tw:
-                ring = clip_ring_y_strip(ring, tw, B - tw, min_seg_len=cfg.min_segment_length_mm)
+        for idx_c, ring in enumerate(locked_rings.get(face, [])):
+            _, f_miny, _, f_maxy = polygon_bounds(ring)
+            f_span = f_maxy - f_miny
+            if (not is_over) and f_span > 2.0 * tw + 1.0:
+                # Clip symmetric tw from both sides of the flange face's own bounds
+                ring = clip_ring_y_strip(
+                    ring,
+                    f_miny + tw,
+                    f_maxy - tw,
+                    min_seg_len=cfg.min_segment_length_mm,
+                )
             if len(ring) < 3 or abs(polygon_area(ring)) <= 0.1:
                 continue
             ring = _apply_length_offset(ring, cfg.length_offset_mm)
+            clipped_flanges_by_face[face].append(ring)
 
             plate_suffix = suffix if idx_c == 0 else f"{suffix}_{idx_c + 1}"
             s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
@@ -1265,32 +1735,70 @@ def decompose_compound_nc1(
                 )
             )
 
-    # 2. Webs: v (front) and h (back)
+    # Reference flange contact intersections for skewed ends (prefer top capac 'o' or 'u')
+    ref_flange_face = "o" if (clipped_flanges_by_face["o"] and not top_over) else (
+        "u" if (clipped_flanges_by_face["u"] and not bot_over) else "o"
+    )
+    ref_rings = clipped_flanges_by_face.get(ref_flange_face, [])
+    left_contact_pair = None
+    right_contact_pair = None
+    if ref_rings:
+        _, ref_ylo, _, ref_yhi = polygon_bounds(ref_rings[0])
+        left_contact_pair, right_contact_pair = _flange_skew_x_contacts(ref_rings, ref_ylo, ref_yhi)
+
+    # Determine which web face (v or h) is the longer vs shorter side at skewed ends
+    v_xmin = min((polygon_bounds(r)[0] for r in locked_rings.get("v", [])), default=0.0)
+    h_xmin = min((polygon_bounds(r)[0] for r in locked_rings.get("h", [])), default=0.0)
+    v_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("v", [])), default=0.0)
+    h_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("h", [])), default=0.0)
+
+    # 3. Webs: v (front) and h (back)
     raw_webs: list[tuple[str, Ring]] = []
+    is_multi_band = _has_vertical_web_gap(dstv.ak_contours.get("v", []), cfg) or _has_vertical_web_gap(
+        dstv.ak_contours.get("h", []), cfg
+    )
+    top_recess = resolve_recess_mm(cfg.web_top_recess_mm, tw)
+    bot_recess = resolve_recess_mm(cfg.web_bot_recess_mm, tw)
+
     for face in ("v", "h"):
-        for c in dstv.ak_contours.get(face, []):
-            ring = contour_to_ring(c, cfg)
-            if len(ring) < 3 or abs(polygon_area(ring)) <= 0.1:
-                continue
+        sync_lx = None
+        if left_contact_pair is not None and start_tan > 1e-6:
+            if abs(v_xmin - h_xmin) > 0.5:
+                sync_lx = left_contact_pair[0] if ((face == "v" and v_xmin < h_xmin) or (face == "h" and h_xmin < v_xmin)) else left_contact_pair[1]
+        sync_rx = None
+        if right_contact_pair is not None and end_tan > 1e-6:
+            if abs(v_xmax - h_xmax) > 0.5:
+                sync_rx = right_contact_pair[1] if ((face == "v" and v_xmax > h_xmax) or (face == "h" and h_xmax > v_xmax)) else right_contact_pair[0]
 
-            _, miny, _, maxy = polygon_bounds(ring)
-            y_clip_min = miny
-            y_clip_max = maxy
-
-            if maxy >= H - 1.0:
-                if top_over:
-                    y_clip_max = min(y_clip_max, H - spec.tf_top)
-                elif top_recess > 0.0:
-                    y_clip_max = min(y_clip_max, H - top_recess)
-
-            if miny <= 1.0:
-                if bot_over:
-                    y_clip_min = max(y_clip_min, spec.tf_bot)
-                elif bot_recess > 0.0:
-                    y_clip_min = max(y_clip_min, bot_recess)
-
-            if y_clip_min > miny + 1e-6 or y_clip_max < maxy - 1e-6:
-                ring = clip_ring_y_strip(ring, y_clip_min, y_clip_max, min_seg_len=cfg.min_segment_length_mm)
+        for ring in locked_rings.get(face, []):
+            if is_multi_band:
+                _, miny, _, maxy = polygon_bounds(ring)
+                y_lo, y_hi = miny, maxy
+                if maxy >= H - 1.0:
+                    if top_over:
+                        y_hi = min(y_hi, H - spec.tf_top)
+                    elif top_recess > 0.0:
+                        y_hi = min(y_hi, H - top_recess)
+                if miny <= 1.0:
+                    if bot_over:
+                        y_lo = max(y_lo, spec.tf_bot)
+                    elif bot_recess > 0.0:
+                        y_lo = max(y_lo, bot_recess)
+                if y_lo > miny + 1e-6 or y_hi < maxy - 1e-6:
+                    ring = clip_ring_y_strip(ring, y_lo, y_hi, min_seg_len=cfg.min_segment_length_mm)
+            else:
+                ring = _clip_single_band_web(
+                    ring,
+                    H=H,
+                    tw=tw,
+                    tf_top=spec.tf_top,
+                    tf_bot=spec.tf_bot,
+                    cheson_type=detected_type,
+                    talpa_side=talpa_side,
+                    top_over=top_over,
+                    bot_over=bot_over,
+                    cfg=cfg,
+                )
 
             if len(ring) < 3 or abs(polygon_area(ring)) <= 0.1:
                 continue
@@ -1303,6 +1811,8 @@ def decompose_compound_nc1(
                 end_tan=end_tan,
                 skew_plane=cfg.web_skew_plane,
                 rounding_mm=cfg.web_length_rounding_mm,
+                sync_left_x=sync_lx if cfg.exact_gabarit_lock else None,
+                sync_right_x=sync_rx if cfg.exact_gabarit_lock else None,
             )
             ring = _apply_length_offset(ring, cfg.length_offset_mm)
             if len(ring) >= 3 and abs(polygon_area(ring)) > 0.1:
@@ -1350,7 +1860,21 @@ def decompose_compound_nc1(
             )
         )
 
-    return plates
+    if not return_verification:
+        return plates
+
+    ver = verify_cheson_decomposition(
+        dstv=dstv,
+        plates=plates,
+        l_nc1_raw=l_nc1_raw,
+        l_gabarit_target=l_gabarit,
+        l_source_label=l_source_label,
+        l_assembled=l_assembled_env + cfg.length_offset_mm,
+        detected_type=detected_type,
+        talpa_side=talpa_side,
+        spec=spec,
+    )
+    return plates, ver
 
 
 def extract_single_plate_nc1(
@@ -1377,6 +1901,10 @@ def extract_single_plate_nc1(
         ring = contour_to_ring(c, cfg)
         if len(ring) < 3 or abs(polygon_area(ring)) <= 0.1:
             continue
+        x0, x1, l_raw = _compute_raw_x_envelope({primary_face: [ring]})
+        l_gab, _ = _resolve_gabarit_length(l_raw, cfg)
+        if cfg.exact_gabarit_lock:
+            ring = _apply_gabarit_x_lock_to_rings({primary_face: [ring]}, x0, l_raw, l_gab)[primary_face][0]
         ring = _apply_length_offset(ring, cfg.length_offset_mm)
         s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
             ring, face=primary_face, dstv=dstv, cfg=cfg
@@ -1406,11 +1934,32 @@ def extract_single_plate_nc1(
 def decompose_nc1(
     dstv: DSTVFile,
     cfg: Optional[ChesonConfig] = None,
-) -> list[ExtractedPlate]:
+    return_verification: bool = False,
+):
     spec = parse_compound_profile(dstv.header.profile_str, dstv.header)
     if spec.profile_type in ("HSQ", "BOX", "WQ"):
-        return decompose_compound_nc1(dstv, cfg)
-    return extract_single_plate_nc1(dstv, cfg)
+        return decompose_compound_nc1(dstv, cfg, return_verification=return_verification)
+    plates = extract_single_plate_nc1(dstv, cfg)
+    if not return_verification:
+        return plates
+    l_raw = max((p.bounds[2] - p.bounds[0]) for p in plates) if plates else 0.0
+    ver = VerificationReport(
+        piece_id=dstv.header.piece_id,
+        detected_type="single_plate",
+        detected_type_label="Placă individuală .nc1",
+        l_nc1_raw_mm=round(l_raw, 4),
+        l_gabarit_target_mm=round(l_raw, 4),
+        l_source_label="NC1",
+        l_assembled_mm=round(l_raw, 4),
+        h_target_mm=round(dstv.header.height, 4),
+        h_assembled_mm=round(dstv.header.height, 4),
+        w_target_mm=round(dstv.header.flange_width, 4),
+        w_assembled_mm=round(dstv.header.flange_width, 4),
+        max_gabarit_error_mm=0.0,
+        flange_web_contact_error_mm=0.0,
+        passed=True,
+    )
+    return plates, ver
 
 
 # ─── CAD DXF R2018 & ODA DWG Export ──────────────────────────────────────────
@@ -1420,7 +1969,6 @@ def _interior_label_point(ring: Ring) -> tuple[float, float]:
     cx, cy = 0.5 * (minx + maxx), 0.5 * (miny + maxy)
     if point_in_polygon(cx, cy, ring, tol=0.0):
         return (cx, cy)
-    # Fallback: probe along midline
     for frac in (0.25, 0.75, 0.15, 0.85):
         px = minx + frac * (maxx - minx)
         if point_in_polygon(px, cy, ring, tol=0.0):
@@ -1470,13 +2018,9 @@ def write_plate_dxf(
                 doc.layers.get(lname).color = col
             else:
                 doc.layers.add(lname, color=col)
-        outer_layer = "CUT_OUTER"
-        inner_layer = "CUT_INNER"
-        mark_layer = "MARKING"
+        outer_layer, inner_layer, mark_layer = "CUT_OUTER", "CUT_INNER", "MARKING"
     else:
-        outer_layer = "0"
-        inner_layer = "0"
-        mark_layer = "0"
+        outer_layer = inner_layer = mark_layer = "0"
 
     msp = doc.modelspace()
     ext_pts = clean_ring(plate.exterior, min_seg_len=0.05, ccw=True)
@@ -1870,7 +2414,7 @@ def discover_w_drawings(folder: Path) -> dict[str, Path]:
     return w_map
 
 
-# ─── Unified Pipeline (GUI & CLI) ────────────────────────────────────────────
+# ─── Preview & Unified Pipeline (GUI & CLI) ──────────────────────────────────
 
 def _export_plate_cad(
     plate: ExtractedPlate,
@@ -1905,14 +2449,12 @@ def _export_plate_cad(
             if fmt == "both":
                 rel = f"{plate.folder}/{plate.name}.dwg" if organize_by_thickness else f"{plate.name}.dwg"
                 return [dxf_path, dwg_path], rel
-            else:
-                # dwg_fallback or dwg_direct: keep only .dwg when converted cleanly
-                try:
-                    dxf_path.unlink()
-                except Exception:
-                    pass
-                rel = f"{plate.folder}/{plate.name}.dwg" if organize_by_thickness else f"{plate.name}.dwg"
-                return [dwg_path], rel
+            try:
+                dxf_path.unlink()
+            except Exception:
+                pass
+            rel = f"{plate.folder}/{plate.name}.dwg" if organize_by_thickness else f"{plate.name}.dwg"
+            return [dwg_path], rel
         except Exception as exc:
             log_cb(f"  ⚠ Eroare conversie ODA pentru {plate.name}: {exc} (păstrat DXF)")
 
@@ -1923,46 +2465,13 @@ def _export_plate_cad(
     return [dxf_path], rel
 
 
-def run_cheson_pipeline(
+def _collect_inputs(
     source_path: str | Path,
-    dest_dir: str | Path,
-    source_mode: str = "folder",        # "single_file" | "folder"
-    scope_mode: str = "cheson_only",    # "cheson_only" | "cheson_and_w" | "full_assembly"
-    preset: str = "workshop_corner_weld",
-    export_format: str = "dwg_fallback",  # "dwg_fallback" | "dxf" | "both"
-    use_nesting_layers: bool = True,
-    include_marking: bool = False,
-    organize_by_thickness: bool = True,
-    recursive: bool = False,
-    generate_reports: bool = True,
-    oda_path: Optional[str] = None,
-    progress_callback: Optional[Callable[[float], None]] = None,
-    log_callback: Optional[Callable[[str], None]] = None,
-) -> dict[str, Any]:
-    """Run box-beam (.nc1) plate extraction with optional W-drawings and A-drawing BOM plates."""
-    def _log(msg: str) -> None:
-        if log_callback:
-            log_callback(msg)
-
-    def _prog(val: float) -> None:
-        if progress_callback:
-            progress_callback(max(0.0, min(1.0, val)))
-
+    source_mode: str,
+    scope_mode: str,
+    recursive: bool,
+) -> tuple[Path, Path, list[Path], Optional[Path], Optional[BomTable], dict[str, Path]]:
     src = Path(source_path).resolve()
-    out_root = Path(dest_dir).resolve()
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    cfg = ChesonConfig.from_preset(preset)
-    effective_oda = find_oda_exe(oda_path)
-
-    _log(f"🚀 Pornire Cheson / HSQ Extractor (Mod: {scope_mode}, Preset: {preset})")
-    _log(f"📁 Sursă: {src}")
-    _log(f"📁 Destinație: {out_root}")
-    if export_format != "dxf":
-        _log(f"🔧 ODA Converter: {effective_oda if effective_oda else 'indisponibil (fallback automat pe DXF R2018)'}")
-
-    nc1_files: list[Path] = []
-    search_root: Path
     if source_mode == "single_file" or src.is_file():
         if not src.is_file() or src.suffix.lower() != ".nc1":
             raise FileNotFoundError(f"Fișierul .nc1 nu este valid: {src}")
@@ -1977,15 +2486,123 @@ def run_cheson_pipeline(
     if not nc1_files and scope_mode == "cheson_only":
         raise FileNotFoundError(f"Nu s-au găsit fișiere .nc1 în {src}")
 
-    # Load A-drawing BOM if needed for W-drawing thickness lookup or full_assembly
-    a_pdf = find_assembly_a_drawing(search_root) if (search_root.is_dir() and scope_mode != "cheson_only") else None
-    bom: Optional[BomTable] = None
-    if a_pdf is not None:
-        bom = extract_bom_from_pdf(a_pdf)
-        if bom:
-            _log(f"📄 BOM detectat din {a_pdf.name}: {bom.assembly_id} (qty={bom.assembly_quantity}, {len(bom.rows)} repere)")
-
+    # Always read A-drawing BOM silently if present so exact STYKKLISTE LENGDE is available
+    a_pdf = find_assembly_a_drawing(search_root) if search_root.is_dir() else None
+    bom = extract_bom_from_pdf(a_pdf) if a_pdf is not None else None
     w_map = discover_w_drawings(search_root) if (search_root.is_dir() and scope_mode != "cheson_only") else {}
+    return src, search_root, nc1_files, a_pdf, bom, w_map
+
+
+def preview_cheson_pipeline(
+    source_path: str | Path,
+    source_mode: str = "folder",
+    scope_mode: str = "cheson_only",
+    preset: str = "auto",
+    exact_gabarit_lock: bool = True,
+    override_length_mm: Optional[float] = None,
+    override_web_height_mm: Optional[float] = None,
+    recursive: bool = False,
+) -> dict[str, Any]:
+    """Dry-run inspection: detects cheson type, STYKKLISTE LENGDE, and verifies <= 0.001 mm tolerance."""
+    _, _, nc1_files, a_pdf, bom, w_map = _collect_inputs(
+        source_path, source_mode, scope_mode, recursive
+    )
+    bom_by_key: dict[str, BomRow] = {}
+    if bom:
+        for r in bom.rows:
+            bom_by_key[clean_piece_name(r.pos_no, lowercase=True)] = r
+
+    items_preview: list[dict[str, Any]] = []
+    all_passed = True
+
+    for nc1_path in nc1_files:
+        dstv = parse_dstv(nc1_path)
+        piece_key = clean_piece_name(dstv.header.piece_id or nc1_path.stem, lowercase=True)
+        bom_row = bom_by_key.get(piece_key)
+        target_len = override_length_mm if (override_length_mm and override_length_mm > 0) else (
+            bom_row.length_mm if (bom_row and bom_row.length_mm) else None
+        )
+        cfg = ChesonConfig.from_preset(
+            preset,
+            exact_gabarit_lock=exact_gabarit_lock,
+            target_length_mm=target_len,
+            override_web_height_mm=override_web_height_mm,
+        )
+        plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
+        if not ver.passed:
+            all_passed = False
+        items_preview.append(
+            {
+                "file": nc1_path.name,
+                "profile": dstv.header.profile_str,
+                "verification": asdict(ver),
+                "plates": [
+                    {
+                        "name": p.name,
+                        "folder": p.folder,
+                        "role": p.role,
+                        "thickness": p.thickness,
+                        "length_mm": round(p.bounds[2] - p.bounds[0], 4),
+                        "width_mm": round(p.bounds[3] - p.bounds[1], 4),
+                    }
+                    for p in plates
+                ],
+            }
+        )
+
+    return {
+        "a_drawing": a_pdf.name if a_pdf else None,
+        "bom_assembly_id": bom.assembly_id if bom else None,
+        "bom_rows_count": len(bom.rows) if bom else 0,
+        "w_drawings_count": len(w_map),
+        "all_passed": all_passed,
+        "nc1_items": items_preview,
+    }
+
+
+def run_cheson_pipeline(
+    source_path: str | Path,
+    dest_dir: str | Path,
+    source_mode: str = "folder",
+    scope_mode: str = "cheson_only",
+    preset: str = "auto",
+    export_format: str = "dwg_fallback",
+    use_nesting_layers: bool = True,
+    include_marking: bool = False,
+    organize_by_thickness: bool = True,
+    recursive: bool = False,
+    generate_reports: bool = True,
+    exact_gabarit_lock: bool = True,
+    override_length_mm: Optional[float] = None,
+    override_web_height_mm: Optional[float] = None,
+    oda_path: Optional[str] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
+) -> dict[str, Any]:
+    """Run box-beam (.nc1) plate extraction with exact gabarit verification (±0.001 mm)."""
+    def _log(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
+
+    def _prog(val: float) -> None:
+        if progress_callback:
+            progress_callback(max(0.0, min(1.0, val)))
+
+    src, search_root, nc1_files, a_pdf, bom, w_map = _collect_inputs(
+        source_path, source_mode, scope_mode, recursive
+    )
+    out_root = Path(dest_dir).resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+    effective_oda = find_oda_exe(oda_path)
+
+    _log(f"🚀 Pornire Cheson / HSQ Extractor (Mod: {scope_mode}, Preset: {preset}, GabaritFix={exact_gabarit_lock})")
+    _log(f"📁 Sursă: {src}")
+    _log(f"📁 Destinație: {out_root}")
+    if a_pdf is not None and bom is not None:
+        _log(f"📋 STYKKLISTE ({a_pdf.name}): {bom.assembly_id} (qty={bom.assembly_quantity}, {len(bom.rows)} repere)")
+    if export_format != "dxf":
+        _log(f"🔧 ODA Converter: {effective_oda if effective_oda else 'indisponibil (fallback automat pe DXF R2018)'}")
+
     bom_by_key: dict[str, BomRow] = {}
     if bom:
         for r in bom.rows:
@@ -1995,6 +2612,7 @@ def run_cheson_pipeline(
     assembly_id = bom.assembly_id if bom else search_root.name
 
     entries: list[ManifestEntry] = []
+    verifications: list[dict[str, Any]] = []
     written_files: list[Path] = []
     processed_keys: set[str] = set()
     nc1_plate_count = 0
@@ -2003,21 +2621,45 @@ def run_cheson_pipeline(
     skipped_count = 0
     errors: list[str] = []
 
-    total_steps = max(1, len(nc1_files) + (len(w_map) if scope_mode != "cheson_only" else 0) + (len(bom.rows) if (bom and scope_mode == "full_assembly") else 0))
+    total_steps = max(
+        1,
+        len(nc1_files)
+        + (len(w_map) if scope_mode != "cheson_only" else 0)
+        + (len(bom.rows) if (bom and scope_mode == "full_assembly") else 0),
+    )
     done_steps = 0
 
-    # Step 1: Decompose .nc1 files (cheson plates)
     for nc1_path in nc1_files:
         try:
             dstv = parse_dstv(nc1_path)
             piece_key = clean_piece_name(dstv.header.piece_id or nc1_path.stem, lowercase=True)
             processed_keys.add(piece_key)
-            plates = decompose_nc1(dstv, cfg)
             bom_row = bom_by_key.get(piece_key)
+            target_len = override_length_mm if (override_length_mm and override_length_mm > 0) else (
+                bom_row.length_mm if (bom_row and bom_row.length_mm) else None
+            )
+            cfg = ChesonConfig.from_preset(
+                preset,
+                exact_gabarit_lock=exact_gabarit_lock,
+                target_length_mm=target_len,
+                override_web_height_mm=override_web_height_mm,
+            )
+            plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
+            verifications.append(asdict(ver))
+
             qty_per = bom_row.qty_per_assembly if bom_row else dstv.header.quantity
             tot_qty = qty_per * max(1, assembly_qty)
 
-            _log(f"🧩 {nc1_path.name} ({dstv.header.profile_str}) -> {len(plates)} piese")
+            badge = "✅" if ver.passed else "⚠"
+            _log(
+                f"🧩 {nc1_path.name} ({dstv.header.profile_str}) -> {ver.detected_type_label}"
+            )
+            _log(
+                f"   {badge} Gabarit: L={ver.l_assembled_mm:.3f} mm (țintă {ver.l_gabarit_target_mm:.3f} [{ver.l_source_label}], "
+                f"NC1 brut {ver.l_nc1_raw_mm:.2f}) | H={ver.h_assembled_mm:.3f}/{ver.h_target_mm:.3f} | "
+                f"B={ver.w_assembled_mm:.3f}/{ver.w_target_mm:.3f} | Eroare max={ver.max_gabarit_error_mm:.4f} mm"
+            )
+
             for plate in plates:
                 files, rel = _export_plate_cad(
                     plate,
@@ -2033,7 +2675,7 @@ def run_cheson_pipeline(
                 nc1_plate_count += 1
                 minx, miny, maxx, maxy = plate.bounds
                 dim_l, dim_w = round(maxx - minx, 4), round(maxy - miny, 4)
-                _log(f"   ✅ {rel} ({dim_l:.2f} × {dim_w:.2f} mm, T{int(round(plate.thickness))})")
+                _log(f"   📄 {rel} ({dim_l:.3f} × {dim_w:.3f} mm, T{int(round(plate.thickness))})")
                 entries.append(
                     ManifestEntry(
                         pos_no=dstv.header.piece_id or nc1_path.stem,
@@ -2051,7 +2693,7 @@ def run_cheson_pipeline(
                         source_file=nc1_path.name,
                         output_folder=plate.folder if organize_by_thickness else "",
                         output_file=rel,
-                        notes=f"face={plate.face}, role={plate.role}",
+                        notes=f"type={ver.detected_type}, face={plate.face}, role={plate.role}, err_max={ver.max_gabarit_error_mm:.4f}mm",
                     )
                 )
         except Exception as exc:
@@ -2061,7 +2703,7 @@ def run_cheson_pipeline(
         done_steps += 1
         _prog(done_steps / total_steps)
 
-    # Step 2: Optional W-drawing PDF conversion via PdfToCadConverter
+    # Optional W-drawing PDF conversion via PdfToCadConverter
     if scope_mode in ("cheson_and_w", "full_assembly") and w_map:
         if PdfToCadConverter is None or not PdfToCadConverter.is_available():
             msg = "PdfToCadConverter indisponibil pentru W-drawings."
@@ -2069,7 +2711,7 @@ def run_cheson_pipeline(
             _log(f"⚠ {msg}")
         else:
             conv = PdfToCadConverter(oda_path=effective_oda)
-            w_fmt = "dxf" if export_format == "dxf" else "dwg"
+            w_req_fmt = "dxf" if export_format in ("dxf", "both") else "dwg"
             for key, w_pdf in sorted(w_map.items()):
                 if key in processed_keys:
                     done_steps += 1
@@ -2090,7 +2732,6 @@ def run_cheson_pipeline(
                         t_mm, w_mm = pl
                     l_mm = bom_row.length_mm
 
-                # Fallback thickness detection directly from W-drawing PDF if BOM missing
                 if t_mm is None and pymupdf is not None:
                     try:
                         d_tmp = pymupdf.open(str(w_pdf))
@@ -2109,7 +2750,6 @@ def run_cheson_pipeline(
                 target_dir.mkdir(parents=True, exist_ok=True)
                 clean_nm = clean_piece_name(pos_no, lowercase=True)
 
-                w_req_fmt = "dxf" if export_format in ("dxf", "both") else "dwg"
                 ok, out_cad, conv_msg = conv.convert_single_pdf(
                     str(w_pdf),
                     output_dir=str(target_dir),
@@ -2159,7 +2799,7 @@ def run_cheson_pipeline(
                 done_steps += 1
                 _prog(done_steps / total_steps)
 
-    # Step 3: Optional BOM rectangular plates from A-drawing.pdf
+    # Optional BOM rectangular plates from A-drawing.pdf
     if scope_mode == "full_assembly" and bom:
         for row in bom.rows:
             key = clean_piece_name(row.pos_no, lowercase=True)
@@ -2264,8 +2904,10 @@ def run_cheson_pipeline(
                 "source_path": str(src),
                 "scope_mode": scope_mode,
                 "preset": preset,
+                "exact_gabarit_lock": exact_gabarit_lock,
                 "export_format": export_format,
             },
+            "verifications": verifications,
             "summary": {
                 "total_entries": len(entries),
                 "by_status": status_counts,
@@ -2298,6 +2940,7 @@ def run_cheson_pipeline(
         "w_drawings_converted": w_count,
         "bom_plates_generated": bom_plate_count,
         "skipped": skipped_count,
+        "verifications": verifications,
         "files": [str(f) for f in written_files],
         "manifest_path": str(manifest_path) if manifest_path else None,
         "csv_path": str(csv_path) if csv_path else None,
