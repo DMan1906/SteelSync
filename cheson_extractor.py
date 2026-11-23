@@ -1314,8 +1314,8 @@ def detect_cheson_type(
 
     dy_o = _face_y_span(dstv, "o", cfg) or spec.b_top
     dy_u = _face_y_span(dstv, "u", cfg) or spec.b_bot
-    bot_wider = (spec.b_bot >= spec.b_top + 2.0 * tw - 0.5) or (dy_u > dy_o + 2.0 * tw + 1.0)
-    top_wider = (spec.b_top >= spec.b_bot + 2.0 * tw - 0.5) or (dy_o > dy_u + 2.0 * tw + 1.0)
+    bot_wider = (spec.b_bot > spec.b_top + 2.0 * tw + 1.0) or (dy_u > dy_o + 2.0 * tw + 1.0)
+    top_wider = (spec.b_top > spec.b_bot + 2.0 * tw + 1.0) or (dy_o > dy_u + 2.0 * tw + 1.0)
     talpa_side = "top" if top_wider and not bot_wider else ("bottom" if bot_wider else "none")
 
     if explicit != "auto":
@@ -1491,6 +1491,8 @@ def _adjust_web_skew_and_rounding(
     rounding_mm: float,
     sync_left_x: Optional[float] = None,
     sync_right_x: Optional[float] = None,
+    is_long_left: Optional[bool] = None,
+    is_long_right: Optional[bool] = None,
 ) -> Ring:
     if len(ring) < 3:
         return ring
@@ -1499,30 +1501,33 @@ def _adjust_web_skew_and_rounding(
     k = 0.5 if plane == "centerline" else (1.0 if plane == "inner" else 0.0)
 
     minx, _, maxx, _ = polygon_bounds(ring)
-    if sync_left_x is not None and start_tan > 1e-6 and plane == "inner":
+    if sync_left_x is not None and start_tan > 1e-6:
         dx_left = sync_left_x - minx
-    elif start_tan > 1e-6 and k > 0.0:
-        shift = k * tw * start_tan
-        dx_left = +shift if face == "v" else (-shift if face == "h" else 0.0)
+    elif start_tan > 1e-6 and k > 0.0 and is_long_left is False:
+        dx_left = -k * tw * start_tan
     else:
         dx_left = 0.0
 
-    if sync_right_x is not None and end_tan > 1e-6 and plane == "inner":
+    if sync_right_x is not None and end_tan > 1e-6:
         dx_right = sync_right_x - maxx
-    elif end_tan > 1e-6 and k > 0.0:
-        shift = k * tw * end_tan
-        dx_right = -shift if face == "v" else (+shift if face == "h" else 0.0)
+    elif end_tan > 1e-6 and k > 0.0 and is_long_right is False:
+        dx_right = +k * tw * end_tan
     else:
         dx_right = 0.0
 
     if abs(dx_left) > 1e-7 or abs(dx_right) > 1e-7:
-        ring = [
-            (
-                x + dx_left if abs(x - minx) < 0.5 else (x + dx_right if abs(x - maxx) < 0.5 else x),
-                y,
-            )
-            for x, y in ring
-        ]
+        span = max(1.0, maxx - minx)
+        left_cut = minx + 0.35 * span
+        right_cut = maxx - 0.35 * span
+        new_pts: Ring = []
+        for x, y in ring:
+            nx = x
+            if abs(dx_left) > 1e-7 and x <= left_cut:
+                nx = x + dx_left
+            elif abs(dx_right) > 1e-7 and x >= right_cut:
+                nx = x + dx_right
+            new_pts.append((nx, y))
+        ring = clean_ring(new_pts, min_seg_len=0.05, ccw=True)
 
     if rounding_mm > 0.0:
         b_minx, _, b_maxx, _ = polygon_bounds(ring)
@@ -1549,10 +1554,17 @@ def _transform_and_normalize_plate(
     cfg: ChesonConfig,
     mirror_x: bool = False,
     mirror_y: bool = False,
+    delta_l_right: float = 0.0,
+    mid_x_env: Optional[float] = None,
 ) -> tuple[Ring, list[DSTVHole], list[Ring], list[DSTVMarking], tuple[float, float, float, float]]:
     orig_bounds = polygon_bounds(ring)
     cx = 0.5 * (orig_bounds[0] + orig_bounds[2])
     cy = 0.5 * (orig_bounds[1] + orig_bounds[3])
+
+    def _shift_x(x: float) -> float:
+        if mid_x_env is not None and abs(delta_l_right) > 1e-7 and x > mid_x_env:
+            return x + delta_l_right
+        return x
 
     def _m_pt(x: float, y: float) -> tuple[float, float]:
         return ((2.0 * cx - x) if mirror_x else x, (2.0 * cy - y) if mirror_y else y)
@@ -1562,6 +1574,7 @@ def _transform_and_normalize_plate(
         ik_ring = contour_to_ring(ik, cfg)
         if len(ik_ring) < 3:
             continue
+        ik_ring = [(_shift_x(ix), iy) for ix, iy in ik_ring]
         icx = sum(p[0] for p in ik_ring) / len(ik_ring)
         icy = sum(p[1] for p in ik_ring) / len(ik_ring)
         if point_in_polygon(icx, icy, ring, tol=0.5):
@@ -1569,8 +1582,9 @@ def _transform_and_normalize_plate(
 
     mapped_holes: list[DSTVHole] = []
     for hole in dstv.holes.get(face, []):
-        if point_in_polygon(hole.x, hole.y, ring, tol=0.05):
-            nx, ny = _m_pt(hole.x, hole.y)
+        hx = _shift_x(hole.x)
+        if point_in_polygon(hx, hole.y, ring, tol=0.05):
+            nx, ny = _m_pt(hx, hole.y)
             ang = hole.slot_angle
             if mirror_x:
                 ang = 180.0 - ang
@@ -1594,8 +1608,9 @@ def _transform_and_normalize_plate(
 
     mapped_markings: list[DSTVMarking] = []
     for mark in dstv.markings.get(face, []):
-        if point_in_polygon(mark.x, mark.y, ring, tol=0.05):
-            nx, ny = _m_pt(mark.x, mark.y)
+        mx = _shift_x(mark.x)
+        if point_in_polygon(mx, mark.y, ring, tol=0.05):
+            nx, ny = _m_pt(mx, mark.y)
             mapped_markings.append(
                 DSTVMarking(
                     face=mark.face,
@@ -1829,10 +1844,13 @@ def verify_cheson_decomposition(
                 if wp.removed_residuals == 0 and (wp.bounds[2] - wp.bounds[0]) >= f_short - 5.0
             ]
             web_lens = sorted({round(wp.bounds[2] - wp.bounds[0], 4) for wp in full_webs})
-            if len(web_lens) == 1:
-                contact_err = max(abs(web_lens[0] - f_long), abs(web_lens[0] - f_short))
-            elif len(web_lens) >= 2:
-                contact_err = max(abs(web_lens[0] - f_short), abs(web_lens[-1] - f_long))
+            if abs(f_long - f_short) <= 0.5:
+                contact_err = max((abs(wl - f_long) for wl in web_lens), default=0.0)
+            else:
+                contact_err = max(
+                    (min(abs(wl - f_short), abs(wl - l_assembled), abs(wl - f_long)) for wl in web_lens),
+                    default=0.0,
+                )
 
     err_l = abs(l_assembled - l_gabarit_target)
     err_h = abs(h_assembled - H_target)
@@ -1892,7 +1910,9 @@ def decompose_compound_nc1(
     else:
         locked_rings = raw_rings
 
-    _, _, l_assembled_env = _compute_raw_x_envelope(locked_rings)
+    x_min_locked, x_max_locked, l_assembled_env = _compute_raw_x_envelope(locked_rings)
+    mid_x_raw = x_min_env + 0.5 * l_nc1_raw
+    applied_delta_l = (l_assembled_env - l_nc1_raw) if cfg.exact_gabarit_lock else 0.0
     start_tan, end_tan = _estimate_end_skew_angles(dstv, locked_rings)
 
     # Determine flange clipping modes per detected cheson type
@@ -1963,7 +1983,14 @@ def decompose_compound_nc1(
                 plate_suffix = suffix if flange_part_idx == 0 else f"{suffix}_{flange_part_idx + 1}"
                 flange_part_idx += 1
                 s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
-                    sub_ring, face=face, dstv=dstv, cfg=cfg, mirror_x=False, mirror_y=mirror_y
+                    sub_ring,
+                    face=face,
+                    dstv=dstv,
+                    cfg=cfg,
+                    mirror_x=False,
+                    mirror_y=mirror_y,
+                    delta_l_right=applied_delta_l,
+                    mid_x_env=mid_x_raw,
                 )
                 t_int = int(round(thick))
                 plates.append(
@@ -2015,12 +2042,23 @@ def decompose_compound_nc1(
     bot_recess = resolve_recess_mm(cfg.web_bot_recess_mm, tw)
 
     for face in ("v", "h"):
-        sync_lx = None
-        if left_contact_pair is not None and eff_start_tan > 1e-6:
-            sync_lx = left_contact_pair[0] if ((face == "v" and v_xmin < h_xmin) or (face == "h" and h_xmin < v_xmin)) else left_contact_pair[1]
-        sync_rx = None
-        if right_contact_pair is not None and eff_end_tan > 1e-6:
-            sync_rx = right_contact_pair[1] if ((face == "v" and v_xmax > h_xmax) or (face == "h" and h_xmax > v_xmax)) else right_contact_pair[0]
+        is_long_left: Optional[bool] = None
+        sync_lx: Optional[float] = None
+        if eff_start_tan > 1e-6:
+            is_long_left = (face == "v" and v_xmin < h_xmin) or (face == "h" and h_xmin < v_xmin)
+            if is_long_left:
+                sync_lx = x_min_locked
+            elif left_contact_pair is not None:
+                sync_lx = left_contact_pair[1]
+
+        is_long_right: Optional[bool] = None
+        sync_rx: Optional[float] = None
+        if eff_end_tan > 1e-6:
+            is_long_right = (face == "v" and v_xmax > h_xmax) or (face == "h" and h_xmax > v_xmax)
+            if is_long_right:
+                sync_rx = x_max_locked
+            elif right_contact_pair is not None:
+                sync_rx = right_contact_pair[0]
 
         for ring in locked_rings.get(face, []):
             if is_multi_band:
@@ -2065,6 +2103,8 @@ def decompose_compound_nc1(
                 rounding_mm=cfg.web_length_rounding_mm,
                 sync_left_x=sync_lx if cfg.exact_gabarit_lock else None,
                 sync_right_x=sync_rx if cfg.exact_gabarit_lock else None,
+                is_long_left=is_long_left,
+                is_long_right=is_long_right,
             )
             ring = _apply_length_offset(ring, cfg.length_offset_mm)
             if len(ring) >= 3 and abs(polygon_area(ring)) > 0.1:
@@ -2099,7 +2139,14 @@ def decompose_compound_nc1(
     for w_idx, (face, w_ring, rem_cnt) in enumerate(raw_webs, start=1):
         mirror_x = cfg.mirror_web_h_x if face == "h" else False
         s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
-            w_ring, face=face, dstv=dstv, cfg=cfg, mirror_x=mirror_x, mirror_y=False
+            w_ring,
+            face=face,
+            dstv=dstv,
+            cfg=cfg,
+            mirror_x=mirror_x,
+            mirror_y=False,
+            delta_l_right=applied_delta_l,
+            mid_x_env=mid_x_raw,
         )
         plates.append(
             ExtractedPlate(
@@ -2166,10 +2213,14 @@ def extract_single_plate_nc1(
             continue
         x0, _, l_raw = _compute_raw_x_envelope({primary_face: [ring]})
         l_gab, _ = _resolve_gabarit_length(l_raw, cfg)
+        mid_x_raw = x0 + 0.5 * l_raw
+        applied_delta = 0.0
         if cfg.exact_gabarit_lock:
             ring = _apply_gabarit_x_lock_to_rings(
                 {primary_face: [ring]}, x0, l_raw, l_gab, max_delta_mm=max_delta
             )[primary_face][0]
+            _, _, l_after = _compute_raw_x_envelope({primary_face: [ring]})
+            applied_delta = l_after - l_raw
         ring = _apply_length_offset(ring, cfg.length_offset_mm)
         if cfg.strip_residual_fragments:
             sub_rings, rem_cnt = remove_residual_fragments(
@@ -2182,7 +2233,12 @@ def extract_single_plate_nc1(
             if len(sub_ring) < 3 or abs(polygon_area(sub_ring)) <= 0.1:
                 continue
             s_ext, s_holes, s_inners, s_marks, orig_b = _transform_and_normalize_plate(
-                sub_ring, face=primary_face, dstv=dstv, cfg=cfg
+                sub_ring,
+                face=primary_face,
+                dstv=dstv,
+                cfg=cfg,
+                delta_l_right=applied_delta,
+                mid_x_env=mid_x_raw,
             )
             name = piece_clean if (len(contours) == 1 and len(sub_rings) == 1 and part_idx == 0) else f"{piece_clean}_{part_idx + 1}"
             part_idx += 1

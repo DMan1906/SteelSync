@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.11.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.1/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.11.1)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.11.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.2/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.11.2)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.11.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.1/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.11.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.2/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,13 +16,14 @@
 
 ## 🚀 Funcționalități
 
-- **📦 Cheson / HSQ Extractor (Actualizat în v1.11.1 — Eliminare Reziduuri ≤ Grosime & Gabarit Fix ±0.001 mm)**:
+- **📦 Cheson / HSQ Extractor (Actualizat în v1.11.2 — Calibrare 3D Skew `45°`/`8.7°`, Eliminare Reziduuri ≤ Grosime & Gabarit Fix ±0.001 mm)**:
   - **Auto-Detecție pentru toate cele 3 tipuri reale de secțiune**:
     1. **Tip 1 (Cheson cu Talpă):** talpă lată (`T`) + capac între inimi (`C`) + 2 laterale cu lățimea exactă `H - tf - tw`.
     2. **Tip 2 (Cheson fără Talpă):** 2 capace între inimi (`C1`, `C2`) + 2 laterale cu lățimea `H - 2*tw`.
     3. **Tip 3 (Cheson Dublu cu Talpă la Mijloc):** 2 capace (`C1`, `C2`) + 4 laterale (`L1..L4`) cu retragere `tw`.
+  - **Calibrare Exactă pentru Capete Oblice (3D Skew) & Trepte + Aliniere Găuri:** conservă cota maximă pe laterala lungă (`0.00`/`L_gabarit`), aliniază laterala scurtă la muchia interioară a capacului (`tw·tan(θ)`), păstrează exact pasul treptelor de capăt (ex. `70.710 mm` la `45°`) și sincronizează poziția găurilor (`BO`) la `±0.001 mm`.
   - **Eliminare Automată Fragmente Reziduale (`≤ grosime tablă`):** curăță automat mustățile/urechile subțiri de tablă rămase la capetele decupajelor de pe toată înălțimea chesonului (când fâșia are lățimea ≤ `tw`/`tf`), cu opțiune de activare/dezactivare direct în tab.
-  - **Blocare Gabarit Fix (`±0.001 mm`) din `STYKKLISTE` / `.nc1`:** scanează automat PDF-urile de ansamblu din folder/părinte pentru tabelul `STYKKLISTE`, aliniază exact lungimea totală și decupajele interioare fără decalaje de skew pe capete drepte și include buton de **Previzualizare & Verificare Cote** înainte de export.
+  - **Blocare Gabarit Fix (`±0.001 mm`) din `STYKKLISTE` / `.nc1`:** scanează automat PDF-urile de ansamblu din folder/părinte pentru tabelul `STYKKLISTE`, aliniază exact lungimea totală și decupajele interioare și include buton de **Previzualizare & Verificare Cote** înainte de export.
   - **3 Moduri Selecție Piese**: poți genera **doar piesele din cheson (`.nc1`)**, **cheson + W-drawings (`.pdf`)** (convertite 1:1 prin `PdfToCadConverter`), sau **tot ansamblul complet** (inclusiv tablele dreptunghiulare `PL*W` din tabelul `STYKKLISTE` al `A-drawing.pdf`).
 
 - **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (NOU în v1.8.1 — Impunere & Audit Automat Cote de Rază `R=...` ±0.2 mm + Re-generare Adaptivă)**:
