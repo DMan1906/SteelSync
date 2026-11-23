@@ -105,12 +105,28 @@ def is_assembly_match(filename, asmb_code):
 
     # 4. Asmb substring match in clean stem (with boundary check)
     if clean_asmb and len(clean_asmb) >= 3 and clean_asmb in clean_stem:
-        idx = clean_stem.find(clean_asmb)
-        after_idx = idx + len(clean_asmb)
-        # Avoid false positives where code is a prefix of a larger number (e.g. B20 matching B200)
-        if after_idx < len(clean_stem) and clean_asmb[-1].isdigit() and clean_stem[after_idx].isdigit():
-            return False
-        return True
+        start = 0
+        while True:
+            idx = clean_stem.find(clean_asmb, start)
+            if idx == -1:
+                break
+            after_idx = idx + len(clean_asmb)
+            bad_left = False
+            if idx > 0:
+                if clean_asmb[0].isalpha() and clean_stem[idx - 1].isalpha():
+                    bad_left = True
+                elif clean_asmb[0].isdigit() and clean_stem[idx - 1].isdigit():
+                    bad_left = True
+            # Avoid false positives where code is a prefix of a larger number (e.g. B20 matching B200)
+            bad_right = (
+                after_idx < len(clean_stem)
+                and clean_asmb[-1].isdigit()
+                and clean_stem[after_idx].isdigit()
+            )
+            if not bad_left and not bad_right:
+                return True
+            start = idx + 1
+        return False
 
     return False
 
@@ -251,7 +267,7 @@ def detect_excel_structure(filepath, sheet_name=None):
                     break
 
         # If still not detected, avoid picking index column ('Nr.', 'Nr. crt.', '#', 'No.') as assembly column
-        if asmb_col is None and headers:
+        if asmb_col is None and headers and part_col != 0:
             col0_name = headers[0][1].strip()
             if not re.match(r'^(?:nr\.?(?:\s*crt\.?)?|#|no\.?)$', col0_name, re.IGNORECASE):
                 asmb_col = 0
@@ -317,6 +333,149 @@ def parse_excel_parts(filepath, sheet_name, header_row, asmb_col_idx, part_col_i
         return parts_map
     finally:
         wb.close()
+
+
+def extract_filter_parts(filter_path):
+    """
+    Extract unique target part codes from either:
+    - an Excel report/BOM file (all sheets, all part columns, e.g. raport_CHESON.xlsx), OR
+    - a folder containing part subfolders (e.g. DSB-2094), NC files (.nc/.nc1), or PDF files.
+    Returns {"parts": [...], "source_type": str, "count": int}.
+    """
+    if not filter_path or not os.path.exists(filter_path):
+        raise ValueError(f"Calea de filtrare nu există: {filter_path}")
+
+    seen_clean = set()
+    result_parts = []
+    ignored_vals = {'none', 'nan', 'null', 'total', 'suma', 'sum', '-', ''}
+    header_skip_re = re.compile(
+        r'^(?:nr\.?(?:\s*crt\.?)?|#|no\.?|cant\.?(?:itate[a]?)?|buc[aă]?[tț]?i?|material|greutate.*|poz.*|reper|pies[aă]|denumire.*)$',
+        re.IGNORECASE
+    )
+    index_col_re = re.compile(r'^(?:nr\.?(?:\s*crt\.?)?|#|no\.?|cant\.?|buc)$', re.IGNORECASE)
+
+    def add_part(raw_val):
+        for token in str(raw_val or "").split(","):
+            t = token.strip()
+            if not t or t.lower() in ignored_vals or header_skip_re.match(t):
+                continue
+            cl = clean_alphanumeric(t)
+            if not cl or len(cl) < 2 or cl in seen_clean:
+                continue
+            seen_clean.add(cl)
+            result_parts.append(t)
+
+    if os.path.isfile(filter_path):
+        part_keywords = [
+            r'^denumire$', r'pies[aă]', r'piese', r'part', r'single.*part',
+            r'poz.*pies[aă]', r'profil', r'pozitie', r'reper', r'denumire.*pie'
+        ]
+        wb = openpyxl.load_workbook(filter_path, data_only=True, read_only=True)
+        try:
+            for sh_name in wb.sheetnames:
+                ws = wb[sh_name]
+                rows_sample = []
+                for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                    rows_sample.append((r_idx, row))
+                    if r_idx >= 30:
+                        break
+                if not rows_sample:
+                    continue
+
+                header_row_idx = None
+                part_cols = []
+                for r_idx, row in rows_sample:
+                    row_strs = [str(c).strip() if c is not None else "" for c in row]
+                    matched_cols = [
+                        c_idx for c_idx, val in enumerate(row_strs)
+                        if val and any(re.search(k, val.lower()) for k in part_keywords)
+                    ]
+                    if matched_cols:
+                        header_row_idx = r_idx
+                        part_cols = matched_cols
+                        break
+
+                if not part_cols:
+                    for r_idx, row in rows_sample:
+                        row_strs = [str(c).strip() if c is not None else "" for c in row]
+                        non_empty = [(i, v) for i, v in enumerate(row_strs) if v]
+                        if non_empty:
+                            # Skip leading index column if present
+                            candidate = non_empty[0][0]
+                            if len(non_empty) > 1 and (index_col_re.match(non_empty[0][1]) or non_empty[0][1].isdigit()):
+                                candidate = non_empty[1][0]
+                            header_row_idx = r_idx if any(not v.replace('.', '', 1).isdigit() for _, v in non_empty) else 0
+                            part_cols = [candidate]
+                            break
+
+                start_row = (header_row_idx or 0) + 1
+                for row in ws.iter_rows(min_row=start_row, values_only=True):
+                    if not row:
+                        continue
+                    for c_idx in part_cols:
+                        if c_idx < len(row) and row[c_idx] is not None:
+                            val = row[c_idx]
+                            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                                continue
+                            add_part(val)
+        finally:
+            wb.close()
+
+        return {
+            "parts": result_parts,
+            "source_type": f"Excel ({os.path.basename(filter_path)})",
+            "count": len(result_parts),
+        }
+
+    # Directory mode: direct subfolders + .nc/.nc1 + .pdf (with recursive fallback)
+    excluded_dirs = GENERIC_DIR_NAMES | {'modified', 'desene ansamblu', 'sorted', 'placi', 'profile', 'bare', 'cheson'}
+    material_dirs = {'s235', 's355', 's275', 's235jr', 's355j2', 's355j0', 'z35', 'inox', 'aluminiu'}
+
+    def clean_pdf_part_stem(stem_str):
+        cleaned = re.sub(r'[\s_-]*(?:W|A|G|M)[\s_-]*drawing(?:\s*\(.*\))?$', '', stem_str, flags=re.IGNORECASE).strip()
+        return cleaned
+
+    def is_valid_part_dir(dir_name):
+        dl = dir_name.strip().lower()
+        if not dl or dl.startswith('.') or dl.startswith('_'):
+            return False
+        if dl in excluded_dirs or dl in material_dirs:
+            return False
+        if THICKNESS_REGEX.match(dir_name.strip()):
+            return False
+        return True
+
+    entries = sorted(os.scandir(filter_path), key=lambda e: e.name.lower())
+    for entry in entries:
+        if entry.is_dir():
+            if is_valid_part_dir(entry.name):
+                add_part(entry.name)
+        elif entry.is_file():
+            ext = os.path.splitext(entry.name)[1].lower()
+            stem = os.path.splitext(entry.name)[0].strip()
+            if ext in ('.nc', '.nc1'):
+                add_part(stem)
+            elif ext == '.pdf':
+                add_part(clean_pdf_part_stem(stem))
+
+    if not result_parts:
+        for root, dirs, files in os.walk(filter_path, followlinks=True):
+            for d in sorted(dirs):
+                if is_valid_part_dir(d):
+                    add_part(d)
+            for f in sorted(files):
+                ext = os.path.splitext(f)[1].lower()
+                stem = os.path.splitext(f)[0].strip()
+                if ext in ('.nc', '.nc1'):
+                    add_part(stem)
+                elif ext == '.pdf':
+                    add_part(clean_pdf_part_stem(stem))
+
+    return {
+        "parts": result_parts,
+        "source_type": f"Folder ({os.path.basename(os.path.normpath(filter_path))})",
+        "count": len(result_parts),
+    }
 
 
 def scan_source_files(source_dir):
@@ -492,11 +651,18 @@ def run_pipeline(
     clean_empty_folders=True,
     progress_callback=None,
     log_callback=None,
-    is_cancelled=None
+    is_cancelled=None,
+    filter_path=None,
+    include_nc=True,
+    include_pdf=True,
+    include_dwg=True,
+    flat_pdf_only=False,
 ):
     """
     Full pipeline runner.
-    Yields or calls progress_callback(fraction, current_message) and log_callback(msg, level).
+    Calls progress_callback(fraction, current_message) and log_callback(msg, level).
+    Supports optional filtering by part/cheson list (Excel or folder), selective
+    file-type extraction (NC / PDF / DWG), existing subfolder reuse, and flat PDF mode.
     Returns (summary_dict, results_list, report_path).
     """
     def log(msg, level="INFO"):
@@ -507,24 +673,81 @@ def run_pipeline(
         if progress_callback:
             progress_callback(pct, msg)
 
+    def _norm_abs(p):
+        return os.path.normcase(os.path.abspath(p))
+
+    def _is_same_file(src_p, dst_p):
+        if not os.path.exists(dst_p):
+            return False
+        try:
+            return os.path.samefile(src_p, dst_p)
+        except Exception:
+            return _norm_abs(src_p) == _norm_abs(dst_p)
+
+    eff_nc = False if flat_pdf_only else bool(include_nc)
+    eff_pdf = True if flat_pdf_only else bool(include_pdf)
+    eff_dwg = False if flat_pdf_only else bool(include_dwg)
+
     log("=" * 60, "INFO")
     log("🚀 Inițializare proces organizare piese...", "INFO")
-    log(f"📄 Fișier Excel: {os.path.basename(excel_path)} (Foaia: {sheet_name})", "INFO")
+    log(f"📄 Fișier Excel BOM: {os.path.basename(excel_path)} (Foaia: {sheet_name})", "INFO")
+    if filter_path:
+        log(f"🎯 Filtru Piese/Chesoane: {filter_path}", "INFO")
     log(f"📁 Folder Sursă: {source_dir}", "INFO")
     log(f"📁 Folder Destinație: {dest_dir}", "INFO")
     log(f"⚙️ Mod Operare: {'MUTARE (Move)' if mode == 'move' else 'COPIERE (Copy)'}", "INFO")
-    log(f"🔍 Suport Variații DWG (T, L, C): {'DA' if allow_variations else 'NU'}", "INFO")
+    if flat_pdf_only:
+        log("📄 Mod Special: Doar PDF-uri de ansamblu direct în Destinație (plat)", "INFO")
+    else:
+        active_types = [t for t, en in (("NC", eff_nc), ("PDF Ansamblu", eff_pdf), ("DWG", eff_dwg)) if en]
+        log(f"📦 Tipuri active: {', '.join(active_types) if active_types else 'Niciunul'}", "INFO")
+        if eff_dwg:
+            log(f"🔍 Suport Variații DWG (T, L, C): {'DA' if allow_variations else 'NU'}", "INFO")
     log("=" * 60, "INFO")
 
-    # 1. Parse Excel
-    set_progress(0.05, "Parsare tabel Excel...")
-    parts_map = parse_excel_parts(excel_path, sheet_name, header_row, asmb_col_idx, part_col_idx)
-    total_parts = len(parts_map)
-    if total_parts == 0:
-        raise ValueError("Nu a fost găsită nicio piesă validă în fișierul Excel!")
+    # 1. Parse Excel BOM & optional part filter
+    set_progress(0.05, "Parsare tabel Excel BOM...")
+    bom_parts_map = parse_excel_parts(excel_path, sheet_name, header_row, asmb_col_idx, part_col_idx)
+    if not bom_parts_map:
+        raise ValueError("Nu a fost găsită nicio piesă validă în fișierul Excel BOM!")
 
-    all_asmb_count = sum(len(asmbs) for asmbs in parts_map.values())
-    log(f"✔️ Excel analizat cu succes: {total_parts} piese unice, {all_asmb_count} asocieri de ansambluri.", "SUCCESS")
+    if filter_path:
+        set_progress(0.10, "Extragere piese din filtru...")
+        filter_info = extract_filter_parts(filter_path)
+        filter_parts = filter_info["parts"]
+        if not filter_parts:
+            raise ValueError(f"Nu a fost găsită nicio piesă validă în filtrul selectat: {filter_path}")
+
+        clean_bom_map = {}
+        for bp, asmbs in bom_parts_map.items():
+            cl = clean_alphanumeric(bp)
+            if not cl:
+                continue
+            clean_bom_map.setdefault(cl, [])
+            for a in asmbs:
+                if a not in clean_bom_map[cl]:
+                    clean_bom_map[cl].append(a)
+
+        parts_map = {}
+        matched_in_bom = 0
+        for fp in filter_parts:
+            asmbs = list(clean_bom_map.get(clean_alphanumeric(fp), []))
+            parts_map[fp] = asmbs
+            if asmbs:
+                matched_in_bom += 1
+
+        total_parts = len(parts_map)
+        all_asmb_count = sum(len(asmbs) for asmbs in parts_map.values())
+        log(
+            f"✔️ Filtru aplicat ({filter_info['source_type']}): {total_parts} piese, "
+            f"{matched_in_bom} găsite în BOM ({all_asmb_count} asocieri de ansambluri).",
+            "SUCCESS",
+        )
+    else:
+        parts_map = bom_parts_map
+        total_parts = len(parts_map)
+        all_asmb_count = sum(len(asmbs) for asmbs in parts_map.values())
+        log(f"✔️ Excel analizat cu succes: {total_parts} piese unice, {all_asmb_count} asocieri de ansambluri.", "SUCCESS")
 
     if is_cancelled and is_cancelled():
         return None, None, None
@@ -547,8 +770,21 @@ def run_pipeline(
 
     # 3. Process parts
     os.makedirs(dest_dir, exist_ok=True)
+    existing_dest_dirs = {}
+    if not flat_pdf_only:
+        try:
+            for entry in os.scandir(dest_dir):
+                if entry.is_dir():
+                    cl_dir = clean_alphanumeric(entry.name)
+                    if cl_dir and cl_dir not in existing_dest_dirs:
+                        existing_dest_dirs[cl_dir] = entry.name
+        except Exception:
+            pass
+
     results_list = []
     files_to_delete_from_source = set()
+    copied_dest_paths = set()
+    copied_flat_pdfs = set()
     total_files_transferred = 0
 
     complete_parts = 0
@@ -566,81 +802,125 @@ def run_pipeline(
         curr_prog = start_prog + (end_prog - start_prog) * (idx / max(1, total_parts))
         set_progress(curr_prog, f"Procesare piesa ({idx+1}/{total_parts}): {part}")
 
-        folder_name = sanitize_folder_name(part)
-        part_dest_dir = os.path.join(dest_dir, folder_name)
-        os.makedirs(part_dest_dir, exist_ok=True)
+        if flat_pdf_only:
+            folder_name = "(Direct în Destinație)"
+            part_dest_dir = dest_dir
+        else:
+            cl_part = clean_alphanumeric(part)
+            folder_name = existing_dest_dirs.get(cl_part) or sanitize_folder_name(part)
+            if cl_part:
+                existing_dest_dirs[cl_part] = folder_name
+            part_dest_dir = os.path.join(dest_dir, folder_name)
+            os.makedirs(part_dest_dir, exist_ok=True)
 
         part_nc_found = []
         part_pdf_found = []
         part_dwg_found = []
 
         # A. NC Match
-        for ncf in nc_files:
-            if is_nc_match(ncf["filename"], part):
-                part_nc_found.append(ncf["filename"])
-                dst_file = os.path.join(part_dest_dir, ncf["filename"])
-                try:
-                    shutil.copy2(ncf["path"], dst_file)
-                    files_to_delete_from_source.add(ncf["path"])
-                    total_files_transferred += 1
-                except Exception as e:
-                    log(f"❌ Eroare la copiere NC '{ncf['filename']}': {e}", "ERROR")
-
-        # B. PDF Match for each associated assembly
-        for asmb in asmbs:
-            for pf in pdf_files:
-                if is_assembly_match(pf["filename"], asmb):
-                    if pf["filename"] not in part_pdf_found:
-                        part_pdf_found.append(pf["filename"])
-                    dst_file = os.path.join(part_dest_dir, pf["filename"])
+        if eff_nc:
+            for ncf in nc_files:
+                if is_nc_match(ncf["filename"], part):
+                    part_nc_found.append(ncf["filename"])
+                    dst_file = os.path.join(part_dest_dir, ncf["filename"])
+                    copied_dest_paths.add(_norm_abs(dst_file))
+                    if _is_same_file(ncf["path"], dst_file):
+                        continue
                     try:
-                        shutil.copy2(pf["path"], dst_file)
-                        files_to_delete_from_source.add(pf["path"])
+                        shutil.copy2(ncf["path"], dst_file)
+                        files_to_delete_from_source.add(ncf["path"])
                         total_files_transferred += 1
                     except Exception as e:
-                        log(f"❌ Eroare la copiere PDF '{pf['filename']}': {e}", "ERROR")
+                        log(f"❌ Eroare la copiere NC '{ncf['filename']}': {e}", "ERROR")
+
+        # B. PDF Match for each associated assembly
+        if eff_pdf:
+            for asmb in asmbs:
+                for pf in pdf_files:
+                    if is_assembly_match(pf["filename"], asmb):
+                        if pf["filename"] not in part_pdf_found:
+                            part_pdf_found.append(pf["filename"])
+                        dst_file = os.path.join(part_dest_dir, pf["filename"])
+                        norm_dst = _norm_abs(dst_file)
+                        copied_dest_paths.add(norm_dst)
+                        if flat_pdf_only and norm_dst in copied_flat_pdfs:
+                            continue
+                        if _is_same_file(pf["path"], dst_file):
+                            if flat_pdf_only:
+                                copied_flat_pdfs.add(norm_dst)
+                            continue
+                        try:
+                            shutil.copy2(pf["path"], dst_file)
+                            files_to_delete_from_source.add(pf["path"])
+                            total_files_transferred += 1
+                            if flat_pdf_only:
+                                copied_flat_pdfs.add(norm_dst)
+                        except Exception as e:
+                            log(f"❌ Eroare la copiere PDF '{pf['filename']}': {e}", "ERROR")
 
         # C. DWG Match in thickness subfolders
-        for df in dwg_files:
-            is_match, note = is_dwg_variation(df["filename"], part, allow_variations=allow_variations)
-            if is_match:
-                thk = df.get("thickness", "")
-                if thk:
-                    thk_dir = os.path.join(part_dest_dir, sanitize_folder_name(thk))
-                else:
-                    thk_dir = part_dest_dir
-                os.makedirs(thk_dir, exist_ok=True)
+        if eff_dwg:
+            for df in dwg_files:
+                is_match, note = is_dwg_variation(df["filename"], part, allow_variations=allow_variations)
+                if is_match:
+                    thk = df.get("thickness", "")
+                    if thk:
+                        thk_dir = os.path.join(part_dest_dir, sanitize_folder_name(thk))
+                    else:
+                        thk_dir = part_dest_dir
+                    os.makedirs(thk_dir, exist_ok=True)
 
-                dst_file = os.path.join(thk_dir, df["filename"])
-                try:
-                    shutil.copy2(df["path"], dst_file)
-                    files_to_delete_from_source.add(df["path"])
-                    total_files_transferred += 1
+                    dst_file = os.path.join(thk_dir, df["filename"])
+                    copied_dest_paths.add(_norm_abs(dst_file))
                     part_dwg_found.append({
                         "name": df["filename"],
                         "thickness": thk or "Rădăcină",
                         "note": note
                     })
-                except Exception as e:
-                    log(f"❌ Eroare la copiere DWG '{df['filename']}': {e}", "ERROR")
+                    if _is_same_file(df["path"], dst_file):
+                        continue
+                    try:
+                        shutil.copy2(df["path"], dst_file)
+                        files_to_delete_from_source.add(df["path"])
+                        total_files_transferred += 1
+                    except Exception as e:
+                        log(f"❌ Eroare la copiere DWG '{df['filename']}': {e}", "ERROR")
 
-        # Evaluate status
-        has_nc = len(part_nc_found) > 0
-        has_pdf = len(part_pdf_found) > 0 or len(asmbs) == 0
-        has_dwg = len(part_dwg_found) > 0
-
-        if has_nc and has_pdf and has_dwg:
-            status = "COMPLET"
-            complete_parts += 1
-            log_lvl = "SUCCESS"
-        elif has_nc or has_pdf or has_dwg:
-            status = "PARȚIAL"
-            partial_parts += 1
-            log_lvl = "WARNING"
+        # Evaluate status relative to active extraction modes
+        if flat_pdf_only:
+            if len(part_pdf_found) > 0:
+                status = "COMPLET"
+                complete_parts += 1
+                log_lvl = "SUCCESS"
+            else:
+                status = "LIPSĂ"
+                missing_parts += 1
+                log_lvl = "ERROR"
         else:
-            status = "LIPSĂ"
-            missing_parts += 1
-            log_lvl = "ERROR"
+            checks = []
+            any_found = False
+            if eff_nc:
+                checks.append(len(part_nc_found) > 0)
+                any_found = any_found or (len(part_nc_found) > 0)
+            if eff_pdf:
+                checks.append(len(part_pdf_found) > 0 or (len(asmbs) == 0 and not filter_path))
+                any_found = any_found or (len(part_pdf_found) > 0)
+            if eff_dwg:
+                checks.append(len(part_dwg_found) > 0)
+                any_found = any_found or (len(part_dwg_found) > 0)
+
+            if checks and all(checks) and any_found:
+                status = "COMPLET"
+                complete_parts += 1
+                log_lvl = "SUCCESS"
+            elif any_found:
+                status = "PARȚIAL"
+                partial_parts += 1
+                log_lvl = "WARNING"
+            else:
+                status = "LIPSĂ"
+                missing_parts += 1
+                log_lvl = "ERROR"
 
         results_list.append({
             "part": part,
@@ -653,14 +933,18 @@ def run_pipeline(
         })
 
         dwg_desc = f"{len(part_dwg_found)} DWG" if part_dwg_found else "0 DWG"
-        log(f"[{status}] Piesă '{part}' -> NC: {len(part_nc_found)}, PDF: {len(part_pdf_found)}, {dwg_desc}", log_lvl)
+        log(f"[{status}] Piesă '{part}' (Asmb: {', '.join(asmbs) if asmbs else '-'}) -> NC: {len(part_nc_found)}, PDF: {len(part_pdf_found)}, {dwg_desc}", log_lvl)
 
     # 4. Clean up source files if mode == 'move' and not cancelled
-    if mode == "move" and files_to_delete_from_source and not (is_cancelled and is_cancelled()):
+    safe_delete_paths = [
+        p for p in files_to_delete_from_source
+        if _norm_abs(p) not in copied_dest_paths
+    ]
+    if mode == "move" and safe_delete_paths and not (is_cancelled and is_cancelled()):
         set_progress(0.88, "Ștergere fișiere mutate din sursă...")
-        log(f"\n🗑️ Ștergere {len(files_to_delete_from_source)} fișiere originale din sursă...", "INFO")
+        log(f"\n🗑️ Ștergere {len(safe_delete_paths)} fișiere originale din sursă...", "INFO")
         del_count = 0
-        for src_path in files_to_delete_from_source:
+        for src_path in safe_delete_paths:
             try:
                 if os.path.exists(src_path):
                     # Clear read-only if present

@@ -389,7 +389,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.9.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1121,12 +1121,17 @@ class UnifiedApp(ctk.CTk):
         self.dwg_subview_mode = ctk.StringVar(value="🔍 Căutare DWG în Proiecte")
         # Subview 2: Organizare pe piese din BOM
         self.dwg_org_excel = ctk.StringVar()
+        self.dwg_org_filter_path = ctk.StringVar()
         self.dwg_org_source = ctk.StringVar()
         self.dwg_org_dest = ctk.StringVar()
         self.dwg_org_action = ctk.StringVar(value="move")
         self.dwg_org_sheet = ctk.StringVar(value="-")
         self.dwg_org_asmb_col = ctk.StringVar(value="-")
         self.dwg_org_part_col = ctk.StringVar(value="-")
+        self.dwg_org_include_nc = ctk.BooleanVar(value=True)
+        self.dwg_org_include_pdf = ctk.BooleanVar(value=True)
+        self.dwg_org_include_dwg = ctk.BooleanVar(value=True)
+        self.dwg_org_flat_pdf = ctk.BooleanVar(value=False)
         self.dwg_org_variations = ctk.BooleanVar(value=True)
         self.dwg_org_clean_empty = ctk.BooleanVar(value=True)
         self.dwg_org_open_dest = ctk.BooleanVar(value=True)
@@ -1304,9 +1309,14 @@ class UnifiedApp(ctk.CTk):
             # DWG Tools settings
             self.dwg_subview_mode.set(s.get("dwg_subview_mode", "🔍 Căutare DWG în Proiecte"))
             self.dwg_org_excel.set(s.get("dwg_org_excel", ""))
+            self.dwg_org_filter_path.set(s.get("dwg_org_filter_path", ""))
             self.dwg_org_source.set(s.get("dwg_org_source", ""))
             self.dwg_org_dest.set(s.get("dwg_org_dest", ""))
             self.dwg_org_action.set(s.get("dwg_org_action", "move"))
+            self.dwg_org_include_nc.set(s.get("dwg_org_include_nc", True))
+            self.dwg_org_include_pdf.set(s.get("dwg_org_include_pdf", True))
+            self.dwg_org_include_dwg.set(s.get("dwg_org_include_dwg", True))
+            self.dwg_org_flat_pdf.set(s.get("dwg_org_flat_pdf", False))
             self.dwg_regroup_source.set(s.get("dwg_regroup_source", ""))
             self.dwg_regroup_dest.set(s.get("dwg_regroup_dest", ""))
             self.dwg_regroup_action.set(s.get("dwg_regroup_action", "copy"))
@@ -1473,9 +1483,14 @@ class UnifiedApp(ctk.CTk):
             "pdf_cad_calibrate": self.pdf_cad_calibrate.get(),
             "dwg_subview_mode": self.dwg_subview_mode.get(),
             "dwg_org_excel": self.dwg_org_excel.get(),
+            "dwg_org_filter_path": self.dwg_org_filter_path.get(),
             "dwg_org_source": self.dwg_org_source.get(),
             "dwg_org_dest": self.dwg_org_dest.get(),
             "dwg_org_action": self.dwg_org_action.get(),
+            "dwg_org_include_nc": self.dwg_org_include_nc.get(),
+            "dwg_org_include_pdf": self.dwg_org_include_pdf.get(),
+            "dwg_org_include_dwg": self.dwg_org_include_dwg.get(),
+            "dwg_org_flat_pdf": self.dwg_org_flat_pdf.get(),
             "dwg_regroup_source": self.dwg_regroup_source.get(),
             "dwg_regroup_dest": self.dwg_regroup_dest.get(),
             "dwg_regroup_action": self.dwg_regroup_action.get(),
@@ -5900,7 +5915,23 @@ class UnifiedApp(ctk.CTk):
         self.combo_dwg_org_part_col.grid(row=0, column=5, sticky="ew", padx=4, pady=2)
 
         self.lbl_dwg_org_excel_info = ctk.CTkLabel(card_xl, text="ℹ️ Selectează un fișier Excel pentru detectarea automată a coloanelor.", font=("Segoe UI", 11), text_color=_TEXT_SEC)
-        self.lbl_dwg_org_excel_info.grid(row=3, column=0, columnspan=3, sticky="w", padx=16, pady=(0, 8))
+        self.lbl_dwg_org_excel_info.grid(row=3, column=0, columnspan=3, sticky="w", padx=16, pady=(0, 4))
+
+        self._label(card_xl, text="Filtru Piese / Chesoane (opțional):").grid(row=4, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_xl, self.dwg_org_filter_path, placeholder_text="Opțional: raport_CHESON.xlsx SAU folder (subfoldere / NC / PDF)...").grid(row=4, column=1, sticky="ew", padx=4, pady=4)
+
+        filt_btns = ctk.CTkFrame(card_xl, fg_color="transparent")
+        filt_btns.grid(row=4, column=2, padx=(4, 16), pady=4, sticky="e")
+        ctk.CTkButton(filt_btns, text="📄 Excel", width=72, height=32, fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._browse_dwg_org_filter_excel).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(filt_btns, text="📁 Folder", width=78, height=32, fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._browse_dwg_org_filter_folder).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(filt_btns, text="✖", width=32, height=32, fg_color=_RED, hover_color=_RED_HOV, command=self._clear_dwg_org_filter).pack(side="left")
+
+        self.lbl_dwg_org_filter_info = ctk.CTkLabel(
+            card_xl,
+            text="ℹ️ Opțional: alege un raport Excel (ex. raport_CHESON.xlsx) sau un folder (cu subfoldere/NC/PDF) pentru a extrage doar pentru acele piese.",
+            font=("Segoe UI", 11), text_color=_TEXT_SEC
+        )
+        self.lbl_dwg_org_filter_info.grid(row=5, column=0, columnspan=3, sticky="w", padx=16, pady=(0, 8))
 
         # Card 2: Foldere Sursă & Destinație
         card_dirs = self._make_card(scroll)
@@ -5927,12 +5958,20 @@ class UnifiedApp(ctk.CTk):
         ctk.CTkLabel(card_opts, text="3. Mod Operare și Opțiuni", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).pack(anchor="w", padx=16, pady=(10, 4))
 
         sub_opts = ctk.CTkFrame(card_opts, fg_color="transparent")
-        sub_opts.pack(fill="x", padx=16, pady=(0, 8))
+        sub_opts.pack(fill="x", padx=16, pady=(0, 6))
 
         ctk.CTkRadioButton(sub_opts, text="Mută fișierele (Move)", variable=self.dwg_org_action, value="move").pack(side="left", padx=(0, 20))
         ctk.CTkRadioButton(sub_opts, text="Copiază fișierele (Copy - păstrează originalele)", variable=self.dwg_org_action, value="copy").pack(side="left", padx=(0, 20))
         ctk.CTkCheckBox(sub_opts, text="Include variații DWG (ex. T, L, C)", variable=self.dwg_org_variations).pack(side="left", padx=(0, 20))
         ctk.CTkCheckBox(sub_opts, text="Curăță folderele goale la final (Mutare)", variable=self.dwg_org_clean_empty).pack(side="left")
+
+        sub_types = ctk.CTkFrame(card_opts, fg_color="transparent")
+        sub_types.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(sub_types, text="Tipuri de extras:", font=("Segoe UI", 12, "bold"), text_color=_TEXT_SEC).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(sub_types, text="Extrage NC", variable=self.dwg_org_include_nc, width=105).pack(side="left", padx=(0, 14))
+        ctk.CTkCheckBox(sub_types, text="Extrage PDF Ansamblu", variable=self.dwg_org_include_pdf, width=165).pack(side="left", padx=(0, 14))
+        ctk.CTkCheckBox(sub_types, text="Extrage DWG", variable=self.dwg_org_include_dwg, width=110).pack(side="left", padx=(0, 18))
+        ctk.CTkCheckBox(sub_types, text="Doar PDF-uri de ansamblu direct în Destinație (fără subfoldere pe piese)", variable=self.dwg_org_flat_pdf).pack(side="left")
 
         # Action Buttons
         btn_bar = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -5985,6 +6024,87 @@ class UnifiedApp(ctk.CTk):
         saved_xl = self.dwg_org_excel.get().strip()
         if saved_xl and os.path.isfile(saved_xl):
             self.after(200, lambda p=saved_xl: self._on_dwg_org_excel_selected(p))
+        elif self.dwg_org_filter_path.get().strip():
+            self.after(220, self._refresh_dwg_org_filter_preview)
+
+    def _browse_dwg_org_filter_excel(self):
+        initial = self._get_browse_initial_dir("dest_based", self.dwg_org_filter_path.get() or self.dwg_org_excel.get())
+        f = filedialog.askopenfilename(title="Selectează Raport / Excel Piese (ex. raport_CHESON.xlsx)", initialdir=initial, filetypes=[("Excel", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")])
+        if f:
+            norm = os.path.normpath(f)
+            self.dwg_org_filter_path.set(norm)
+            self.save_settings()
+            self._refresh_dwg_org_filter_preview()
+
+    def _browse_dwg_org_filter_folder(self):
+        initial = self._get_browse_initial_dir("dest_based", self.dwg_org_filter_path.get() or self.dwg_org_source.get())
+        d = filedialog.askdirectory(title="Selectează Folderul cu Piese / Chesoane (subfoldere / NC / PDF)", initialdir=initial)
+        if d:
+            norm = os.path.normpath(d)
+            self.dwg_org_filter_path.set(norm)
+            self.save_settings()
+            self._refresh_dwg_org_filter_preview()
+
+    def _clear_dwg_org_filter(self):
+        self.dwg_org_filter_path.set("")
+        self.save_settings()
+        self.lbl_dwg_org_filter_info.configure(
+            text="ℹ️ Opțional: alege un raport Excel (ex. raport_CHESON.xlsx) sau un folder (cu subfoldere/NC/PDF) pentru a extrage doar pentru acele piese.",
+            text_color=_TEXT_SEC
+        )
+
+    def _parse_dwg_org_col_idx(self, val_str, fallback):
+        s = (val_str or "").strip()
+        if s == "(Fără)":
+            return None
+        if s in ("", "-"):
+            return fallback
+        m = re.match(r"Col\s+(\d+)", s)
+        return int(m.group(1)) if m else fallback
+
+    def _refresh_dwg_org_filter_preview(self):
+        fpath = self.dwg_org_filter_path.get().strip()
+        if not fpath:
+            self.lbl_dwg_org_filter_info.configure(
+                text="ℹ️ Opțional: alege un raport Excel (ex. raport_CHESON.xlsx) sau un folder (cu subfoldere/NC/PDF) pentru a extrage doar pentru acele piese.",
+                text_color=_TEXT_SEC
+            )
+            return
+        if not os.path.exists(fpath):
+            self.lbl_dwg_org_filter_info.configure(text=f"⚠ Calea de filtrare nu există: {fpath}", text_color=_RED[1])
+            return
+        try:
+            f_info = dwg_organizer.extract_filter_parts(fpath)
+            f_parts = f_info["parts"]
+            bom_p = self.dwg_org_excel.get().strip()
+            meta = getattr(self, "dwg_org_excel_meta", None)
+            if bom_p and os.path.isfile(bom_p) and meta:
+                sh_name = self.dwg_org_sheet.get()
+                if not sh_name or sh_name in ("-", "selected_sheet"):
+                    sh_name = meta.get("active_sheet")
+                asmb_idx = self._parse_dwg_org_col_idx(self.dwg_org_asmb_col.get(), meta.get("asmb_idx"))
+                part_idx = self._parse_dwg_org_col_idx(self.dwg_org_part_col.get(), meta.get("part_idx"))
+                bom_map = dwg_organizer.parse_excel_parts(bom_p, sh_name, meta.get("header_row", 1), asmb_idx, part_idx)
+                clean_bom = {}
+                for bp, asmbs in bom_map.items():
+                    cl = dwg_organizer.clean_alphanumeric(bp)
+                    if cl:
+                        clean_bom.setdefault(cl, set()).update(asmbs)
+                matched = sum(1 for fp in f_parts if dwg_organizer.clean_alphanumeric(fp) in clean_bom)
+                uniq_asmbs = set()
+                for fp in f_parts:
+                    uniq_asmbs.update(clean_bom.get(dwg_organizer.clean_alphanumeric(fp), ()))
+                self.lbl_dwg_org_filter_info.configure(
+                    text=f"🎯 Filtru activ ({f_info['source_type']}): {len(f_parts)} piese ➜ {matched} găsite în BOM ({len(uniq_asmbs)} ansambluri unice).",
+                    text_color=_GREEN[1] if matched > 0 else _RED[1]
+                )
+            else:
+                self.lbl_dwg_org_filter_info.configure(
+                    text=f"🎯 Filtru detectat ({f_info['source_type']}): {len(f_parts)} piese. Selectează Excel BOM pentru asociere ansambluri.",
+                    text_color=_GREEN[1]
+                )
+        except Exception as e:
+            self.lbl_dwg_org_filter_info.configure(text=f"⚠ Eroare citire filtru: {e}", text_color=_RED[1])
 
     def _browse_dwg_org_excel(self):
         initial = self._get_browse_initial_dir("dest_based", self.dwg_org_excel.get())
@@ -6037,6 +6157,7 @@ class UnifiedApp(ctk.CTk):
             text=f"✅ Detectat: Sheet '{active_sh}', Rând Antet: {h_row}, Asmb: {asmb_txt}, Piesă: {part_txt}",
             text_color=_GREEN[1]
         )
+        self._refresh_dwg_org_filter_preview()
 
     def _on_dwg_org_excel_selected(self, filepath):
         try:
@@ -6115,20 +6236,23 @@ class UnifiedApp(ctk.CTk):
         if not sh_name or sh_name in ("-", "selected_sheet"):
             sh_name = meta.get("active_sheet") if meta else None
 
-        # Extract col indices
-        def parse_col_idx(val_str, fallback):
-            s = (val_str or "").strip()
-            if s == "(Fără)":
-                return None
-            if s in ("", "-"):
-                return fallback
-            m = re.match(r"Col\s+(\d+)", s)
-            return int(m.group(1)) if m else fallback
-
-        asmb_idx = parse_col_idx(self.dwg_org_asmb_col.get(), meta.get("asmb_idx") if meta else 1)
-        part_idx = parse_col_idx(self.dwg_org_part_col.get(), meta.get("part_idx") if meta else 2)
+        asmb_idx = self._parse_dwg_org_col_idx(self.dwg_org_asmb_col.get(), meta.get("asmb_idx") if meta else 1)
+        part_idx = self._parse_dwg_org_col_idx(self.dwg_org_part_col.get(), meta.get("part_idx") if meta else 2)
         if part_idx is None:
             messagebox.showwarning("Atenție", "Selectează o coloană validă pentru Piesă.")
+            return
+
+        filter_p = self.dwg_org_filter_path.get().strip() or None
+        if filter_p and not os.path.exists(filter_p):
+            messagebox.showwarning("Atenție", f"Calea filtrului nu există:\n{filter_p}")
+            return
+
+        inc_nc = self.dwg_org_include_nc.get()
+        inc_pdf = self.dwg_org_include_pdf.get()
+        inc_dwg = self.dwg_org_include_dwg.get()
+        flat_pdf = self.dwg_org_flat_pdf.get()
+        if not flat_pdf and not (inc_nc or inc_pdf or inc_dwg):
+            messagebox.showwarning("Atenție", "Bifează cel puțin un tip de fișier de extras (NC, PDF Ansamblu sau DWG).")
             return
 
         self.dwg_org_running = True
@@ -6164,7 +6288,12 @@ class UnifiedApp(ctk.CTk):
                     clean_empty_folders=clean_empty,
                     progress_callback=prog_cb,
                     log_callback=log_cb,
-                    is_cancelled=cancel_cb
+                    is_cancelled=cancel_cb,
+                    filter_path=filter_p,
+                    include_nc=inc_nc,
+                    include_pdf=inc_pdf,
+                    include_dwg=inc_dwg,
+                    flat_pdf_only=flat_pdf,
                 )
                 if self.dwg_org_cancel or summary_stats is None:
                     res_payload = {"cancelled": True, "report_path": report_path}
