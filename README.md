@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.13.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.13.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.13.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.14.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.14.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.14.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.13.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.13.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.14.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.14.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,10 @@
 
 ## 🚀 Funcționalități
 
-- **📦 Cheson / HSQ Extractor (Actualizat în v1.13.0 — Batch Automat Multi-Folder, Layer `0` Default, Reverificare Post-Desenare & Simulare Asamblare 3D)**:
+- **📦 Cheson / HSQ Extractor (Actualizat în v1.14.0 — Deduplicare 100% Piese Identice, Distincție Strictă `T` Talpă vs `C` Capac & Raport Excel `T/C/L`)**:
+  - **Distincție Strictă Talpă (`T`) vs Capac (`C`):** talpa lată pe care se montează lateralele este clasificată și denumită întotdeauna cu `T` (fără retragere `tw`), iar capacele dintre inimi cu `C` (cu grosimea reală mapată corect din `HSQ*`).
+  - **Deduplicare 100% Geometrică:** piesele identice dpdv contur exterior, grosime, material, decupaje și găuri (inclusiv sub rotație 180° sau oglindire X/Y) sunt generate ca **un singur fișier CAD** (ex. `C` cu `×2/cheson` în loc de `C1`+`C2`, sau `L1`×2 + `L2`×1 + `L3`×1), simularea 3D păstrând verificarea completă pe toate instanțele fizice.
+  - **Raport Cantități Excel (`Raport_Piese_Cheson.xlsx`) + Integrare `raport_CHESON.xlsx`:** citește automat numărul de chesoane din `raport_CHESON.xlsx` (sau `STYKKLISTE`/`.nc1`), calculează necesarul multiplicat per cheson (`Sumar Complet: T: 3 | C: 6 | L1: 6 | L2: 3 | L3: 3`) și generează workbook-ul cu 3 foi (`Sumar Chesoane (T-C-L)`, `Lista Piese Debitare`, `Pe Grosimi`).
   - **Batch Automat Multi-Folder (`CHESON/<nume_cheson>/`)**: selectând folderul părinte în modul **`Folder Întreg (Batch)`**, aplicația descoperă automat toate subfolderele de chesoane (ex. `DSB-2094`, `DSB-2273`, ...), ignoră folderele de test/grosimi (`test`, `T5..T25`, `Cheson_Output`), procesează fiecare cheson complet izolat cu propriul `.nc1` + `A-drawing.pdf` (`STYKKLISTE`), și poate salva fie într-un mirror organizat la destinație, fie **direct în folderul fiecărui cheson** (plus rapoarte centrale `batch_manifest.json` și `batch_report.csv`).
   - **Auto-Detecție pentru toate cele 3 tipuri reale de secțiune**:
     1. **Tip 1 (Cheson cu Talpă):** talpă lată (`T`) + capac între inimi (`C`) + 2 laterale cu lățimea exactă `H - tf - tw`.

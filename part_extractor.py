@@ -390,7 +390,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.14.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1194,6 +1194,8 @@ class UnifiedApp(ctk.CTk):
         self.cheson_organize_thickness = ctk.BooleanVar(value=True)
         self.cheson_recursive = ctk.BooleanVar(value=False)
         self.cheson_save_in_subfolders = ctk.BooleanVar(value=False)
+        self.cheson_deduplicate = ctk.BooleanVar(value=True)
+        self.cheson_report_xlsx = ctk.StringVar(value="")
         self.cheson_generate_reports = ctk.BooleanVar(value=True)
         self.cheson_open_folder = ctk.BooleanVar(value=True)
         self.cheson_running = False
@@ -1376,6 +1378,8 @@ class UnifiedApp(ctk.CTk):
             self.cheson_organize_thickness.set(s.get("cheson_organize_thickness", True))
             self.cheson_recursive.set(s.get("cheson_recursive", False))
             self.cheson_save_in_subfolders.set(s.get("cheson_save_in_subfolders", False))
+            self.cheson_deduplicate.set(s.get("cheson_deduplicate", True))
+            self.cheson_report_xlsx.set(s.get("cheson_report_xlsx", ""))
             self.cheson_generate_reports.set(s.get("cheson_generate_reports", True))
             self.cheson_open_folder.set(s.get("cheson_open_folder", True))
 
@@ -1565,6 +1569,8 @@ class UnifiedApp(ctk.CTk):
             "cheson_organize_thickness": self.cheson_organize_thickness.get(),
             "cheson_recursive": self.cheson_recursive.get(),
             "cheson_save_in_subfolders": self.cheson_save_in_subfolders.get(),
+            "cheson_deduplicate": self.cheson_deduplicate.get(),
+            "cheson_report_xlsx": self.cheson_report_xlsx.get(),
             "cheson_generate_reports": self.cheson_generate_reports.get(),
             "cheson_open_folder": self.cheson_open_folder.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
@@ -7381,12 +7387,18 @@ class UnifiedApp(ctk.CTk):
         chk_frame2.pack(fill="x", anchor="w", pady=(5, 0))
         ctk.CTkCheckBox(
             chk_frame2,
+            text="Deduplică piese identice 100%",
+            variable=self.cheson_deduplicate,
+            font=("Segoe UI", 11, "bold"),
+        ).pack(side="left", padx=(0, 16))
+        ctk.CTkCheckBox(
+            chk_frame2,
             text="Salvează direct în folderul fiecărui cheson (pentru Batch multi-folder)",
             variable=self.cheson_save_in_subfolders,
             font=("Segoe UI", 11, "bold"),
         ).pack(side="left")
 
-        # Row 7: Shared ODA status strip
+        # Row 7: Shared ODA status strip + optional raport_CHESON.xlsx selector
         oda_frame = ctk.CTkFrame(cfg_card, fg_color=("#eef2f6", "#182335"), corner_radius=6)
         oda_frame.grid(row=7, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 10))
         oda_frame.grid_columnconfigure(1, weight=1)
@@ -7400,6 +7412,16 @@ class UnifiedApp(ctk.CTk):
         ).grid(row=0, column=1, sticky="ew", padx=8, pady=5)
         ctk.CTkButton(oda_frame, text="📁 Browse", width=70, height=28, corner_radius=4, command=self.browse_pdf_cad_oda).grid(row=0, column=2, padx=4, pady=5)
         ctk.CTkButton(oda_frame, text="🔍 Test ODA", width=75, height=28, corner_radius=4, command=self.test_oda_installation).grid(row=0, column=3, padx=(4, 10), pady=5)
+
+        ctk.CTkLabel(oda_frame, text="Raport Chesoane (.xlsx):", font=("Segoe UI", 11)).grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+        ctk.CTkEntry(
+            oda_frame,
+            textvariable=self.cheson_report_xlsx,
+            placeholder_text="Opțional: raport_CHESON.xlsx pentru cantități chesoane (auto-detectat în folder)",
+            height=28,
+            corner_radius=4,
+        ).grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkButton(oda_frame, text="📁 Browse", width=70, height=28, corner_radius=4, command=self.browse_cheson_report_xlsx).grid(row=1, column=2, padx=4, pady=(0, 6))
 
         # ── Card 3: Action Bar & Progress ──
         act_card = ctk.CTkFrame(parent, fg_color="transparent")
@@ -7507,6 +7529,16 @@ class UnifiedApp(ctk.CTk):
             self.cheson_dest_dir.set(d)
             self._set_global_last_dir(d)
 
+    def browse_cheson_report_xlsx(self):
+        f = filedialog.askopenfilename(
+            title="Selectează Raportul de Chesoane (ex. raport_CHESON.xlsx)",
+            filetypes=[("Fișiere Excel", "*.xlsx *.xlsm"), ("Toate Fișierele", "*.*")],
+            initialdir=getattr(self, "global_last_dir", None),
+        )
+        if f:
+            self.cheson_report_xlsx.set(f)
+            self._set_global_last_dir(f)
+
     def cheson_log(self, msg):
         if hasattr(self, "cheson_log_box"):
             self.cheson_log_box.insert("end", msg + "\n")
@@ -7603,13 +7635,15 @@ class UnifiedApp(ctk.CTk):
                 recursive=self.cheson_recursive.get(),
                 strip_residual_fragments=self.cheson_strip_residuals.get(),
                 use_nesting_layers=self.cheson_use_layers.get(),
+                deduplicate_identical=self.cheson_deduplicate.get(),
+                cheson_report_xlsx=self.cheson_report_xlsx.get().strip() or None,
             )
         except Exception as exc:
             messagebox.showerror("Eroare Previzualizare", str(exc))
             return
 
         self.cheson_log_box.delete("1.0", "end")
-        self.cheson_log("🔍 PREVIZUALIZARE, REVERIFICARE POST-DESENARE & SIMULARE 3D")
+        self.cheson_log("🔍 PREVIZUALIZARE, DEDUPLICARE T/C/L & SIMULARE 3D")
         if prev.get("is_multi_folder_batch"):
             self.cheson_log(
                 f"🗂️ BATCH MULTI-FOLDER DETECTAT: {prev.get('folders_count', 0)} foldere cheson izolate "
@@ -7619,6 +7653,8 @@ class UnifiedApp(ctk.CTk):
             self.cheson_log(f"📋 A-drawing STYKKLISTE: {prev['a_drawing']} ({prev['bom_assembly_id']}, {prev['bom_rows_count']} repere)")
         else:
             self.cheson_log("📋 A-drawing STYKKLISTE: nedetectat în folder (folosire cote .nc1 / override manual)")
+        if prev.get("cheson_report_xlsx"):
+            self.cheson_log(f"📊 Raport cantități chesoane: {prev['cheson_report_xlsx']}")
         if scope_mode != "cheson_only":
             self.cheson_log(f"📐 W-drawings detectate în folder: {prev['w_drawings_count']}")
 
@@ -7634,8 +7670,16 @@ class UnifiedApp(ctk.CTk):
                 pdf_info = item.get("a_drawing") or "fără A-drawing"
                 bom_info = f" ({item['bom_assembly_id']})" if item.get("bom_assembly_id") else ""
                 self.cheson_log(f"\n📁 Folder: {folder_nm} | PDF: {pdf_info}{bom_info}")
-            self.cheson_log(f"\n🧩 {item['file']} | {item['profile']}")
+            tcl = item.get("tcl_summary") or {}
+            self.cheson_log(
+                f"\n🧩 {item['file']} | {item['profile']} "
+                f"[{item.get('raw_plates_count', len(item['plates']))} fizice -> {item.get('unique_plates_count', len(item['plates']))} unice]"
+            )
             self.cheson_log(f"   Tip detectat : {v['detected_type_label']}")
+            if tcl.get("full_summary"):
+                self.cheson_log(
+                    f"   Cantități TCL: {item.get('cheson_qty', 1)} chesoane [{item.get('qty_source', 'NC1')}] -> {tcl['full_summary']}"
+                )
             self.cheson_log(
                 f"   Gabarit      : L={v['l_assembled_mm']:.3f} mm (țintă {v['l_gabarit_target_mm']:.3f} [{v['l_source_label']}], brut NC1 {v['l_nc1_raw_mm']:.2f})"
             )
@@ -7662,8 +7706,10 @@ class UnifiedApp(ctk.CTk):
                 self.cheson_log(f"   Cote PDF OK  : [{dims_s}]")
             for pl in item["plates"]:
                 res_msg = f" | 🧹 {pl['removed_residuals']} reziduuri eliminate" if pl.get("removed_residuals", 0) > 0 else ""
+                qty_msg = f" | ×{pl.get('qty_per_cheson', 1)}/cheson -> {pl.get('total_qty', 1)} buc"
                 self.cheson_log(
-                    f"      • {pl['folder']}/{pl['name']}: {pl['length_mm']:.3f} × {pl['width_mm']:.3f} mm (T{int(round(pl['thickness']))}, {pl['role']}){res_msg}"
+                    f"      • {pl['folder']}/{pl['name']} [{pl.get('role_code', '')} {pl.get('role_label', pl['role'])}]: "
+                    f"{pl['length_mm']:.3f} × {pl['width_mm']:.3f} mm (T{int(round(pl['thickness']))}){qty_msg}{res_msg}"
                 )
 
     def start_cheson_process(self):
@@ -7708,6 +7754,8 @@ class UnifiedApp(ctk.CTk):
         gen_reports = self.cheson_generate_reports.get()
         exact_gab = self.cheson_exact_gabarit.get()
         strip_res = self.cheson_strip_residuals.get()
+        dedup_ident = self.cheson_deduplicate.get()
+        report_xlsx = self.cheson_report_xlsx.get().strip() or None
 
         def _worker():
             try:
@@ -7731,6 +7779,8 @@ class UnifiedApp(ctk.CTk):
                     log_callback=lambda m: self.after(0, lambda msg=m: self.cheson_log(msg)),
                     strip_residual_fragments=strip_res,
                     save_in_source_subfolders=save_in_subfolders,
+                    deduplicate_identical=dedup_ident,
+                    cheson_report_xlsx=report_xlsx,
                 )
                 self.after(0, lambda: self._on_cheson_complete(res, None))
             except Exception as exc:
@@ -7766,13 +7816,19 @@ class UnifiedApp(ctk.CTk):
                 f"• Foldere cheson procesate: {res.get('folders_processed', 0)} "
                 f"({res.get('batch_pass_count', 0)} PASS, {res.get('batch_check_count', 0)} CHECK)\n"
             )
+        ch_sums = res.get("cheson_summaries") or []
+        tot_pcs = sum(int(cs.get("total_pieces_count", 0)) for cs in ch_sums)
+        tcl_line = f"• Total bucăți de debitat (T/C/L): {tot_pcs} bucăți din {res['plates_generated']} piese unice\n" if ch_sums else ""
+        xl_line = f"• Raport Excel T/C/L: {os.path.basename(res['excel_report_path'])}\n" if res.get("excel_report_path") else ""
         summary = (
             f"Extragere finalizată!\n\n"
             f"{batch_line}"
-            f"• Piese cheson (.nc1): {res['plates_generated']}\n"
+            f"• Piese unice cheson (.nc1): {res['plates_generated']}\n"
+            f"{tcl_line}"
             f"• W-drawings convertite: {res['w_drawings_converted']}\n"
             f"• Plăci BOM sintetizate: {res['bom_plates_generated']}\n"
             f"• Total fișiere CAD generate: {len(res['files'])}\n"
+            f"{xl_line}"
             f"{audit_line}\n"
             f"Folder destinație:\n{dest_dir}"
         )

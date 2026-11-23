@@ -42,6 +42,12 @@ try:
 except ImportError:  # pragma: no cover
     PdfToCadConverter = None  # type: ignore[assignment]
 
+try:
+    import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+except ImportError:  # pragma: no cover
+    openpyxl = None  # type: ignore[assignment]
+
 
 DSTV_BLOCK_CODES = {
     "ST", "EN", "AK", "IK", "BO", "SI", "PU", "KO", "KA", "TO", "UE", "SC",
@@ -204,6 +210,7 @@ class ChesonConfig:
     strip_cnc_corner_loops: bool = True
     corner_relief_radius_max_mm: float = 5.0
     strip_residual_fragments: bool = True
+    deduplicate_identical: bool = True
     min_segment_length_mm: float = 0.05
     lowercase_piece_prefix: bool = True
     flange_letter: str = "C"
@@ -217,6 +224,7 @@ class ChesonConfig:
         target_length_mm: Optional[float] = None,
         override_web_height_mm: Optional[float] = None,
         strip_residual_fragments: bool = True,
+        deduplicate_identical: bool = True,
     ) -> "ChesonConfig":
         key = (preset or "auto").strip().lower()
         common = {
@@ -224,6 +232,7 @@ class ChesonConfig:
             "target_length_mm": target_length_mm,
             "override_web_height_mm": override_web_height_mm,
             "strip_residual_fragments": strip_residual_fragments,
+            "deduplicate_identical": deduplicate_identical,
         }
         if key in ("auto", "auto_detect"):
             return cls(cheson_type="auto", **common)
@@ -289,6 +298,9 @@ class ExtractedPlate:
     markings: list[DSTVMarking] = field(default_factory=list)
     source_bounds: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     removed_residuals: int = 0
+    qty_per_cheson: int = 1
+    role_code: str = ""
+    merged_sources: list[str] = field(default_factory=list)
 
     @property
     def bounds(self) -> tuple[float, float, float, float]:
@@ -437,6 +449,10 @@ class ManifestEntry:
     output_folder: str
     output_file: str
     notes: str = ""
+    role_code: str = ""
+    role_label: str = ""
+    qty_per_cheson: int = 1
+    qty_source: str = ""
 
 
 # ─── Pure-Python 2D Polygon Engine ───────────────────────────────────────────
@@ -1290,10 +1306,10 @@ def parse_compound_profile(profile_str: str, header: DSTVHeader) -> CompoundProf
         ptype = m3.group(1).upper()
         h_web = float(m3.group(2))
         tw = float(m3.group(3))
-        tf_bot = float(m3.group(4))
-        b_bot = float(m3.group(5))
-        tf_top = float(m3.group(6))
-        b_top = float(m3.group(7))
+        tf_top = float(m3.group(4))
+        b_top = float(m3.group(5))
+        tf_bot = float(m3.group(6))
+        b_bot = float(m3.group(7))
     else:
         m2 = _PROFILE_2PART_RE.match(s)
         if m2:
@@ -1385,19 +1401,57 @@ def _face_y_span(dstv: DSTVFile, face: str, cfg: ChesonConfig) -> Optional[float
     return (max(ys) - min(ys)) if ys else None
 
 
+def _align_spec_flanges_to_faces(
+    dstv: DSTVFile,
+    spec: CompoundProfileSpec,
+    cfg: ChesonConfig,
+) -> CompoundProfileSpec:
+    """Align top/bottom flange specs with actual .nc1 AK face widths (dy_o vs dy_u)."""
+    dy_o = _face_y_span(dstv, "o", cfg)
+    dy_u = _face_y_span(dstv, "u", cfg)
+    if dy_o is None or dy_u is None:
+        return spec
+    thresh = 2.0 * spec.tw + 1.0
+    if abs(dy_o - dy_u) <= thresh:
+        return spec
+    if abs(spec.b_top - spec.b_bot) <= 1.0:
+        return spec
+    o_is_wider = dy_o > dy_u + thresh
+    spec_top_is_wider = spec.b_top > spec.b_bot + 1.0
+    if o_is_wider != spec_top_is_wider:
+        return CompoundProfileSpec(
+            profile_type=spec.profile_type,
+            h_web=spec.h_web,
+            tw=spec.tw,
+            tf_bot=spec.tf_top,
+            b_bot=spec.b_top,
+            tf_top=spec.tf_bot,
+            b_top=spec.b_bot,
+            total_height=spec.total_height,
+            total_width=spec.total_width,
+            top_over_webs=spec.bot_over_webs,
+            bot_over_webs=spec.top_over_webs,
+        )
+    return spec
+
+
 def detect_cheson_type(
     dstv: DSTVFile,
     spec: CompoundProfileSpec,
     cfg: ChesonConfig,
 ) -> tuple[str, str]:
-    """Classify box beam into (cheson_type, talpa_side: 'none'|'bottom'|'top')."""
+    """Classify box beam into (cheson_type, talpa_side: 'none'|'bottom'|'top'|'middle')."""
     explicit = (cfg.cheson_type or "auto").strip().lower()
     tw = spec.tw
 
-    dy_o = _face_y_span(dstv, "o", cfg) or spec.b_top
-    dy_u = _face_y_span(dstv, "u", cfg) or spec.b_bot
-    bot_wider = (spec.b_bot > spec.b_top + 2.0 * tw + 1.0) or (dy_u > dy_o + 2.0 * tw + 1.0)
-    top_wider = (spec.b_top > spec.b_bot + 2.0 * tw + 1.0) or (dy_o > dy_u + 2.0 * tw + 1.0)
+    dy_o = _face_y_span(dstv, "o", cfg)
+    dy_u = _face_y_span(dstv, "u", cfg)
+    if dy_o is not None and dy_u is not None and abs(dy_u - dy_o) > 1.0:
+        bot_wider = dy_u > dy_o + 2.0 * tw + 1.0
+        top_wider = dy_o > dy_u + 2.0 * tw + 1.0
+    else:
+        bot_wider = spec.b_bot > spec.b_top + 2.0 * tw + 1.0
+        top_wider = spec.b_top > spec.b_bot + 2.0 * tw + 1.0
     talpa_side = "top" if top_wider and not bot_wider else ("bottom" if bot_wider else "none")
 
     if explicit != "auto":
@@ -1963,7 +2017,9 @@ def verify_cheson_decomposition(
 
     # Check flange-web contact length consistency on top capac (C or C1) vs webs
     contact_err = 0.0
-    ref_flange = next((p for p in plates if p.role in ("flange_top", "capac")), None)
+    ref_flange = next((p for p in plates if p.role == "capac"), None)
+    if ref_flange is None:
+        ref_flange = next((p for p in plates if p.role in ("flange_top", "talpa")), None)
     if ref_flange is not None and webs:
         r = ref_flange.exterior
         b = ref_flange.bounds
@@ -2020,6 +2076,7 @@ def decompose_compound_nc1(
     cfg = cfg or ChesonConfig()
     header = dstv.header
     spec = parse_compound_profile(header.profile_str, header)
+    spec = _align_spec_flanges_to_faces(dstv, spec, cfg)
     piece_clean = clean_piece_name(header.piece_id, lowercase=cfg.lowercase_piece_prefix)
     detected_type, talpa_side = detect_cheson_type(dstv, spec, cfg)
 
@@ -2052,7 +2109,9 @@ def decompose_compound_nc1(
     applied_delta_l = (l_assembled_env - l_nc1_raw) if cfg.exact_gabarit_lock else 0.0
     start_tan, end_tan = _estimate_end_skew_angles(dstv, locked_rings)
 
-    # Determine flange clipping modes per detected cheson type
+    # Determine flange clipping modes & strict roles (talpa='T' vs capac='C') per detected cheson type
+    dy_o_raw = _face_y_span(dstv, "o", cfg) or spec.b_top
+    dy_u_raw = _face_y_span(dstv, "u", cfg) or spec.b_bot
     if detected_type == "cheson_cu_talpa":
         top_over = (talpa_side == "top")
         bot_over = (talpa_side == "bottom")
@@ -2061,26 +2120,28 @@ def decompose_compound_nc1(
         o_role = "talpa" if talpa_side == "top" else "capac"
         u_role = "talpa" if talpa_side == "bottom" else "capac"
     elif detected_type == "cheson_dublu":
-        top_over = False
-        bot_over = False
-        o_suffix = f"{cfg.flange_letter}1"
-        u_suffix = f"{cfg.flange_letter}2"
-        o_role = "flange_top"
-        u_role = "flange_bot"
+        top_over = dy_o_raw > dy_u_raw + 2.0 * tw + 1.0
+        bot_over = dy_u_raw > dy_o_raw + 2.0 * tw + 1.0
+        o_role = "talpa" if top_over else "capac"
+        u_role = "talpa" if bot_over else "capac"
+        o_suffix = "T" if top_over else (cfg.flange_letter if bot_over else f"{cfg.flange_letter}1")
+        u_suffix = "T" if bot_over else (cfg.flange_letter if top_over else f"{cfg.flange_letter}2")
     elif detected_type == "cheson_fara_talpa":
         top_over = (cfg.flange_top_mode == "over_webs")
         bot_over = (cfg.flange_bot_mode == "over_webs")
         o_suffix = f"{cfg.flange_letter}1"
         u_suffix = f"{cfg.flange_letter}2"
-        o_role = "flange_top"
-        u_role = "flange_bot"
+        o_role = "capac"
+        u_role = "capac"
     else:
         top_over = _resolve_flange_over_webs(cfg.flange_top_mode, spec.top_over_webs)
         bot_over = _resolve_flange_over_webs(cfg.flange_bot_mode, spec.bot_over_webs)
-        o_suffix = f"{cfg.flange_letter}1"
-        u_suffix = f"{cfg.flange_letter}2"
-        o_role = "flange_top"
-        u_role = "flange_bot"
+        o_is_wide = dy_o_raw > dy_u_raw + 2.0 * tw + 1.0
+        u_is_wide = dy_u_raw > dy_o_raw + 2.0 * tw + 1.0
+        o_role = "talpa" if o_is_wide else "capac"
+        u_role = "talpa" if u_is_wide else "capac"
+        o_suffix = "T" if o_is_wide else f"{cfg.flange_letter}1"
+        u_suffix = "T" if u_is_wide else f"{cfg.flange_letter}2"
 
     plates: list[ExtractedPlate] = []
     clipped_flanges_by_face: dict[str, list[Ring]] = {"o": [], "u": []}
@@ -2147,6 +2208,7 @@ def decompose_compound_nc1(
                         markings=s_marks,
                         source_bounds=orig_b,
                         removed_residuals=rem_cnt,
+                        role_code=plate_suffix,
                     )
                 )
 
@@ -2302,6 +2364,7 @@ def decompose_compound_nc1(
                 markings=s_marks,
                 source_bounds=orig_b,
                 removed_residuals=rem_cnt,
+                role_code=f"{cfg.web_letter}{w_idx}",
             )
         )
 
@@ -2396,6 +2459,7 @@ def extract_single_plate_nc1(
                     markings=s_marks,
                     source_bounds=orig_b,
                     removed_residuals=rem_cnt,
+                    role_code="P" if (len(contours) == 1 and len(sub_rings) == 1 and part_idx == 1) else f"P{part_idx}",
                 )
             )
     return plates
@@ -2430,6 +2494,675 @@ def decompose_nc1(
         passed=True,
     )
     return plates, ver
+
+
+# ─── 100% Geometric Plate Deduplication & Excel T/C/L Quantity Reporting ─────
+
+_ROLE_LABELS_RO = {
+    "talpa": "Talpă",
+    "capac": "Capac",
+    "flange_top": "Capac",
+    "flange_bot": "Capac",
+    "web": "Laterală",
+    "single_plate": "Placă",
+    "bom_plate": "Placă BOM",
+}
+
+
+def _point_to_ring_edge_dist(px: float, py: float, ring: Ring) -> float:
+    n = len(ring)
+    if n == 0:
+        return 1e9
+    best = 1e9
+    for i in range(n):
+        ax, ay = ring[i]
+        bx, by = ring[(i + 1) % n]
+        d = _dist_point_to_segment(px, py, ax, ay, bx, by)
+        if d < best:
+            best = d
+    return best
+
+
+def _ring_bidirectional_distance(r1: Ring, r2: Ring) -> float:
+    if not r1 or not r2:
+        return 1e9
+    d12 = max(_point_to_ring_edge_dist(x, y, r2) for x, y in r1)
+    d21 = max(_point_to_ring_edge_dist(x, y, r1) for x, y in r2)
+    return max(d12, d21)
+
+
+def _transform_point_sym(
+    x: float,
+    y: float,
+    L: float,
+    W: float,
+    sym_op: str,
+) -> tuple[float, float]:
+    if sym_op == "identity":
+        return (x, y)
+    if sym_op == "rot180":
+        return (L - x, W - y)
+    if sym_op == "flip_x":
+        return (L - x, y)
+    if sym_op == "flip_y":
+        return (x, W - y)
+    if sym_op == "rot90":
+        return (W - y, x)
+    if sym_op == "rot270":
+        return (y, L - x)
+    return (x, y)
+
+
+def _transform_angle_sym(ang_deg: float, sym_op: str) -> float:
+    a = ang_deg % 180.0
+    if sym_op in ("identity", "rot180"):
+        return a
+    if sym_op in ("flip_x", "flip_y"):
+        return (-a) % 180.0
+    if sym_op == "rot90":
+        return (a + 90.0) % 180.0
+    if sym_op == "rot270":
+        return (a - 90.0) % 180.0
+    return a
+
+
+def _transform_ring_sym(ring: Ring, L: float, W: float, sym_op: str) -> Ring:
+    return [_transform_point_sym(x, y, L, W, sym_op) for x, y in ring]
+
+
+def _hole_center_and_dims(hole: DSTVHole) -> tuple[str, float, float, float, float, float]:
+    kind, cx, cy, w, l, ang = _expected_hole_geom(hole)
+    return (kind, cx, cy, w, l, ang % 180.0)
+
+
+def _match_rings_set_sym(
+    refs: list[Ring],
+    cands: list[Ring],
+    L: float,
+    W: float,
+    sym_op: str,
+    tol: float,
+) -> bool:
+    if len(refs) != len(cands):
+        return False
+    if not refs:
+        return True
+    used: set[int] = set()
+    for rr in refs:
+        tr = _transform_ring_sym(rr, L, W, sym_op)
+        tr_area = abs(polygon_area(tr))
+        best_i = None
+        for idx, cr in enumerate(cands):
+            if idx in used:
+                continue
+            if abs(tr_area - abs(polygon_area(cr))) > 0.5:
+                continue
+            if _ring_bidirectional_distance(tr, cr) <= tol:
+                best_i = idx
+                break
+        if best_i is None:
+            return False
+        used.add(best_i)
+    return True
+
+
+def _match_holes_set_sym(
+    ref_holes: list[DSTVHole],
+    cand_holes: list[DSTVHole],
+    L: float,
+    W: float,
+    sym_op: str,
+    tol: float,
+) -> bool:
+    if len(ref_holes) != len(cand_holes):
+        return False
+    if not ref_holes:
+        return True
+    cand_tuples = [_hole_center_and_dims(h) for h in cand_holes]
+    used: set[int] = set()
+    for rh in ref_holes:
+        rk, rcx, rcy, rw, rl, rang = _hole_center_and_dims(rh)
+        tcx, tcy = _transform_point_sym(rcx, rcy, L, W, sym_op)
+        tang = _transform_angle_sym(rang, sym_op)
+        best_i = None
+        for idx, (ck, ccx, ccy, cw, cl, cang) in enumerate(cand_tuples):
+            if idx in used or ck != rk:
+                continue
+            if abs(rw - cw) > tol or abs(rl - cl) > tol:
+                continue
+            if math.hypot(tcx - ccx, tcy - ccy) > tol:
+                continue
+            if rk != "circle":
+                ang_diff = abs((tang - cang + 90.0) % 180.0 - 90.0)
+                if ang_diff > 0.5:
+                    continue
+            best_i = idx
+            break
+        if best_i is None:
+            return False
+        used.add(best_i)
+    return True
+
+
+def _match_plates_geometry(
+    p_ref: ExtractedPlate,
+    p_cand: ExtractedPlate,
+    tol: float = 0.02,
+) -> Optional[str]:
+    """Return matching symmetry transform op if p_ref -> p_cand is 100% geometrically identical."""
+    ref_role = "capac" if p_ref.role in ("flange_top", "flange_bot") else p_ref.role
+    cand_role = "capac" if p_cand.role in ("flange_top", "flange_bot") else p_cand.role
+    if ref_role != cand_role:
+        return None
+    if abs(p_ref.thickness - p_cand.thickness) > 0.01:
+        return None
+    if (p_ref.material or "").strip().upper() != (p_cand.material or "").strip().upper():
+        return None
+    if len(p_ref.holes) != len(p_cand.holes) or len(p_ref.inner_contours) != len(p_cand.inner_contours):
+        return None
+    if abs(p_ref.area - p_cand.area) > 0.5:
+        return None
+
+    r0, r1, r2, r3 = p_ref.bounds
+    c0, c1, c2, c3 = p_cand.bounds
+    Lr, Wr = r2 - r0, r3 - r1
+    Lc, Wc = c2 - c0, c3 - c1
+
+    ops: list[str] = []
+    if abs(Lr - Lc) <= 0.01 and abs(Wr - Wc) <= 0.01:
+        ops.extend(["identity", "rot180", "flip_x", "flip_y"])
+    if abs(Lr - Wc) <= 0.01 and abs(Wr - Lc) <= 0.01:
+        ops.extend(["rot90", "rot270"])
+    if not ops:
+        return None
+
+    for op in ops:
+        t_ext = _transform_ring_sym(p_ref.exterior, Lr, Wr, op)
+        if _ring_bidirectional_distance(t_ext, p_cand.exterior) > tol:
+            continue
+        if not _match_rings_set_sym(p_ref.inner_contours, p_cand.inner_contours, Lr, Wr, op, tol):
+            continue
+        if not _match_holes_set_sym(p_ref.holes, p_cand.holes, Lr, Wr, op, tol):
+            continue
+        return op
+    return None
+
+
+def _clone_plate_as_canonical(
+    plate: ExtractedPlate,
+    new_name: str,
+    role_code: str,
+    qty_per_cheson: int,
+    merged_sources: list[str],
+) -> ExtractedPlate:
+    return ExtractedPlate(
+        name=new_name,
+        folder=plate.folder,
+        role=plate.role,
+        face=plate.face,
+        thickness=plate.thickness,
+        piece_id=plate.piece_id,
+        piece_clean=plate.piece_clean,
+        material=plate.material,
+        quantity=plate.quantity,
+        exterior=list(plate.exterior),
+        holes=list(plate.holes),
+        inner_contours=[list(ir) for ir in plate.inner_contours],
+        markings=list(plate.markings),
+        source_bounds=plate.source_bounds,
+        removed_residuals=plate.removed_residuals,
+        qty_per_cheson=qty_per_cheson,
+        role_code=role_code,
+        merged_sources=merged_sources,
+    )
+
+
+def deduplicate_cheson_plates(
+    raw_plates: list[ExtractedPlate],
+    cfg: ChesonConfig,
+) -> tuple[list[ExtractedPlate], list[tuple[int, str]]]:
+    """Group geometrically identical plates per role (T/C/L) and normalize names.
+
+    Returns `(unique_plates, instance_mapping)` where `instance_mapping[raw_idx]`
+    is `(unique_idx, sym_op_from_canonical_to_raw)`.
+    """
+    if not raw_plates:
+        return [], []
+
+    def _norm_role(role: str) -> str:
+        return "capac" if role in ("flange_top", "flange_bot") else role
+
+    role_order = ("talpa", "capac", "web", "single_plate")
+    role_indices: dict[str, list[int]] = {r: [] for r in role_order}
+    other_indices: list[int] = []
+    for idx, p in enumerate(raw_plates):
+        nr = _norm_role(p.role)
+        if nr in role_indices:
+            role_indices[nr].append(idx)
+        else:
+            other_indices.append(idx)
+
+    letter_map = {
+        "talpa": "T",
+        "capac": (cfg.flange_letter or "C").upper(),
+        "web": (cfg.web_letter or "L").upper(),
+        "single_plate": "P",
+    }
+
+    unique_plates: list[ExtractedPlate] = []
+    mapping: list[Optional[tuple[int, str]]] = [None] * len(raw_plates)
+
+    for nr in role_order:
+        idxs = role_indices[nr]
+        if not idxs:
+            continue
+        letter = letter_map[nr]
+        clusters: list[tuple[int, list[tuple[int, str]]]] = []
+        for raw_idx in idxs:
+            if not cfg.deduplicate_identical:
+                clusters.append((raw_idx, [(raw_idx, "identity")]))
+                continue
+            matched_cluster = False
+            for c_idx, (rep_idx, members) in enumerate(clusters):
+                op = _match_plates_geometry(raw_plates[rep_idx], raw_plates[raw_idx])
+                if op is not None:
+                    members.append((raw_idx, op))
+                    matched_cluster = True
+                    break
+            if not matched_cluster:
+                clusters.append((raw_idx, [(raw_idx, "identity")]))
+
+        k_classes = len(clusters)
+        for cls_num, (rep_idx, members) in enumerate(clusters, start=1):
+            rep = raw_plates[rep_idx]
+            if nr == "single_plate":
+                role_code = letter if k_classes == 1 else f"{letter}{cls_num}"
+                new_name = rep.piece_clean if k_classes == 1 else f"{rep.piece_clean}_{cls_num}"
+            else:
+                role_code = letter if k_classes == 1 else f"{letter}{cls_num}"
+                new_name = f"{rep.piece_clean}{role_code}"
+
+            merged_src = [f"{raw_plates[m_idx].name}@{raw_plates[m_idx].face}" for m_idx, _ in members]
+            u_idx = len(unique_plates)
+            unique_plates.append(
+                _clone_plate_as_canonical(
+                    rep,
+                    new_name=new_name,
+                    role_code=role_code,
+                    qty_per_cheson=len(members),
+                    merged_sources=merged_src,
+                )
+            )
+            for m_idx, op in members:
+                mapping[m_idx] = (u_idx, op)
+
+    for raw_idx in other_indices:
+        p = raw_plates[raw_idx]
+        u_idx = len(unique_plates)
+        unique_plates.append(
+            _clone_plate_as_canonical(
+                p,
+                new_name=p.name,
+                role_code=p.role_code or "P",
+                qty_per_cheson=1,
+                merged_sources=[f"{p.name}@{p.face}"],
+            )
+        )
+        mapping[raw_idx] = (u_idx, "identity")
+
+    final_mapping: list[tuple[int, str]] = [
+        m if m is not None else (0, "identity") for m in mapping
+    ]
+    return unique_plates, final_mapping
+
+
+def _expand_audits_for_3d_sim(
+    raw_plates: list[ExtractedPlate],
+    unique_plates: list[ExtractedPlate],
+    instance_mapping: list[tuple[int, str]],
+    unique_audits: list[DrawnDxfAudit],
+    unique_re_read_rings: dict[str, Ring],
+) -> tuple[list[DrawnDxfAudit], dict[str, Ring]]:
+    """Expand deduplicated DXF audits/rings back onto every physical plate instance for 3D simulation."""
+    expanded_audits: list[DrawnDxfAudit] = []
+    expanded_rings: dict[str, Ring] = {}
+
+    for raw_idx, raw_p in enumerate(raw_plates):
+        u_idx, sym_op = instance_mapping[raw_idx]
+        canon = unique_plates[u_idx]
+        c_aud = unique_audits[u_idx]
+        c_ring = unique_re_read_rings.get(canon.name, canon.exterior)
+
+        c0, c1, c2, c3 = canon.bounds
+        L_c, W_c = c2 - c0, c3 - c1
+        inst_ring = _transform_ring_sym(c_ring, L_c, W_c, sym_op)
+        expanded_rings[raw_p.name] = inst_ring
+
+        inst_holes: list[DrawnHoleInfo] = []
+        for dh in c_aud.holes_drawn:
+            tcx, tcy = _transform_point_sym(dh.cx, dh.cy, L_c, W_c, sym_op)
+            tang = _transform_angle_sym(dh.angle_deg, sym_op)
+            inst_holes.append(
+                DrawnHoleInfo(
+                    kind=dh.kind,
+                    cx=tcx,
+                    cy=tcy,
+                    width_mm=dh.width_mm,
+                    length_mm=dh.length_mm,
+                    angle_deg=tang,
+                    area_mm2=dh.area_mm2,
+                )
+            )
+
+        ib0, ib1, ib2, ib3 = polygon_bounds(inst_ring) if inst_ring else (0.0, 0.0, c_aud.length_mm, c_aud.width_mm)
+        expanded_audits.append(
+            DrawnDxfAudit(
+                plate_name=raw_p.name,
+                role=raw_p.role,
+                face=raw_p.face,
+                thickness_mm=raw_p.thickness,
+                dxf_errors=c_aud.dxf_errors,
+                entity_layers=list(c_aud.entity_layers),
+                extra_layers_created=list(c_aud.extra_layers_created),
+                layer_zero_ok=c_aud.layer_zero_ok,
+                outer_closed=c_aud.outer_closed,
+                origin_err_mm=c_aud.origin_err_mm,
+                length_mm=round(ib2 - ib0, 4),
+                width_mm=round(ib3 - ib1, 4),
+                outer_area_mm2=c_aud.outer_area_mm2,
+                net_area_mm2=c_aud.net_area_mm2,
+                vertex_count=c_aud.vertex_count,
+                holes_drawn=inst_holes,
+                inners_count=c_aud.inners_count,
+                dim_err_mm=c_aud.dim_err_mm,
+                hole_pos_err_mm=c_aud.hole_pos_err_mm,
+                hole_dim_err_mm=c_aud.hole_dim_err_mm,
+                holes_matched=c_aud.holes_matched,
+                holes_expected=c_aud.holes_expected,
+                passed=c_aud.passed,
+                issues=list(c_aud.issues),
+            )
+        )
+
+    return expanded_audits, expanded_rings
+
+
+def find_cheson_report_xlsx(
+    search_root: Path,
+    explicit_path: Optional[str | Path] = None,
+) -> Optional[Path]:
+    """Locate raport_CHESON.xlsx either via explicit path or inside search_root / parent."""
+    if explicit_path:
+        p = Path(str(explicit_path).strip())
+        if p.is_file():
+            return p.resolve()
+
+    candidates: list[Path] = []
+    dirs = [search_root]
+    if search_root.parent != search_root:
+        dirs.append(search_root.parent)
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.iterdir()):
+            if not f.is_file() or f.suffix.lower() not in (".xlsx", ".xlsm"):
+                continue
+            nl = f.name.lower()
+            if nl == "raport_cheson.xlsx":
+                return f.resolve()
+            if "raport" in nl and "cheson" in nl and not nl.startswith("raport_piese"):
+                candidates.append(f.resolve())
+    return candidates[0] if candidates else None
+
+
+def load_cheson_quantities_from_excel(xlsx_path: Optional[Path]) -> dict[str, int]:
+    """Parse cheson piece quantities across all sheets of raport_CHESON.xlsx."""
+    if xlsx_path is None or not Path(xlsx_path).is_file() or openpyxl is None:
+        return {}
+
+    qty_map: dict[str, int] = {}
+    wb = openpyxl.load_workbook(str(xlsx_path), data_only=True, read_only=True)
+    try:
+        for ws in wb.worksheets:
+            piece_col: Optional[int] = None
+            qty_col: Optional[int] = None
+            header_row_idx = 0
+
+            rows_iter = list(ws.iter_rows(values_only=True))
+            for r_idx, row in enumerate(rows_iter[:15]):
+                if not row:
+                    continue
+                texts = [str(c).strip().lower() if c is not None else "" for c in row]
+                p_c = None
+                q_c = None
+                for c_idx, txt in enumerate(texts):
+                    if not txt:
+                        continue
+                    if p_c is None and any(k in txt for k in ("pies", "pos", "denumire", "cod", "cheson", "part", "name", "reper")):
+                        p_c = c_idx
+                    elif q_c is None and any(k in txt for k in ("cant", "buc", "qty", "nr", "numar")):
+                        q_c = c_idx
+                if p_c is not None and q_c is not None:
+                    piece_col, qty_col, header_row_idx = p_c, q_c, r_idx + 1
+                    break
+
+            if piece_col is None or qty_col is None:
+                piece_col, qty_col, header_row_idx = 0, 1, 0
+
+            for row in rows_iter[header_row_idx:]:
+                if not row or len(row) <= max(piece_col, qty_col):
+                    continue
+                raw_name = row[piece_col]
+                raw_qty = row[qty_col]
+                if raw_name is None or raw_qty is None:
+                    continue
+                name_s = str(raw_name).strip()
+                if not name_s or any(k in name_s.lower() for k in ("total", "denumire", "sumar")):
+                    continue
+                if isinstance(raw_qty, (int, float)):
+                    q_val = int(round(float(raw_qty)))
+                else:
+                    q_parsed = _parse_float_opt(str(raw_qty))
+                    q_val = int(round(q_parsed)) if q_parsed is not None else 0
+                if q_val <= 0:
+                    continue
+                key = clean_piece_name(name_s, lowercase=True)
+                if key:
+                    qty_map[key] = qty_map.get(key, 0) + q_val
+    finally:
+        wb.close()
+    return qty_map
+
+
+def format_cheson_tcl_summary(plate_rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Build grouped T / C / L quantity summary strings for a single cheson."""
+    t_parts: list[str] = []
+    c_parts: list[str] = []
+    l_parts: list[str] = []
+
+    for row in plate_rows:
+        rc = (row.get("role_code") or "").strip().upper()
+        tot = int(row.get("total_qty") or 0)
+        if not rc:
+            continue
+        item_str = f"{rc}: {tot}"
+        if rc.startswith("T"):
+            t_parts.append(item_str)
+        elif rc.startswith("C"):
+            c_parts.append(item_str)
+        elif rc.startswith("L"):
+            l_parts.append(item_str)
+
+    all_parts = t_parts + c_parts + l_parts
+    return {
+        "talpa_str": ", ".join(t_parts) if t_parts else "-",
+        "capac_str": ", ".join(c_parts) if c_parts else "-",
+        "laterala_str": ", ".join(l_parts) if l_parts else "-",
+        "full_summary": " | ".join(all_parts) if all_parts else "-",
+    }
+
+
+def write_cheson_quantity_report_xlsx(
+    output_path: Path,
+    cheson_summaries: list[dict[str, Any]],
+    plate_entries: list[dict[str, Any]],
+) -> Optional[Path]:
+    """Write formatted Raport_Piese_Cheson.xlsx (Sumar Chesoane T-C-L, Lista Piese Debitare, Pe Grosimi)."""
+    if openpyxl is None:
+        return None
+
+    wb = openpyxl.Workbook()
+    header_fill = PatternFill("solid", fgColor="1E293B")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    total_fill = PatternFill("solid", fgColor="E2E8F0")
+    total_font = Font(name="Calibri", size=11, bold=True, color="0F172A")
+    pass_fill = PatternFill("solid", fgColor="DCFCE7")
+    check_fill = PatternFill("solid", fgColor="FEF3C7")
+    thin_side = Side(style="thin", color="CBD5E1")
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    def _style_sheet(ws, headers: list[str], rows_data: list[list[Any]], center_cols: set[int] = frozenset()) -> None:
+        ws.append(headers)
+        for col_i in range(1, len(headers) + 1):
+            cell = ws.cell(1, col_i)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        ws.row_dimensions[1].height = 24
+
+        for r_idx, r_vals in enumerate(rows_data, start=2):
+            ws.append(r_vals)
+            for col_i in range(1, len(headers) + 1):
+                c = ws.cell(r_idx, col_i)
+                c.border = border
+                c.alignment = Alignment(
+                    horizontal=("center" if col_i in center_cols else "left"),
+                    vertical="center",
+                )
+
+        ws.freeze_panes = "A2"
+        for col_i in range(1, len(headers) + 1):
+            col_letter = openpyxl.utils.get_column_letter(col_i)
+            max_len = max(
+                len(str(ws.cell(r, col_i).value or ""))
+                for r in range(1, ws.max_row + 1)
+            )
+            ws.column_dimensions[col_letter].width = min(48, max(11, max_len + 3))
+
+    # Sheet 1: Sumar Chesoane (T-C-L)
+    ws1 = wb.active
+    ws1.title = "Sumar Chesoane (T-C-L)"
+    s1_headers = [
+        "Cheson", "Folder", "Profil", "Tip Cheson", "Nr. Chesoane", "Sursă Cant.",
+        "Talpă (T)", "Capace (C)", "Laterale (L)", "Sumar Complet (T / C / L)",
+        "Piese Unice", "Total Bucăți", "Status Audit 3D",
+    ]
+    s1_rows = [
+        [
+            cs.get("cheson_id", ""),
+            cs.get("folder", ""),
+            cs.get("profile", ""),
+            cs.get("detected_type_label", ""),
+            cs.get("cheson_qty", 1),
+            cs.get("qty_source", ""),
+            cs.get("talpa_str", "-"),
+            cs.get("capac_str", "-"),
+            cs.get("laterala_str", "-"),
+            cs.get("full_summary", "-"),
+            cs.get("unique_plates_count", 0),
+            cs.get("total_pieces_count", 0),
+            cs.get("status", ""),
+        ]
+        for cs in cheson_summaries
+    ]
+    _style_sheet(ws1, s1_headers, s1_rows, center_cols={5, 11, 12, 13})
+    for r_i in range(2, ws1.max_row + 1):
+        st_cell = ws1.cell(r_i, 13)
+        st_val = str(st_cell.value or "").upper()
+        if st_val == "PASS":
+            st_cell.fill = pass_fill
+        elif st_val:
+            st_cell.fill = check_fill
+
+    if s1_rows:
+        tot_r = ws1.max_row + 1
+        tot_vals = [
+            "TOTAL",
+            "",
+            "",
+            f"{len(cheson_summaries)} chesoane distincte",
+            sum(int(cs.get("cheson_qty", 0)) for cs in cheson_summaries),
+            "",
+            "",
+            "",
+            "",
+            "",
+            sum(int(cs.get("unique_plates_count", 0)) for cs in cheson_summaries),
+            sum(int(cs.get("total_pieces_count", 0)) for cs in cheson_summaries),
+            "",
+        ]
+        ws1.append(tot_vals)
+        for col_i in range(1, len(s1_headers) + 1):
+            c = ws1.cell(tot_r, col_i)
+            c.fill = total_fill
+            c.font = total_font
+            c.border = border
+            if col_i in {5, 11, 12}:
+                c.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Sheet 2: Lista Piese Debitare
+    ws2 = wb.create_sheet("Lista Piese Debitare")
+    s2_headers = [
+        "Folder Cheson", "Cheson", "Denumire Piesă", "Cod Rol", "Tip Piesă",
+        "Grosime (mm)", "Material", "Lungime (mm)", "Lățime (mm)",
+        "Buc/Cheson", "Nr. Chesoane", "Total Bucăți", "Sursă Cant.",
+        "Fișier CAD", "Piese Identice Înglobate",
+    ]
+    s2_rows = [
+        [
+            e.get("cheson_folder", ""),
+            e.get("pos_no", ""),
+            e.get("plate_name", ""),
+            e.get("role_code", ""),
+            e.get("role_label", ""),
+            e.get("thickness_mm"),
+            e.get("material", ""),
+            e.get("length_mm"),
+            e.get("width_mm"),
+            e.get("qty_per_cheson", e.get("qty_per_assembly", 1)),
+            e.get("assembly_qty", 1),
+            e.get("total_qty", 1),
+            e.get("qty_source", ""),
+            e.get("output_file", ""),
+            e.get("notes", ""),
+        ]
+        for e in plate_entries
+    ]
+    _style_sheet(ws2, s2_headers, s2_rows, center_cols={4, 6, 8, 9, 10, 11, 12})
+
+    # Sheet 3: Pe Grosimi
+    ws3 = wb.create_sheet("Pe Grosimi")
+    grouped: dict[tuple[float, str], dict[str, Any]] = {}
+    for e in plate_entries:
+        t_v = float(e.get("thickness_mm") or 0.0)
+        mat = (e.get("material") or "").strip()
+        key = (t_v, mat)
+        if key not in grouped:
+            grouped[key] = {"t": t_v, "mat": mat, "unique_cnt": 0, "total_pcs": 0}
+        grouped[key]["unique_cnt"] += 1
+        grouped[key]["total_pcs"] += int(e.get("total_qty") or 0)
+
+    s3_headers = ["Grosime (mm)", "Folder Grosime", "Material", "Nr. Piese Unice", "Total Bucăți"]
+    s3_rows = [
+        [g["t"], f"T{int(round(g['t']))}" if g["t"] > 0 else "-", g["mat"], g["unique_cnt"], g["total_pcs"]]
+        for _, g in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+    ]
+    _style_sheet(ws3, s3_headers, s3_rows, center_cols={1, 2, 4, 5})
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(output_path))
+    return output_path
 
 
 # ─── CAD DXF R2018 & ODA DWG Export ──────────────────────────────────────────
@@ -3072,6 +3805,16 @@ def simulate_3d_assembly(
     tw = spec.tw
 
     # 1. Recover 3D placements for every drawn plate
+    # Determine web mounting Y-span: on Tip 1 (cheson_cu_talpa), webs mount along the narrow capac bounds
+    y_box_lo, y_box_hi = 0.0, B
+    if detected_type == "cheson_cu_talpa":
+        narrow_face = "o" if talpa_side == "bottom" else "u"
+        narrow_rings = locked_rings.get(narrow_face, [])
+        if narrow_rings:
+            _, ny0, _, ny1 = polygon_bounds(narrow_rings[0])
+            if ny1 - ny0 > 2.0 * tw + 1.0:
+                y_box_lo, y_box_hi = ny0, ny1
+
     # Each solid entry: (plate, ring_2d, plane='XY'|'XZ', z_band=(z0, z1), y_band=(y0, y1), bbox3d=(x0,y0,z0,x1,y1,z1))
     solids: list[dict[str, Any]] = []
 
@@ -3105,7 +3848,7 @@ def simulate_3d_assembly(
             mx = cfg.mirror_web_h_x if p.face == "h" else False
             r_glob = _untransform_dxf_ring(dxf_r, p.source_bounds, mirror_x=mx, mirror_y=False)
             bx0, bz0, bx1, bz1 = polygon_bounds(r_glob)
-            y0, y1 = (B - tw, B) if p.face == "v" else (0.0, tw)
+            y0, y1 = (y_box_hi - tw, y_box_hi) if p.face == "v" else (y_box_lo, y_box_lo + tw)
             solids.append({
                 "plate": p,
                 "ring": r_glob,
@@ -3380,6 +4123,7 @@ def verify_post_draw_and_3d(
 ) -> PostDrawVerificationReport:
     """Post-draw verification: re-read DXFs vs NC1 geometry, PDF drawing dimensions, and 3D simulation."""
     spec = parse_compound_profile(dstv.header.profile_str, dstv.header)
+    spec = _align_spec_flanges_to_faces(dstv, spec, cfg)
     detected_type, talpa_side = detect_cheson_type(dstv, spec, cfg)
 
     raw_rings: dict[str, list[Ring]] = {}
@@ -4113,13 +4857,16 @@ def preview_cheson_pipeline(
     recursive: bool = False,
     strip_residual_fragments: bool = True,
     use_nesting_layers: bool = False,
+    deduplicate_identical: bool = True,
+    cheson_report_xlsx: Optional[str | Path] = None,
 ) -> dict[str, Any]:
-    """Dry-run inspection: detects cheson type, STYKKLISTE LENGDE, DXF audit, PDF check & 3D sim."""
+    """Dry-run inspection: detects cheson type, STYKKLISTE/Excel qty, dedup T/C/L, DXF audit & 3D sim."""
     src_path = Path(source_path).resolve()
     if source_mode != "single_file" and src_path.is_dir():
         batch_folders = discover_cheson_batch_folders(src_path, recursive=recursive)
         is_multi = len(batch_folders) > 1 or (len(batch_folders) == 1 and batch_folders[0] != src_path)
         if is_multi:
+            resolved_xlsx = find_cheson_report_xlsx(src_path, cheson_report_xlsx)
             all_items: list[dict[str, Any]] = []
             all_passed = True
             total_bom_rows = 0
@@ -4140,6 +4887,8 @@ def preview_cheson_pipeline(
                     recursive=False,
                     strip_residual_fragments=strip_residual_fragments,
                     use_nesting_layers=use_nesting_layers,
+                    deduplicate_identical=deduplicate_identical,
+                    cheson_report_xlsx=resolved_xlsx or cheson_report_xlsx,
                 )
                 if sub_prev.get("a_drawing"):
                     a_drawings_count += 1
@@ -4158,6 +4907,7 @@ def preview_cheson_pipeline(
                 "folders_count": len(batch_folders),
                 "folders": folder_names,
                 "a_drawing": f"{a_drawings_count}/{len(batch_folders)} foldere cu A-drawing",
+                "cheson_report_xlsx": resolved_xlsx.name if resolved_xlsx else None,
                 "bom_assembly_id": None,
                 "bom_rows_count": total_bom_rows,
                 "w_drawings_count": total_w_count,
@@ -4165,9 +4915,11 @@ def preview_cheson_pipeline(
                 "nc1_items": all_items,
             }
 
-    _, _, nc1_files, a_pdf, bom, w_map = _collect_inputs(
+    _, search_root, nc1_files, a_pdf, bom, w_map = _collect_inputs(
         source_path, source_mode, scope_mode, recursive
     )
+    resolved_xlsx = find_cheson_report_xlsx(search_root, cheson_report_xlsx)
+    excel_qty_map = load_cheson_quantities_from_excel(resolved_xlsx)
     pdf_dims = extract_pdf_drawing_dimensions(a_pdf)
     bom_by_key: dict[str, BomRow] = {}
     if bom:
@@ -4192,24 +4944,30 @@ def preview_cheson_pipeline(
                 target_length_mm=target_len,
                 override_web_height_mm=override_web_height_mm,
                 strip_residual_fragments=strip_residual_fragments,
+                deduplicate_identical=deduplicate_identical,
             )
-            plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
+            raw_plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
+            unique_plates, instance_mapping = deduplicate_cheson_plates(raw_plates, cfg)
 
-            dxf_audits: list[DrawnDxfAudit] = []
-            re_read_rings: dict[str, Ring] = {}
-            for p in plates:
+            unique_audits: list[DrawnDxfAudit] = []
+            unique_rings: dict[str, Ring] = {}
+            for p in unique_plates:
                 tmp_dxf = tmp_dir / f"{p.name}.dxf"
                 write_plate_dxf(p, tmp_dxf, use_nesting_layers=use_nesting_layers, include_marking=False)
                 aud, rr = inspect_drawn_dxf(tmp_dxf, p, expect_layer_zero=(not use_nesting_layers))
-                dxf_audits.append(aud)
-                re_read_rings[p.name] = rr
+                unique_audits.append(aud)
+                unique_rings[p.name] = rr
+
+            exp_audits, exp_rings = _expand_audits_for_3d_sim(
+                raw_plates, unique_plates, instance_mapping, unique_audits, unique_rings
+            )
 
             post_ver = verify_post_draw_and_3d(
                 dstv=dstv,
                 cfg=cfg,
-                plates=plates,
-                dxf_audits=dxf_audits,
-                re_read_rings=re_read_rings,
+                plates=raw_plates,
+                dxf_audits=exp_audits,
+                re_read_rings=exp_rings,
                 bom=bom,
                 bom_row=bom_row,
                 pdf_dims=pdf_dims,
@@ -4217,24 +4975,51 @@ def preview_cheson_pipeline(
             if not (ver.passed and post_ver.passed):
                 all_passed = False
 
+            if piece_key in excel_qty_map and resolved_xlsx is not None:
+                cheson_qty = excel_qty_map[piece_key]
+                qty_source = resolved_xlsx.name
+            elif bom_row is not None:
+                cheson_qty = max(1, bom_row.qty_per_assembly) * max(1, bom.assembly_quantity if bom else 1)
+                qty_source = "STYKKLISTE"
+            else:
+                cheson_qty = max(1, dstv.header.quantity)
+                qty_source = "NC1"
+
+            plate_dicts: list[dict[str, Any]] = []
+            for p in unique_plates:
+                tot_q = p.qty_per_cheson * cheson_qty
+                plate_dicts.append(
+                    {
+                        "name": p.name,
+                        "folder": p.folder,
+                        "role": p.role,
+                        "role_code": p.role_code,
+                        "role_label": _ROLE_LABELS_RO.get(p.role, p.role),
+                        "thickness": p.thickness,
+                        "length_mm": round(p.bounds[2] - p.bounds[0], 4),
+                        "width_mm": round(p.bounds[3] - p.bounds[1], 4),
+                        "removed_residuals": p.removed_residuals,
+                        "qty_per_cheson": p.qty_per_cheson,
+                        "cheson_qty": cheson_qty,
+                        "total_qty": tot_q,
+                        "merged_sources": list(p.merged_sources),
+                    }
+                )
+            tcl_summary = format_cheson_tcl_summary(plate_dicts)
+
             items_preview.append(
                 {
                     "file": nc1_path.name,
+                    "piece_id": dstv.header.piece_id or nc1_path.stem,
                     "profile": dstv.header.profile_str,
+                    "cheson_qty": cheson_qty,
+                    "qty_source": qty_source,
+                    "raw_plates_count": len(raw_plates),
+                    "unique_plates_count": len(unique_plates),
+                    "tcl_summary": tcl_summary,
                     "verification": asdict(ver),
                     "post_draw_audit": asdict(post_ver),
-                    "plates": [
-                        {
-                            "name": p.name,
-                            "folder": p.folder,
-                            "role": p.role,
-                            "thickness": p.thickness,
-                            "length_mm": round(p.bounds[2] - p.bounds[0], 4),
-                            "width_mm": round(p.bounds[3] - p.bounds[1], 4),
-                            "removed_residuals": p.removed_residuals,
-                        }
-                        for p in plates
-                    ],
+                    "plates": plate_dicts,
                 }
             )
 
@@ -4242,6 +5027,7 @@ def preview_cheson_pipeline(
         "is_multi_folder_batch": False,
         "folders_count": 1,
         "a_drawing": a_pdf.name if a_pdf else None,
+        "cheson_report_xlsx": resolved_xlsx.name if resolved_xlsx else None,
         "bom_assembly_id": bom.assembly_id if bom else None,
         "bom_rows_count": len(bom.rows) if bom else 0,
         "w_drawings_count": len(w_map),
@@ -4269,6 +5055,9 @@ def _run_cheson_single_folder(
     progress_callback: Optional[Callable[[float], None]] = None,
     log_callback: Optional[Callable[[str], None]] = None,
     strip_residual_fragments: bool = True,
+    deduplicate_identical: bool = True,
+    cheson_report_xlsx: Optional[str | Path] = None,
+    _write_excel_report: bool = True,
 ) -> dict[str, Any]:
     """Run box-beam (.nc1) plate extraction on a single file or isolated cheson folder."""
     def _log(msg: str) -> None:
@@ -4282,6 +5071,8 @@ def _run_cheson_single_folder(
     src, search_root, nc1_files, a_pdf, bom, w_map = _collect_inputs(
         source_path, source_mode, scope_mode, recursive
     )
+    resolved_xlsx = find_cheson_report_xlsx(search_root, cheson_report_xlsx)
+    excel_qty_map = load_cheson_quantities_from_excel(resolved_xlsx)
     pdf_dims = extract_pdf_drawing_dimensions(a_pdf)
     out_root = Path(dest_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -4290,12 +5081,14 @@ def _run_cheson_single_folder(
     layer_label = "CUT_OUTER/INNER/MARKING" if use_nesting_layers else "Layer 0 (implicit, fără layere extra)"
     _log(
         f"🚀 Pornire Cheson / HSQ Extractor (Mod: {scope_mode}, Preset: {preset}, "
-        f"GabaritFix={exact_gabarit_lock}, FărăReziduuri={strip_residual_fragments}, Layer={layer_label})"
+        f"GabaritFix={exact_gabarit_lock}, Dedup={deduplicate_identical}, Layer={layer_label})"
     )
     _log(f"📁 Sursă: {src}")
     _log(f"📁 Destinație: {out_root}")
     if a_pdf is not None and bom is not None:
         _log(f"📋 STYKKLISTE ({a_pdf.name}): {bom.assembly_id} (qty={bom.assembly_quantity}, {len(bom.rows)} repere, {len(pdf_dims)} cote PDF)")
+    if resolved_xlsx is not None and _write_excel_report:
+        _log(f"📊 Raport cantități chesoane: {resolved_xlsx.name} ({len(excel_qty_map)} repere)")
     if export_format != "dxf":
         _log(f"🔧 ODA Converter: {effective_oda if effective_oda else 'indisponibil (fallback automat pe DXF R2018)'}")
 
@@ -4308,6 +5101,7 @@ def _run_cheson_single_folder(
     assembly_id = bom.assembly_id if bom else search_root.name
 
     entries: list[ManifestEntry] = []
+    cheson_summaries: list[dict[str, Any]] = []
     verifications: list[dict[str, Any]] = []
     post_draw_audits: list[dict[str, Any]] = []
     written_files: list[Path] = []
@@ -4341,16 +5135,26 @@ def _run_cheson_single_folder(
                 target_length_mm=target_len,
                 override_web_height_mm=override_web_height_mm,
                 strip_residual_fragments=strip_residual_fragments,
+                deduplicate_identical=deduplicate_identical,
             )
-            plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
+            raw_plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
             verifications.append(asdict(ver))
+            unique_plates, instance_mapping = deduplicate_cheson_plates(raw_plates, cfg)
 
-            qty_per = bom_row.qty_per_assembly if bom_row else dstv.header.quantity
-            tot_qty = qty_per * max(1, assembly_qty)
+            if piece_key in excel_qty_map and resolved_xlsx is not None:
+                cheson_qty = excel_qty_map[piece_key]
+                qty_source = resolved_xlsx.name
+            elif bom_row is not None:
+                cheson_qty = max(1, bom_row.qty_per_assembly) * max(1, assembly_qty)
+                qty_source = "STYKKLISTE"
+            else:
+                cheson_qty = max(1, dstv.header.quantity)
+                qty_source = "NC1"
 
             badge = "✅" if ver.passed else "⚠"
             _log(
-                f"🧩 {nc1_path.name} ({dstv.header.profile_str}) -> {ver.detected_type_label}"
+                f"🧩 {nc1_path.name} ({dstv.header.profile_str}) -> {ver.detected_type_label} "
+                f"[{len(raw_plates)} fizice -> {len(unique_plates)} unice, {cheson_qty} chesoane ({qty_source})]"
             )
             _log(
                 f"   {badge} Gabarit: L={ver.l_assembled_mm:.3f} mm (țintă {ver.l_gabarit_target_mm:.3f} [{ver.l_source_label}], "
@@ -4358,10 +5162,11 @@ def _run_cheson_single_folder(
                 f"B={ver.w_assembled_mm:.3f}/{ver.w_target_mm:.3f} | Eroare max={ver.max_gabarit_error_mm:.4f} mm"
             )
 
-            dxf_audits: list[DrawnDxfAudit] = []
-            re_read_rings: dict[str, Ring] = {}
+            unique_audits: list[DrawnDxfAudit] = []
+            unique_rings: dict[str, Ring] = {}
+            current_plate_rows: list[dict[str, Any]] = []
 
-            for plate in plates:
+            for plate in unique_plates:
                 files, rel, dxf_aud, rr = _export_plate_cad(
                     plate,
                     out_dir=out_root,
@@ -4372,12 +5177,14 @@ def _run_cheson_single_folder(
                     oda_path=effective_oda,
                     log_cb=_log,
                 )
-                dxf_audits.append(dxf_aud)
-                re_read_rings[plate.name] = rr
+                unique_audits.append(dxf_aud)
+                unique_rings[plate.name] = rr
                 written_files.extend(files)
                 nc1_plate_count += 1
                 minx, miny, maxx, maxy = plate.bounds
                 dim_l, dim_w = round(maxx - minx, 4), round(maxy - miny, 4)
+                role_label = _ROLE_LABELS_RO.get(plate.role, plate.role)
+                tot_qty = plate.qty_per_cheson * cheson_qty
                 res_msg = (
                     f" | 🧹 {plate.removed_residuals} reziduuri ≤ {plate.thickness:g} mm eliminate"
                     if plate.removed_residuals > 0
@@ -4388,38 +5195,53 @@ def _run_cheson_single_folder(
                     if dxf_aud.holes_expected > 0
                     else ""
                 )
+                merge_msg = (
+                    f" | Identice={','.join(plate.merged_sources)}"
+                    if len(plate.merged_sources) > 1
+                    else ""
+                )
                 _log(
-                    f"   📄 {rel} ({dim_l:.3f} × {dim_w:.3f} mm, T{int(round(plate.thickness))}, "
-                    f"Layer={','.join(dxf_aud.entity_layers) or '0'}){res_msg}{holes_msg}"
+                    f"   📄 {rel} [{plate.role_code} {role_label}] ({dim_l:.3f} × {dim_w:.3f} mm, "
+                    f"T{int(round(plate.thickness))}, ×{plate.qty_per_cheson}/cheson -> {tot_qty} buc, "
+                    f"Layer={','.join(dxf_aud.entity_layers) or '0'}){res_msg}{holes_msg}{merge_msg}"
                 )
-                entries.append(
-                    ManifestEntry(
-                        pos_no=dstv.header.piece_id or nc1_path.stem,
-                        plate_name=plate.name,
-                        profile=dstv.header.profile_str,
-                        material=plate.material,
-                        thickness_mm=plate.thickness,
-                        width_mm=dim_w,
-                        length_mm=dim_l,
-                        qty_per_assembly=qty_per,
-                        assembly_qty=assembly_qty,
-                        total_qty=tot_qty,
-                        classification="COMPOUND_NC1" if len(plates) > 1 else "SINGLE_NC1",
-                        status="VERIFIED_NC1",
-                        source_file=nc1_path.name,
-                        output_folder=plate.folder if organize_by_thickness else "",
-                        output_file=rel,
-                        notes=(
-                            f"type={ver.detected_type}, face={plate.face}, role={plate.role}, "
-                            f"layers={','.join(dxf_aud.entity_layers)}, dim_err={dxf_aud.dim_err_mm:.4f}mm"
-                        ),
-                    )
+                entry_obj = ManifestEntry(
+                    pos_no=dstv.header.piece_id or nc1_path.stem,
+                    plate_name=plate.name,
+                    profile=dstv.header.profile_str,
+                    material=plate.material,
+                    thickness_mm=plate.thickness,
+                    width_mm=dim_w,
+                    length_mm=dim_l,
+                    qty_per_assembly=plate.qty_per_cheson,
+                    assembly_qty=cheson_qty,
+                    total_qty=tot_qty,
+                    classification="COMPOUND_NC1" if len(raw_plates) > 1 else "SINGLE_NC1",
+                    status="VERIFIED_NC1",
+                    source_file=nc1_path.name,
+                    output_folder=plate.folder if organize_by_thickness else "",
+                    output_file=rel,
+                    notes=(
+                        f"type={ver.detected_type}, role={role_label} ({plate.role_code}), "
+                        f"identice={','.join(plate.merged_sources)}, "
+                        f"layers={','.join(dxf_aud.entity_layers)}, dim_err={dxf_aud.dim_err_mm:.4f}mm"
+                    ),
+                    role_code=plate.role_code,
+                    role_label=role_label,
+                    qty_per_cheson=plate.qty_per_cheson,
+                    qty_source=qty_source,
                 )
+                entries.append(entry_obj)
+                current_plate_rows.append(asdict(entry_obj))
+
+            dxf_audits, re_read_rings = _expand_audits_for_3d_sim(
+                raw_plates, unique_plates, instance_mapping, unique_audits, unique_rings
+            )
 
             post_ver = verify_post_draw_and_3d(
                 dstv=dstv,
                 cfg=cfg,
-                plates=plates,
+                plates=raw_plates,
                 dxf_audits=dxf_audits,
                 re_read_rings=re_read_rings,
                 bom=bom,
@@ -4427,6 +5249,25 @@ def _run_cheson_single_folder(
                 pdf_dims=pdf_dims,
             )
             post_draw_audits.append(asdict(post_ver))
+            tcl = format_cheson_tcl_summary(current_plate_rows)
+            cheson_summaries.append(
+                {
+                    "cheson_id": dstv.header.piece_id or nc1_path.stem,
+                    "folder": search_root.name,
+                    "profile": dstv.header.profile_str,
+                    "detected_type_label": ver.detected_type_label,
+                    "cheson_qty": cheson_qty,
+                    "qty_source": qty_source,
+                    "talpa_str": tcl["talpa_str"],
+                    "capac_str": tcl["capac_str"],
+                    "laterala_str": tcl["laterala_str"],
+                    "full_summary": tcl["full_summary"],
+                    "unique_plates_count": len(unique_plates),
+                    "total_pieces_count": sum(int(r["total_qty"]) for r in current_plate_rows),
+                    "status": "PASS" if (ver.passed and post_ver.passed) else "CHECK",
+                }
+            )
+            _log(f"   📊 Cantități T/C/L ({cheson_qty} chesoane [{qty_source}]): {tcl['full_summary']}")
             s3 = post_ver.sim_3d
             p_badge = "✅ PASS" if post_ver.passed else "⚠ CHECK"
             _log(
@@ -4648,6 +5489,7 @@ def _run_cheson_single_folder(
 
     manifest_path: Optional[Path] = None
     csv_path: Optional[Path] = None
+    excel_report_path: Optional[Path] = None
     if generate_reports:
         status_counts: dict[str, int] = {}
         folder_counts: dict[str, int] = {}
@@ -4666,9 +5508,11 @@ def _run_cheson_single_folder(
                 "preset": preset,
                 "exact_gabarit_lock": exact_gabarit_lock,
                 "strip_residual_fragments": strip_residual_fragments,
+                "deduplicate_identical": deduplicate_identical,
                 "use_extra_layers": use_nesting_layers,
                 "export_format": export_format,
             },
+            "cheson_summaries": cheson_summaries,
             "verifications": verifications,
             "post_draw_audits": post_draw_audits,
             "summary": {
@@ -4682,10 +5526,10 @@ def _run_cheson_single_folder(
 
         csv_path = out_root / "report.csv"
         fieldnames = [
-            "pos_no", "plate_name", "profile", "material", "thickness_mm",
-            "width_mm", "length_mm", "qty_per_assembly", "assembly_qty",
-            "total_qty", "classification", "status", "source_file",
-            "output_folder", "output_file", "notes",
+            "pos_no", "plate_name", "role_code", "role_label", "profile", "material",
+            "thickness_mm", "width_mm", "length_mm", "qty_per_cheson",
+            "qty_per_assembly", "assembly_qty", "total_qty", "qty_source",
+            "classification", "status", "source_file", "output_folder", "output_file", "notes",
         ]
         with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -4693,9 +5537,18 @@ def _run_cheson_single_folder(
             for e in entries:
                 writer.writerow(asdict(e))
 
+        if _write_excel_report:
+            excel_report_path = write_cheson_quantity_report_xlsx(
+                out_root / "Raport_Piese_Cheson.xlsx",
+                cheson_summaries=cheson_summaries,
+                plate_entries=[asdict(e) for e in entries],
+            )
+            if excel_report_path is not None:
+                _log(f"📊 Raport Excel generat: {excel_report_path}")
+
     _prog(1.0)
     _log(
-        f"\n🏁 Finalizat: {nc1_plate_count} piese cheson (.nc1), "
+        f"\n🏁 Finalizat: {nc1_plate_count} piese unice cheson (.nc1), "
         f"{w_count} W-drawings, {bom_plate_count} plăci BOM, {skipped_count} sărite."
     )
     return {
@@ -4703,11 +5556,13 @@ def _run_cheson_single_folder(
         "w_drawings_converted": w_count,
         "bom_plates_generated": bom_plate_count,
         "skipped": skipped_count,
+        "cheson_summaries": cheson_summaries,
         "verifications": verifications,
         "post_draw_audits": post_draw_audits,
         "files": [str(f) for f in written_files],
         "manifest_path": str(manifest_path) if manifest_path else None,
         "csv_path": str(csv_path) if csv_path else None,
+        "excel_report_path": str(excel_report_path) if excel_report_path else None,
         "dest_dir": str(out_root),
         "errors": errors,
         "_entries": [asdict(e) for e in entries],
@@ -4734,6 +5589,8 @@ def run_cheson_pipeline(
     log_callback: Optional[Callable[[str], None]] = None,
     strip_residual_fragments: bool = True,
     save_in_source_subfolders: bool = False,
+    deduplicate_identical: bool = True,
+    cheson_report_xlsx: Optional[str | Path] = None,
 ) -> dict[str, Any]:
     """Run box-beam (.nc1) extraction on a single file, single folder, or multi-folder cheson batch."""
     def _log(msg: str) -> None:
@@ -4753,7 +5610,10 @@ def run_cheson_pipeline(
         if is_multi:
             report_root = src if save_in_source_subfolders else out_root
             report_root.mkdir(parents=True, exist_ok=True)
+            resolved_report_xlsx = find_cheson_report_xlsx(src, cheson_report_xlsx)
             _log(f"🗂️ BATCH AUTOMAT CHESON: {len(batch_folders)} foldere detectate în {src}")
+            if resolved_report_xlsx is not None:
+                _log(f"📊 Raport cantități chesoane detectat: {resolved_report_xlsx.name}")
             _log(
                 "   Mod salvare: Direct în folderul fiecărui cheson"
                 if save_in_source_subfolders
@@ -4765,6 +5625,7 @@ def run_cheson_pipeline(
             all_files: list[str] = []
             all_errors: list[str] = []
             all_entries: list[dict[str, Any]] = []
+            all_cheson_summaries: list[dict[str, Any]] = []
             folder_summaries: list[dict[str, Any]] = []
 
             total_nc1_plates = 0
@@ -4803,12 +5664,19 @@ def run_cheson_pipeline(
                         progress_callback=_sub_prog,
                         log_callback=_log,
                         strip_residual_fragments=strip_residual_fragments,
+                        deduplicate_identical=deduplicate_identical,
+                        cheson_report_xlsx=resolved_report_xlsx or cheson_report_xlsx,
+                        _write_excel_report=False,
                     )
                     sub_entries = sub_res.pop("_entries", [])
                     sub_vers = sub_res.get("verifications") or []
                     sub_audits = sub_res.get("post_draw_audits") or []
                     sub_errs = sub_res.get("errors") or []
+                    sub_ch_sums = sub_res.get("cheson_summaries") or []
 
+                    for cs in sub_ch_sums:
+                        cs["folder"] = rel_folder
+                        all_cheson_summaries.append(cs)
                     for v in sub_vers:
                         v["folder"] = rel_folder
                     for a in sub_audits:
@@ -4860,11 +5728,14 @@ def run_cheson_pipeline(
 
             manifest_path: Optional[Path] = None
             csv_path: Optional[Path] = None
+            excel_report_path: Optional[Path] = None
             if generate_reports:
                 manifest_path = report_root / "batch_manifest.json"
                 batch_payload = {
                     "batch_root": str(src),
                     "save_in_source_subfolders": save_in_source_subfolders,
+                    "deduplicate_identical": deduplicate_identical,
+                    "cheson_report_xlsx": resolved_report_xlsx.name if resolved_report_xlsx else None,
                     "folders_processed": n_folders,
                     "batch_pass_count": batch_pass_count,
                     "batch_check_count": batch_check_count,
@@ -4874,6 +5745,7 @@ def run_cheson_pipeline(
                         "bom_plates_generated": total_bom,
                         "skipped": total_skipped,
                     },
+                    "cheson_summaries": all_cheson_summaries,
                     "folders": folder_summaries,
                     "verifications": all_verifications,
                     "post_draw_audits": all_audits,
@@ -4883,10 +5755,11 @@ def run_cheson_pipeline(
 
                 csv_path = report_root / "batch_report.csv"
                 fieldnames = [
-                    "cheson_folder", "pos_no", "plate_name", "profile", "material",
-                    "thickness_mm", "width_mm", "length_mm", "qty_per_assembly",
-                    "assembly_qty", "total_qty", "classification", "status",
-                    "source_file", "output_folder", "output_file", "notes",
+                    "cheson_folder", "pos_no", "plate_name", "role_code", "role_label",
+                    "profile", "material", "thickness_mm", "width_mm", "length_mm",
+                    "qty_per_cheson", "qty_per_assembly", "assembly_qty", "total_qty",
+                    "qty_source", "classification", "status", "source_file",
+                    "output_folder", "output_file", "notes",
                 ]
                 with csv_path.open("w", newline="", encoding="utf-8-sig") as fh:
                     writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -4894,10 +5767,22 @@ def run_cheson_pipeline(
                     for row_d in all_entries:
                         writer.writerow(row_d)
 
+                excel_report_path = write_cheson_quantity_report_xlsx(
+                    report_root / "Raport_Piese_Cheson.xlsx",
+                    cheson_summaries=all_cheson_summaries,
+                    plate_entries=all_entries,
+                )
+
             _prog(1.0)
+            if all_cheson_summaries:
+                _log("\n📊 SUMAR GENERAL PIESE (T / C / L):")
+                for cs in all_cheson_summaries:
+                    _log(f"   • {cs['cheson_id']} (×{cs['cheson_qty']} [{cs['qty_source']}]): {cs['full_summary']}")
+            if excel_report_path is not None:
+                _log(f"📊 Raport Excel central generat: {excel_report_path}")
             _log(
                 f"\n🏁 BATCH FINALIZAT: {n_folders} foldere cheson ({batch_pass_count} PASS, {batch_check_count} CHECK) | "
-                f"{total_nc1_plates} piese NC1, {total_w} W-drawings, {total_bom} plăci BOM."
+                f"{total_nc1_plates} piese unice NC1, {total_w} W-drawings, {total_bom} plăci BOM."
             )
             return {
                 "is_multi_folder_batch": True,
@@ -4908,11 +5793,13 @@ def run_cheson_pipeline(
                 "w_drawings_converted": total_w,
                 "bom_plates_generated": total_bom,
                 "skipped": total_skipped,
+                "cheson_summaries": all_cheson_summaries,
                 "verifications": all_verifications,
                 "post_draw_audits": all_audits,
                 "files": all_files,
                 "manifest_path": str(manifest_path) if manifest_path else None,
                 "csv_path": str(csv_path) if csv_path else None,
+                "excel_report_path": str(excel_report_path) if excel_report_path else None,
                 "dest_dir": str(report_root),
                 "errors": all_errors,
             }
@@ -4936,6 +5823,9 @@ def run_cheson_pipeline(
         progress_callback=progress_callback,
         log_callback=log_callback,
         strip_residual_fragments=strip_residual_fragments,
+        deduplicate_identical=deduplicate_identical,
+        cheson_report_xlsx=cheson_report_xlsx,
+        _write_excel_report=True,
     )
     res.pop("_entries", None)
     auds = res.get("post_draw_audits") or []
