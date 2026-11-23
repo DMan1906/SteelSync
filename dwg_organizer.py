@@ -184,121 +184,139 @@ def detect_excel_structure(filepath, sheet_name=None):
     Inspect Excel file to find available sheets, header row,
     and auto-detect 'Ansamblu' and 'Piesă' column indices.
     """
-    wb = openpyxl.load_workbook(filepath, data_only=True)
-    sheets = wb.sheetnames
-    if not sheet_name or sheet_name not in sheets:
-        sheet_name = sheets[0]
-    ws = wb[sheet_name]
+    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    try:
+        sheets = wb.sheetnames
+        if not sheet_name or sheet_name not in sheets:
+            sheet_name = sheets[0]
+        ws = wb[sheet_name]
 
-    asmb_keywords = [
-        r'ansambl', r'asembl', r'assembly', r'main.*part', r'marca', r'mark', r'poz.*ans', r'denumire.*ans'
-    ]
-    part_keywords = [
-        r'^denumire$', r'piesa', r'piese', r'part', r'single.*part', r'poz.*piesa', r'profil', r'pozitie', r'reper', r'denumire.*pie'
-    ]
+        asmb_keywords = [
+            r'ansambl', r'asembl', r'assembly', r'main.*part', r'marca', r'mark', r'poz.*ans', r'denumire.*ans'
+        ]
+        part_keywords = [
+            r'^denumire$', r'pies[aă]', r'piese', r'part', r'single.*part', r'poz.*pies[aă]', r'profil', r'pozitie', r'reper', r'denumire.*pie'
+        ]
 
-    header_row_idx = None
-    asmb_col = None
-    part_col = None
-    headers = []
+        header_row_idx = None
+        asmb_col = None
+        part_col = None
+        headers = []
 
-    # Scan first 30 rows
-    for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-        if r_idx > 30:
-            break
-        row_strs = [str(c).strip() if c is not None else "" for c in row]
-        a_matches = []
-        p_matches = []
-        for c_idx, val in enumerate(row_strs):
-            if not val:
-                continue
-            val_lower = val.lower()
-            if any(re.search(k, val_lower) for k in asmb_keywords):
-                a_matches.append((c_idx, val))
-            elif any(re.search(k, val_lower) for k in part_keywords):
-                p_matches.append((c_idx, val))
-
-        if a_matches and p_matches:
-            header_row_idx = r_idx
-            asmb_col = a_matches[0][0]
-            part_col = p_matches[0][0]
-            headers = [
-                (i, val if val else f"Coloana {get_column_letter(i+1)}")
-                for i, val in enumerate(row_strs)
-            ]
-            break
-
-    # If both not found on same row, fallback to first row with strings
-    if header_row_idx is None:
+        # Scan first 30 rows
         for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            if r_idx > 30:
+                break
             row_strs = [str(c).strip() if c is not None else "" for c in row]
-            non_empty = [c for c in row_strs if c]
-            if len(non_empty) >= 2:
+            a_matches = []
+            p_matches = []
+            for c_idx, val in enumerate(row_strs):
+                if not val:
+                    continue
+                val_lower = val.lower()
+                if any(re.search(k, val_lower) for k in asmb_keywords):
+                    a_matches.append((c_idx, val))
+                elif any(re.search(k, val_lower) for k in part_keywords):
+                    p_matches.append((c_idx, val))
+
+            if a_matches and p_matches:
                 header_row_idx = r_idx
+                asmb_col = a_matches[0][0]
+                part_col = p_matches[0][0]
                 headers = [
                     (i, val if val else f"Coloana {get_column_letter(i+1)}")
                     for i, val in enumerate(row_strs)
                 ]
-                for c_idx, val in enumerate(row_strs):
-                    val_lower = val.lower()
-                    if asmb_col is None and any(re.search(k, val_lower) for k in asmb_keywords):
-                        asmb_col = c_idx
-                    if part_col is None and any(re.search(k, val_lower) for k in part_keywords):
-                        part_col = c_idx
                 break
 
-    # If still not detected, set default column 0 and 1
-    if asmb_col is None and headers:
-        asmb_col = 0
-    if part_col is None and len(headers) > 1:
-        part_col = 1
+        # If both not found on same row, fallback to first row with strings
+        if header_row_idx is None:
+            for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                if r_idx > 30:
+                    break
+                row_strs = [str(c).strip() if c is not None else "" for c in row]
+                non_empty = [c for c in row_strs if c]
+                if len(non_empty) >= 2:
+                    header_row_idx = r_idx
+                    headers = [
+                        (i, val if val else f"Coloana {get_column_letter(i+1)}")
+                        for i, val in enumerate(row_strs)
+                    ]
+                    for c_idx, val in enumerate(row_strs):
+                        val_lower = val.lower()
+                        if asmb_col is None and any(re.search(k, val_lower) for k in asmb_keywords):
+                            asmb_col = c_idx
+                        if part_col is None and any(re.search(k, val_lower) for k in part_keywords):
+                            part_col = c_idx
+                    break
 
-    return {
-        "sheets": sheets,
-        "selected_sheet": sheet_name,
-        "header_row": header_row_idx or 1,
-        "asmb_col_idx": asmb_col,
-        "part_col_idx": part_col,
-        "headers": headers
-    }
+        # If still not detected, avoid picking index column ('Nr.', 'Nr. crt.', '#', 'No.') as assembly column
+        if asmb_col is None and headers:
+            col0_name = headers[0][1].strip()
+            if not re.match(r'^(?:nr\.?(?:\s*crt\.?)?|#|no\.?)$', col0_name, re.IGNORECASE):
+                asmb_col = 0
+        if part_col is None and len(headers) > 1:
+            part_col = 1
+
+        return {
+            "sheets": sheets,
+            "selected_sheet": sheet_name,
+            "header_row": header_row_idx or 1,
+            "asmb_col_idx": asmb_col,
+            "part_col_idx": part_col,
+            "headers": headers
+        }
+    finally:
+        wb.close()
 
 
 def parse_excel_parts(filepath, sheet_name, header_row, asmb_col_idx, part_col_idx):
     """
-    Parse Excel table into parts dictionary:
+    Parse Excel table into parts dictionary with hierarchical assembly forward-fill:
     {
        part_name: [asmb_name_1, asmb_name_2, ...]
     }
     """
-    wb = openpyxl.load_workbook(filepath, data_only=True)
-    ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    try:
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
 
-    parts_map = {}
-    ignored_vals = {'none', 'nan', 'null', 'total', 'suma', 'sum', ''}
+        parts_map = {}
+        ignored_vals = {'none', 'nan', 'null', 'total', 'suma', 'sum', ''}
+        current_asmb = ""
 
-    start_row = header_row + 1
-    for row in ws.iter_rows(min_row=start_row, values_only=True):
-        if not row:
-            continue
-        asmb_val = ""
-        part_val = ""
+        start_row = header_row + 1
+        for row in ws.iter_rows(min_row=start_row, values_only=True):
+            if not row:
+                continue
+            asmb_val = ""
+            part_val = ""
 
-        if asmb_col_idx is not None and asmb_col_idx < len(row) and row[asmb_col_idx] is not None:
-            asmb_val = str(row[asmb_col_idx]).strip()
+            if asmb_col_idx is not None and asmb_col_idx < len(row) and row[asmb_col_idx] is not None:
+                asmb_val = str(row[asmb_col_idx]).strip()
 
-        if part_col_idx is not None and part_col_idx < len(row) and row[part_col_idx] is not None:
-            part_val = str(row[part_col_idx]).strip()
+            if part_col_idx is not None and part_col_idx < len(row) and row[part_col_idx] is not None:
+                part_val = str(row[part_col_idx]).strip()
 
-        if not part_val or part_val.lower() in ignored_vals:
-            continue
+            if asmb_val and asmb_val.lower() not in ignored_vals:
+                current_asmb = asmb_val
 
-        if part_val not in parts_map:
-            parts_map[part_val] = []
+            if not part_val or part_val.lower() in ignored_vals:
+                continue
 
-        if asmb_val and asmb_val.lower() not in ignored_vals and asmb_val not in parts_map[part_val]:
-            parts_map[part_val].append(asmb_val)
+            effective_asmb = asmb_val if (asmb_val and asmb_val.lower() not in ignored_vals) else current_asmb
+            sub_parts = [p.strip() for p in part_val.split(",") if p.strip()]
+            for single_part in sub_parts:
+                if single_part.lower() in ignored_vals:
+                    continue
+                if single_part not in parts_map:
+                    parts_map[single_part] = []
+                if effective_asmb and effective_asmb.lower() not in ignored_vals and effective_asmb not in parts_map[single_part]:
+                    parts_map[single_part].append(effective_asmb)
 
-    return parts_map
+        return parts_map
+    finally:
+        wb.close()
 
 
 def scan_source_files(source_dir):
@@ -637,8 +655,8 @@ def run_pipeline(
         dwg_desc = f"{len(part_dwg_found)} DWG" if part_dwg_found else "0 DWG"
         log(f"[{status}] Piesă '{part}' -> NC: {len(part_nc_found)}, PDF: {len(part_pdf_found)}, {dwg_desc}", log_lvl)
 
-    # 4. Clean up source files if mode == 'move'
-    if mode == "move" and files_to_delete_from_source:
+    # 4. Clean up source files if mode == 'move' and not cancelled
+    if mode == "move" and files_to_delete_from_source and not (is_cancelled and is_cancelled()):
         set_progress(0.88, "Ștergere fișiere mutate din sursă...")
         log(f"\n🗑️ Ștergere {len(files_to_delete_from_source)} fișiere originale din sursă...", "INFO")
         del_count = 0
@@ -956,8 +974,8 @@ def run_regroup_pipeline(
         except Exception as e:
             log(f"❌ Eroare la copiere '{rec['filename']}': {e}", "ERROR")
 
-    # 3. Clean up source files if mode == 'move'
-    if mode == "move" and files_to_delete:
+    # 3. Clean up source files if mode == 'move' and not cancelled
+    if mode == "move" and files_to_delete and not (is_cancelled and is_cancelled()):
         set_progress(0.88, "Ștergere fișiere mutate din sursă...")
         log(f"\n🗑️ Ștergere {len(files_to_delete)} fișiere DWG din sursă...", "INFO")
         del_count = 0

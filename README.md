@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.8.1)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.1/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.8.1)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.8.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.2/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.8.2)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.8.1)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.1/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.8.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.8.2/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -42,11 +42,11 @@
   - Funcție **Quick Save on Desktop** printr-un singur click (`IMPORT.xlsx` generat direct pe desktop) și buton dedicat **Copiază în Clipboard** (date tabelare compatibile direct cu Paste în orice spreadsheet Excel).
   - Previzualizare tabelară interactivă cu căutare/filtrare live a pieselor extrase.
 
-- **📦 Integrare DWG Tools în DWG Finder (NOU în v1.7.0)**:
+- **📦 Integrare DWG Tools în DWG Finder (Actualizat în v1.8.2)**:
   - Tabul `🔍 DWG Finder` integrează acum un comutator vizual rapid de sub-vederi (segmented button) cu 3 moduri de lucru:
     1. **🔍 Căutare DWG în Proiecte:** Modulul consacrat de scanare recursivă a desenelor DWG/PDF după codurile pieselor sau fișiere NC.
-    2. **📦 Organizare Piese (BOM ➜ Piese):** Citește lista de debitare/BOM din Excel, detectează automat coloanele (Piesă, Grosime/Profil, Material, Cantitate), caută fișierele DWG în folderul sursă și le organizează automat în foldere curate per grosime (ex. `t10`, `t15`, `t20`). Include rapoarte automate `_PIESE_LIPSA.txt` și `_RAPORT_ORGANIZARE.txt`.
-    3. **🔄 Regrupare DWG pe Grosimi:** Scanează o ierarhie dezorganizată de fișiere DWG, identifică automat grosimea fiecărui reper din denumirea fișierului sau din calea folderului părinte și le re-grupează curat în subfoldere per grosime.
+    2. **📦 Organizare Piese (BOM ➜ Piese):** Citește lista de debitare/BOM din Excel (inclusiv BOM-uri ierarhice Tekla cu propagare automată ansamblu ➜ piese și detecție automată a foilor/coloanelor), caută fișierele NC/PDF/DWG în folderul sursă și le organizează automat pe piese și grosimi (ex. `t10`, `t15`, `t20`), cu raport `Raport_Organizare_Piese.xlsx`.
+    3. **🔄 Regrupare DWG pe Grosimi:** Scanează o ierarhie de piese cu fișiere DWG, identifică automat grosimea fiecărui reper din calea folderului și le re-grupează curat în subfoldere unificate per grosime.
 
 - **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (v1.6.0)**:
   - Modul dedicat și tab nou în aplicație: convertește automat desenele tehnice de execuție PDF în fișiere CAD (`.dwg` / `.dxf`) la scară reală **1:1 (milimetri)**.

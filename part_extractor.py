@@ -389,7 +389,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -5982,6 +5982,10 @@ class UnifiedApp(ctk.CTk):
         self.btn_dwg_org_open_rep = ctk.CTkButton(post_bar, text="📊 Deschide Raport Excel", width=190, height=32, state="disabled", fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._open_dwg_org_report)
         self.btn_dwg_org_open_rep.pack(side="left")
 
+        saved_xl = self.dwg_org_excel.get().strip()
+        if saved_xl and os.path.isfile(saved_xl):
+            self.after(200, lambda p=saved_xl: self._on_dwg_org_excel_selected(p))
+
     def _browse_dwg_org_excel(self):
         initial = self._get_browse_initial_dir("dest_based", self.dwg_org_excel.get())
         f = filedialog.askopenfilename(title="Selectează Fișierul Excel BOM", initialdir=initial, filetypes=[("Excel", "*.xlsx *.xls *.xlsm"), ("All Files", "*.*")])
@@ -5991,28 +5995,53 @@ class UnifiedApp(ctk.CTk):
             self.save_settings()
             self._on_dwg_org_excel_selected(norm)
 
+    def _apply_dwg_org_excel_info(self, filepath, info):
+        sheets = info.get("sheets") or []
+        active_sh = info.get("selected_sheet") or (sheets[0] if sheets else "-")
+        h_row = info.get("header_row", 1)
+        asmb_idx = info.get("asmb_col_idx")
+        part_idx = info.get("part_col_idx")
+        headers = dict(info.get("headers") or [])
+        self.dwg_org_excel_meta = {
+            "filepath": filepath,
+            "sheets": sheets,
+            "active_sheet": active_sh,
+            "header_row": h_row,
+            "asmb_idx": asmb_idx,
+            "part_idx": part_idx,
+            "headers": headers,
+        }
+        if sheets:
+            self.combo_dwg_org_sheet.configure(values=sheets)
+            self.dwg_org_sheet.set(active_sh)
+        col_vals = [
+            f"Col {idx} ({dwg_organizer.get_column_letter(idx + 1)}): {name}"
+            for idx, name in headers.items()
+        ]
+        if col_vals:
+            self.combo_dwg_org_asmb_col.configure(values=["(Fără)"] + col_vals)
+            self.combo_dwg_org_part_col.configure(values=col_vals)
+            if asmb_idx is not None and asmb_idx in headers:
+                self.dwg_org_asmb_col.set(
+                    f"Col {asmb_idx} ({dwg_organizer.get_column_letter(asmb_idx + 1)}): {headers[asmb_idx]}"
+                )
+            else:
+                self.dwg_org_asmb_col.set("(Fără)")
+            if part_idx is not None and part_idx in headers:
+                self.dwg_org_part_col.set(
+                    f"Col {part_idx} ({dwg_organizer.get_column_letter(part_idx + 1)}): {headers[part_idx]}"
+                )
+        asmb_txt = f"Col {asmb_idx}" if asmb_idx is not None else "Fără"
+        part_txt = f"Col {part_idx}" if part_idx is not None else "Fără"
+        self.lbl_dwg_org_excel_info.configure(
+            text=f"✅ Detectat: Sheet '{active_sh}', Rând Antet: {h_row}, Asmb: {asmb_txt}, Piesă: {part_txt}",
+            text_color=_GREEN[1]
+        )
+
     def _on_dwg_org_excel_selected(self, filepath):
         try:
-            sheets, active_sh, h_row, asmb_idx, part_idx, headers = dwg_organizer.detect_excel_structure(filepath)
-            self.dwg_org_excel_meta = {
-                "sheets": sheets, "active_sheet": active_sh, "header_row": h_row,
-                "asmb_idx": asmb_idx, "part_idx": part_idx, "headers": headers
-            }
-            if sheets:
-                self.combo_dwg_org_sheet.configure(values=sheets)
-                self.dwg_org_sheet.set(active_sh)
-            col_vals = [f"Col {idx}: {name}" for idx, name in headers.items()]
-            if col_vals:
-                self.combo_dwg_org_asmb_col.configure(values=col_vals)
-                self.combo_dwg_org_part_col.configure(values=col_vals)
-                if asmb_idx in headers:
-                    self.dwg_org_asmb_col.set(f"Col {asmb_idx}: {headers[asmb_idx]}")
-                if part_idx in headers:
-                    self.dwg_org_part_col.set(f"Col {part_idx}: {headers[part_idx]}")
-            self.lbl_dwg_org_excel_info.configure(
-                text=f"✅ Detectat: Sheet '{active_sh}', Rând Antet: {h_row}, Asmb: Col {asmb_idx}, Piesă: Col {part_idx}",
-                text_color=_GREEN[1]
-            )
+            info = dwg_organizer.detect_excel_structure(filepath)
+            self._apply_dwg_org_excel_info(filepath, info)
         except Exception as e:
             self.lbl_dwg_org_excel_info.configure(text=f"⚠ Eroare la citirea Excel-ului: {e}", text_color=_RED[1])
 
@@ -6020,21 +6049,10 @@ class UnifiedApp(ctk.CTk):
         f = self.dwg_org_excel.get().strip()
         if f and os.path.isfile(f):
             try:
-                sheets, active_sh, h_row, asmb_idx, part_idx, headers = dwg_organizer.detect_excel_structure(f, sheet_name=val)
-                self.dwg_org_excel_meta = {
-                    "sheets": sheets, "active_sheet": active_sh, "header_row": h_row,
-                    "asmb_idx": asmb_idx, "part_idx": part_idx, "headers": headers
-                }
-                col_vals = [f"Col {idx}: {name}" for idx, name in headers.items()]
-                if col_vals:
-                    self.combo_dwg_org_asmb_col.configure(values=col_vals)
-                    self.combo_dwg_org_part_col.configure(values=col_vals)
-                    if asmb_idx in headers:
-                        self.dwg_org_asmb_col.set(f"Col {asmb_idx}: {headers[asmb_idx]}")
-                    if part_idx in headers:
-                        self.dwg_org_part_col.set(f"Col {part_idx}: {headers[part_idx]}")
-            except Exception:
-                pass
+                info = dwg_organizer.detect_excel_structure(f, sheet_name=val)
+                self._apply_dwg_org_excel_info(f, info)
+            except Exception as e:
+                self.lbl_dwg_org_excel_info.configure(text=f"⚠ Eroare la citirea foii Excel: {e}", text_color=_RED[1])
 
     def _on_dwg_org_column_change(self, val=None):
         pass
@@ -6047,14 +6065,20 @@ class UnifiedApp(ctk.CTk):
             self.dwg_org_source.set(norm)
             self.save_settings()
             try:
-                nc_files, pdf_files, dwg_files, dwg_map = dwg_organizer.scan_source_files(norm)
-                total_dwg = sum(len(v) for v in dwg_map.values())
+                src_info = dwg_organizer.scan_source_files(norm)
+                nc_files = src_info.get("nc_files", [])
+                pdf_files = src_info.get("pdf_files", [])
+                dwg_files = src_info.get("dwg_files", [])
+                thicknesses = src_info.get("thicknesses", [])
                 self.lbl_dwg_org_source_info.configure(
-                    text=f"Găsit în sursă: {len(nc_files)} NC-uri, {len(pdf_files)} PDF-uri, {total_dwg} DWG-uri în {len(dwg_map)} grosimi.",
+                    text=f"Găsit în sursă: {len(nc_files)} NC-uri, {len(pdf_files)} PDF-uri, {len(dwg_files)} DWG-uri în {len(thicknesses)} grosimi.",
                     text_color=_GREEN[1]
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                self.lbl_dwg_org_source_info.configure(
+                    text=f"⚠ Eroare la scanarea sursei: {e}",
+                    text_color=_RED[1]
+                )
 
     def _browse_dwg_org_dest(self):
         initial = self._get_browse_initial_dir("dest_based", self.dwg_org_dest.get())
@@ -6082,18 +6106,30 @@ class UnifiedApp(ctk.CTk):
             return
 
         meta = getattr(self, "dwg_org_excel_meta", None)
+        if not meta or meta.get("filepath") != excel_p:
+            self._on_dwg_org_excel_selected(excel_p)
+            meta = getattr(self, "dwg_org_excel_meta", None)
+
         h_row = meta.get("header_row", 1) if meta else 1
         sh_name = self.dwg_org_sheet.get()
-        if sh_name == "-":
+        if not sh_name or sh_name in ("-", "selected_sheet"):
             sh_name = meta.get("active_sheet") if meta else None
 
         # Extract col indices
         def parse_col_idx(val_str, fallback):
-            m = re.match(r'Col\s+(\d+)', val_str)
+            s = (val_str or "").strip()
+            if s == "(Fără)":
+                return None
+            if s in ("", "-"):
+                return fallback
+            m = re.match(r"Col\s+(\d+)", s)
             return int(m.group(1)) if m else fallback
 
-        asmb_idx = parse_col_idx(self.dwg_org_asmb_col.get(), meta.get("asmb_idx", 1) if meta else 1)
-        part_idx = parse_col_idx(self.dwg_org_part_col.get(), meta.get("part_idx", 2) if meta else 2)
+        asmb_idx = parse_col_idx(self.dwg_org_asmb_col.get(), meta.get("asmb_idx") if meta else 1)
+        part_idx = parse_col_idx(self.dwg_org_part_col.get(), meta.get("part_idx") if meta else 2)
+        if part_idx is None:
+            messagebox.showwarning("Atenție", "Selectează o coloană validă pentru Piesă.")
+            return
 
         self.dwg_org_running = True
         self.dwg_org_cancel = False
@@ -6107,29 +6143,45 @@ class UnifiedApp(ctk.CTk):
         clean_empty = self.dwg_org_clean_empty.get()
 
         def worker():
-            def prog_cb(curr, total, msg):
-                self.after(0, lambda: self._update_dwg_org_progress(curr, total, msg))
+            def prog_cb(pct, msg=""):
+                self.after(0, lambda p=pct, m=msg: self._update_dwg_org_progress(p, m))
             def log_cb(txt, tag="INFO"):
-                self.after(0, lambda: self._dwg_org_log(txt, tag))
+                self.after(0, lambda t=txt, tg=tag: self._dwg_org_log(t, tg))
             def cancel_cb():
                 return self.dwg_org_cancel
 
-            res = dwg_organizer.run_pipeline(
-                excel_path=excel_p,
-                sheet_name=sh_name,
-                header_row=h_row,
-                asmb_col_idx=asmb_idx,
-                part_col_idx=part_idx,
-                source_dir=src_p,
-                dest_dir=dst_p,
-                mode=mode,
-                allow_variations=allow_vars,
-                clean_empty_folders=clean_empty,
-                progress_callback=prog_cb,
-                log_callback=log_cb,
-                is_cancelled=cancel_cb
-            )
-            self.after(0, lambda: self._on_dwg_org_complete(res))
+            try:
+                summary_stats, results_list, report_path = dwg_organizer.run_pipeline(
+                    excel_path=excel_p,
+                    sheet_name=sh_name,
+                    header_row=h_row,
+                    asmb_col_idx=asmb_idx,
+                    part_col_idx=part_idx,
+                    source_dir=src_p,
+                    dest_dir=dst_p,
+                    mode=mode,
+                    allow_variations=allow_vars,
+                    clean_empty_folders=clean_empty,
+                    progress_callback=prog_cb,
+                    log_callback=log_cb,
+                    is_cancelled=cancel_cb
+                )
+                if self.dwg_org_cancel or summary_stats is None:
+                    res_payload = {"cancelled": True, "report_path": report_path}
+                else:
+                    res_payload = {
+                        "cancelled": False,
+                        "report_path": report_path,
+                        "processed_parts": summary_stats.get("total_parts", 0),
+                        "nc_transferred": sum(len(r.get("nc_found", [])) for r in (results_list or [])),
+                        "pdf_transferred": sum(len(r.get("pdf_found", [])) for r in (results_list or [])),
+                        "dwg_transferred": sum(len(r.get("dwg_found", [])) for r in (results_list or [])),
+                        "total_files_transferred": summary_stats.get("total_files_transferred", 0),
+                    }
+            except Exception as e:
+                log_cb(f"❌ Eroare fatală organizare piese: {e}", "ERROR")
+                res_payload = {"error": str(e)}
+            self.after(0, lambda r=res_payload: self._on_dwg_org_complete(r))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -6137,10 +6189,11 @@ class UnifiedApp(ctk.CTk):
         self.dwg_org_cancel = True
         self._dwg_org_log("🛑 Solicitare de oprire trimisă...", "WARNING")
 
-    def _update_dwg_org_progress(self, curr, total, msg):
-        frac = curr / max(total, 1)
+    def _update_dwg_org_progress(self, pct, msg=""):
+        frac = max(0.0, min(1.0, float(pct)))
         self.dwg_org_progress.set(frac)
-        self.lbl_dwg_org_status.configure(text=msg)
+        if msg:
+            self.lbl_dwg_org_status.configure(text=msg)
 
     def _dwg_org_log(self, text, tag="INFO"):
         self.dwg_org_log_box.configure(state="normal")
@@ -6157,9 +6210,10 @@ class UnifiedApp(ctk.CTk):
         self.dwg_org_running = False
         self.btn_dwg_org_run.configure(state="normal", text="🚀  ÎNCEPE ORGANIZAREA PE PIESE")
         self.btn_dwg_org_cancel.configure(state="disabled")
-        self.dwg_org_progress.set(1.0)
+        res = res if isinstance(res, dict) else {"error": "Rezultat invalid din procesul de organizare."}
+        self.dwg_org_progress.set(0.0 if res.get("error") else 1.0)
 
-        rep_path = res.get("report_path") if isinstance(res, dict) else None
+        rep_path = res.get("report_path")
         self.dwg_org_last_report = rep_path
         if rep_path and os.path.exists(rep_path):
             self.btn_dwg_org_open_rep.configure(state="normal")
@@ -6177,8 +6231,9 @@ class UnifiedApp(ctk.CTk):
                 f"Organizarea pe piese a fost finalizată cu succes!\n\n"
                 f"• Piese procesate: {res.get('processed_parts', 0)}\n"
                 f"• NC-uri transferate: {res.get('nc_transferred', 0)}\n"
-                f"• PDF-uri transferate: {res.get('pdf_transferred', 0)}\n"
-                f"• DWG-uri transferate: {res.get('dwg_transferred', 0)}\n\n"
+                f"• PDF-uri asociate: {res.get('pdf_transferred', 0)}\n"
+                f"• DWG-uri asociate: {res.get('dwg_transferred', 0)}\n"
+                f"• Total fișiere transferate: {res.get('total_files_transferred', 0)}\n\n"
                 f"Folder Destinație:\n{dst}"
             )
 
@@ -6298,13 +6353,21 @@ class UnifiedApp(ctk.CTk):
             self.dwg_regroup_source.set(norm)
             self.save_settings()
             try:
-                total, thk_map, unclass = dwg_organizer.scan_dwgs_for_regrouping(norm)
+                rg_info = dwg_organizer.scan_dwgs_for_regrouping(
+                    norm, normalize_case=self.dwg_regroup_normalize.get()
+                )
+                total = rg_info.get("total_dwgs", 0)
+                thk_map = rg_info.get("thickness_groups", {})
+                unclass_cnt = len(thk_map.get("_Fara_Grosime", []))
                 self.lbl_dwg_rg_src_info.configure(
-                    text=f"Găsit: {total} fișiere DWG în {len(thk_map)} grosimi diferite ({len(unclass)} neclasificate).",
+                    text=f"Găsit: {total} fișiere DWG în {len(thk_map)} grosimi diferite ({unclass_cnt} neclasificate).",
                     text_color=_GREEN[1]
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                self.lbl_dwg_rg_src_info.configure(
+                    text=f"⚠ Eroare la scanarea DWG-urilor: {e}",
+                    text_color=_RED[1]
+                )
 
     def _browse_dwg_regroup_dest(self):
         initial = self._get_browse_initial_dir("dest_based", self.dwg_regroup_dest.get())
@@ -6338,24 +6401,37 @@ class UnifiedApp(ctk.CTk):
         norm_case = self.dwg_regroup_normalize.get()
 
         def worker():
-            def prog_cb(curr, total, msg):
-                self.after(0, lambda: self._update_dwg_regroup_progress(curr, total, msg))
+            def prog_cb(pct, msg=""):
+                self.after(0, lambda p=pct, m=msg: self._update_dwg_regroup_progress(p, m))
             def log_cb(txt, tag="INFO"):
-                self.after(0, lambda: self._dwg_regroup_log(txt, tag))
+                self.after(0, lambda t=txt, tg=tag: self._dwg_regroup_log(t, tg))
             def cancel_cb():
                 return self.dwg_regroup_cancel
 
-            res = dwg_organizer.run_regroup_pipeline(
-                source_dir=src_p,
-                dest_dir=dst_p,
-                mode=mode,
-                normalize_case=norm_case,
-                clean_empty_folders=True,
-                progress_callback=prog_cb,
-                log_callback=log_cb,
-                is_cancelled=cancel_cb
-            )
-            self.after(0, lambda: self._on_dwg_regroup_complete(res))
+            try:
+                summary_stats, report_path = dwg_organizer.run_regroup_pipeline(
+                    source_dir=src_p,
+                    dest_dir=dst_p,
+                    mode=mode,
+                    normalize_case=norm_case,
+                    clean_empty_folders=True,
+                    progress_callback=prog_cb,
+                    log_callback=log_cb,
+                    is_cancelled=cancel_cb
+                )
+                if self.dwg_regroup_cancel or summary_stats is None:
+                    res_payload = {"cancelled": True, "report_path": report_path}
+                else:
+                    res_payload = {
+                        "cancelled": False,
+                        "report_path": report_path,
+                        "transferred": summary_stats.get("total_dwgs", 0),
+                        "thickness_counts": summary_stats.get("thickness_breakdown", {}),
+                    }
+            except Exception as e:
+                log_cb(f"❌ Eroare fatală regrupare DWG: {e}", "ERROR")
+                res_payload = {"error": str(e)}
+            self.after(0, lambda r=res_payload: self._on_dwg_regroup_complete(r))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -6363,10 +6439,11 @@ class UnifiedApp(ctk.CTk):
         self.dwg_regroup_cancel = True
         self._dwg_regroup_log("🛑 Solicitare de oprire trimisă...", "WARNING")
 
-    def _update_dwg_regroup_progress(self, curr, total, msg):
-        frac = curr / max(total, 1)
+    def _update_dwg_regroup_progress(self, pct, msg=""):
+        frac = max(0.0, min(1.0, float(pct)))
         self.dwg_rg_progress.set(frac)
-        self.lbl_dwg_rg_status.configure(text=msg)
+        if msg:
+            self.lbl_dwg_rg_status.configure(text=msg)
 
     def _dwg_regroup_log(self, text, tag="INFO"):
         self.dwg_rg_log_box.configure(state="normal")
@@ -6383,9 +6460,10 @@ class UnifiedApp(ctk.CTk):
         self.dwg_regroup_running = False
         self.btn_dwg_rg_run.configure(state="normal", text="🔄  ÎNCEPE REGRUPAREA DWG PE GROSIMI")
         self.btn_dwg_rg_cancel.configure(state="disabled")
-        self.dwg_rg_progress.set(1.0)
+        res = res if isinstance(res, dict) else {"error": "Rezultat invalid din procesul de regrupare."}
+        self.dwg_rg_progress.set(0.0 if res.get("error") else 1.0)
 
-        rep_path = res.get("report_path") if isinstance(res, dict) else None
+        rep_path = res.get("report_path")
         self.dwg_regroup_last_report = rep_path
         if rep_path and os.path.exists(rep_path):
             self.btn_dwg_rg_open_rep.configure(state="normal")
