@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.14.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.14.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.14.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.15.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.15.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.15.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.14.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.14.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.15.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.15.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -62,7 +62,7 @@
 - **📦 Integrare DWG Tools în DWG Finder (NOU în v1.9.0)**:
   - Tabul `🔍 DWG Finder` integrează acum un comutator vizual rapid de sub-vederi (segmented button) cu 3 moduri de lucru:
     1. **🔍 Căutare DWG în Proiecte:** Modulul consacrat de scanare recursivă a desenelor DWG/PDF după codurile pieselor sau fișiere NC.
-    2. **📦 Organizare Piese (BOM ➜ Piese):** Citește lista de debitare/BOM din Excel (inclusiv BOM-uri ierarhice Tekla cu propagare automată ansamblu ➜ piese) și permite acum filtrarea opțională după un **raport de piese/chesoane** (`raport_CHESON.xlsx`) sau direct după un **folder** (subfoldere / `.nc` / `.pdf`). Extrage selectiv **NC**, **PDF Ansamblu** și/sau **DWG**, reutilizează automat folderele existente indiferent de cratimă (ex. `DSB-2094` ↔ `DSB2094`) și include opțiunea de extragere a PDF-urilor de ansamblu direct într-un singur folder destinație.
+    2. **📦 Organizare Piese (BOM ➜ Piese) (Actualizat în v1.15.0):** Citește tabelul Excel *Assembly Part List* (inclusiv BOM-uri ierarhice Tekla cu propagare automată ansamblu ➜ piese) și permite filtrarea opțională după **`raport_CHESON.xlsx`** sau un folder. Scanează automat sau manual folderul dedicat **`Desene Ansamblu (PDF)`** de lângă Excel, copiază în siguranță (fără ștergere din sursa master de ansambluri chiar în modul Mutare) **PDF-urile de ansamblu** atât în subfolderul fiecărei piese cât și într-un folder centralizat **`Destinație/Desene Ansamblu`** (sau plat doar PDF-uri), alături de **NC** și **DWG**.
     3. **🔄 Regrupare DWG pe Grosimi:** Scanează o ierarhie de piese cu fișiere DWG, identifică automat grosimea fiecărui reper din calea folderului și le re-grupează curat în subfoldere unificate per grosime.
 
 - **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (v1.6.0)**:

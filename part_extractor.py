@@ -390,7 +390,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1130,6 +1130,7 @@ class UnifiedApp(ctk.CTk):
         self.dwg_org_excel = ctk.StringVar()
         self.dwg_org_filter_path = ctk.StringVar()
         self.dwg_org_source = ctk.StringVar()
+        self.dwg_org_asmb_pdf_dir = ctk.StringVar()
         self.dwg_org_dest = ctk.StringVar()
         self.dwg_org_action = ctk.StringVar(value="move")
         self.dwg_org_sheet = ctk.StringVar(value="-")
@@ -1139,6 +1140,7 @@ class UnifiedApp(ctk.CTk):
         self.dwg_org_include_pdf = ctk.BooleanVar(value=True)
         self.dwg_org_include_dwg = ctk.BooleanVar(value=True)
         self.dwg_org_flat_pdf = ctk.BooleanVar(value=False)
+        self.dwg_org_create_asmb_folder = ctk.BooleanVar(value=True)
         self.dwg_org_variations = ctk.BooleanVar(value=True)
         self.dwg_org_clean_empty = ctk.BooleanVar(value=True)
         self.dwg_org_open_dest = ctk.BooleanVar(value=True)
@@ -1342,12 +1344,14 @@ class UnifiedApp(ctk.CTk):
             self.dwg_org_excel.set(s.get("dwg_org_excel", ""))
             self.dwg_org_filter_path.set(s.get("dwg_org_filter_path", ""))
             self.dwg_org_source.set(s.get("dwg_org_source", ""))
+            self.dwg_org_asmb_pdf_dir.set(s.get("dwg_org_asmb_pdf_dir", ""))
             self.dwg_org_dest.set(s.get("dwg_org_dest", ""))
             self.dwg_org_action.set(s.get("dwg_org_action", "move"))
             self.dwg_org_include_nc.set(s.get("dwg_org_include_nc", True))
             self.dwg_org_include_pdf.set(s.get("dwg_org_include_pdf", True))
             self.dwg_org_include_dwg.set(s.get("dwg_org_include_dwg", True))
             self.dwg_org_flat_pdf.set(s.get("dwg_org_flat_pdf", False))
+            self.dwg_org_create_asmb_folder.set(s.get("dwg_org_create_asmb_folder", True))
             self.dwg_regroup_source.set(s.get("dwg_regroup_source", ""))
             self.dwg_regroup_dest.set(s.get("dwg_regroup_dest", ""))
             self.dwg_regroup_action.set(s.get("dwg_regroup_action", "copy"))
@@ -1538,12 +1542,14 @@ class UnifiedApp(ctk.CTk):
             "dwg_org_excel": self.dwg_org_excel.get(),
             "dwg_org_filter_path": self.dwg_org_filter_path.get(),
             "dwg_org_source": self.dwg_org_source.get(),
+            "dwg_org_asmb_pdf_dir": self.dwg_org_asmb_pdf_dir.get(),
             "dwg_org_dest": self.dwg_org_dest.get(),
             "dwg_org_action": self.dwg_org_action.get(),
             "dwg_org_include_nc": self.dwg_org_include_nc.get(),
             "dwg_org_include_pdf": self.dwg_org_include_pdf.get(),
             "dwg_org_include_dwg": self.dwg_org_include_dwg.get(),
             "dwg_org_flat_pdf": self.dwg_org_flat_pdf.get(),
+            "dwg_org_create_asmb_folder": self.dwg_org_create_asmb_folder.get(),
             "dwg_regroup_source": self.dwg_regroup_source.get(),
             "dwg_regroup_dest": self.dwg_regroup_dest.get(),
             "dwg_regroup_action": self.dwg_regroup_action.get(),
@@ -5966,9 +5972,9 @@ class UnifiedApp(ctk.CTk):
         card_xl.pack(fill="x", pady=(0, 8))
         card_xl.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(card_xl, text="1. Tabel Excel (Ansambluri & Piese)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
+        ctk.CTkLabel(card_xl, text="1. Tabel Excel BOM / Assembly Part List & Filtru Piese", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
 
-        self._label(card_xl, text="Fișier Excel BOM:").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._label(card_xl, text="Excel Assembly Part List:").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
         self._entry(card_xl, self.dwg_org_excel, placeholder_text="Selectează fișierul Excel (.xlsx, .xls)...").grid(row=1, column=1, sticky="ew", padx=4, pady=4)
         self._browse_btn(card_xl, self._browse_dwg_org_excel).grid(row=1, column=2, padx=(4, 16), pady=4)
 
@@ -6013,18 +6019,32 @@ class UnifiedApp(ctk.CTk):
         card_dirs.pack(fill="x", pady=(0, 8))
         card_dirs.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(card_dirs, text="2. Foldere de Lucru (Sursă & Destinație)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
+        ctk.CTkLabel(card_dirs, text="2. Foldere de Lucru (Sursă, Desene Ansamblu & Destinație)", font=("Segoe UI", 13, "bold"), text_color=_TEXT_PRI).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(10, 4))
 
-        self._label(card_dirs, text="Folder Sursă:").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
-        self._entry(card_dirs, self.dwg_org_source, placeholder_text="Folder ce conține PDF-uri, NC-uri și subfoldere cu grosimi...").grid(row=1, column=1, sticky="ew", padx=4, pady=4)
+        self._label(card_dirs, text="Folder Sursă (NC / DWG):").grid(row=1, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_dirs, self.dwg_org_source, placeholder_text="Folder cu NC-uri / DWG-uri (opțional dacă extragi doar Desene Ansamblu PDF)...").grid(row=1, column=1, sticky="ew", padx=4, pady=4)
         self._browse_btn(card_dirs, self._browse_dwg_org_source).grid(row=1, column=2, padx=(4, 16), pady=4)
 
         self.lbl_dwg_org_source_info = ctk.CTkLabel(card_dirs, text="", font=("Segoe UI", 11), text_color=_TEXT_SEC)
         self.lbl_dwg_org_source_info.grid(row=2, column=1, sticky="w", padx=4, pady=(0, 4))
 
-        self._label(card_dirs, text="Folder Destinație:").grid(row=3, column=0, sticky="w", padx=(16, 6), pady=4)
-        self._entry(card_dirs, self.dwg_org_dest, placeholder_text="Folderul unde se vor crea folderele fiecărei piese...").grid(row=3, column=1, sticky="ew", padx=4, pady=4)
-        self._browse_btn(card_dirs, self._browse_dwg_org_dest).grid(row=3, column=2, padx=(4, 16), pady=4)
+        self._label(card_dirs, text="Folder Desene Ansamblu (PDF):").grid(row=3, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_dirs, self.dwg_org_asmb_pdf_dir, placeholder_text="Auto-detectat lângă Excel (Desene Ansamblu) sau selectează folderul extras...").grid(row=3, column=1, sticky="ew", padx=4, pady=4)
+        asmb_btns = ctk.CTkFrame(card_dirs, fg_color="transparent")
+        asmb_btns.grid(row=3, column=2, padx=(4, 16), pady=4, sticky="e")
+        ctk.CTkButton(asmb_btns, text="📁", width=44, height=32, fg_color=_ACCENT, hover_color=_ACCENT_HOV, command=self._browse_dwg_org_asmb_pdf_dir).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(asmb_btns, text="✖", width=34, height=32, fg_color=_RED, hover_color=_RED_HOV, command=self._clear_dwg_org_asmb_pdf_dir).pack(side="left")
+
+        self.lbl_dwg_org_asmb_pdf_info = ctk.CTkLabel(
+            card_dirs,
+            text="ℹ️ Se detectează automat folderul «Desene Ansamblu» de lângă Excel sau poți alege manual folderul cu PDF-uri.",
+            font=("Segoe UI", 11), text_color=_TEXT_SEC
+        )
+        self.lbl_dwg_org_asmb_pdf_info.grid(row=4, column=1, sticky="w", padx=4, pady=(0, 4))
+
+        self._label(card_dirs, text="Folder Destinație:").grid(row=5, column=0, sticky="w", padx=(16, 6), pady=4)
+        self._entry(card_dirs, self.dwg_org_dest, placeholder_text="Folderul unde se vor crea folderele fiecărei piese / Desene Ansamblu...").grid(row=5, column=1, sticky="ew", padx=4, pady=4)
+        self._browse_btn(card_dirs, self._browse_dwg_org_dest).grid(row=5, column=2, padx=(4, 16), pady=4)
 
         # Card 3: Opțiuni & Butoane
         card_opts = self._make_card(scroll)
@@ -6041,12 +6061,16 @@ class UnifiedApp(ctk.CTk):
         ctk.CTkCheckBox(sub_opts, text="Curăță folderele goale la final (Mutare)", variable=self.dwg_org_clean_empty).pack(side="left")
 
         sub_types = ctk.CTkFrame(card_opts, fg_color="transparent")
-        sub_types.pack(fill="x", padx=16, pady=(0, 10))
+        sub_types.pack(fill="x", padx=16, pady=(0, 4))
         ctk.CTkLabel(sub_types, text="Tipuri de extras:", font=("Segoe UI", 12, "bold"), text_color=_TEXT_SEC).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(sub_types, text="Extrage NC", variable=self.dwg_org_include_nc, width=105).pack(side="left", padx=(0, 14))
         ctk.CTkCheckBox(sub_types, text="Extrage PDF Ansamblu", variable=self.dwg_org_include_pdf, width=165).pack(side="left", padx=(0, 14))
         ctk.CTkCheckBox(sub_types, text="Extrage DWG", variable=self.dwg_org_include_dwg, width=110).pack(side="left", padx=(0, 18))
-        ctk.CTkCheckBox(sub_types, text="Doar PDF-uri de ansamblu direct în Destinație (fără subfoldere pe piese)", variable=self.dwg_org_flat_pdf).pack(side="left")
+
+        sub_types2 = ctk.CTkFrame(card_opts, fg_color="transparent")
+        sub_types2.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkCheckBox(sub_types2, text="Creează și folder «Desene Ansamblu» în Destinație", variable=self.dwg_org_create_asmb_folder, font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0, 20))
+        ctk.CTkCheckBox(sub_types2, text="Doar PDF-uri de ansamblu (fără subfoldere pe piese)", variable=self.dwg_org_flat_pdf).pack(side="left")
 
         # Action Buttons
         btn_bar = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -6099,8 +6123,10 @@ class UnifiedApp(ctk.CTk):
         saved_xl = self.dwg_org_excel.get().strip()
         if saved_xl and os.path.isfile(saved_xl):
             self.after(200, lambda p=saved_xl: self._on_dwg_org_excel_selected(p))
-        elif self.dwg_org_filter_path.get().strip():
-            self.after(220, self._refresh_dwg_org_filter_preview)
+        else:
+            if self.dwg_org_filter_path.get().strip():
+                self.after(220, self._refresh_dwg_org_filter_preview)
+            self.after(240, self._refresh_dwg_org_asmb_pdf_info)
 
     def _browse_dwg_org_filter_excel(self):
         initial = self._get_browse_initial_dir("dest_based", self.dwg_org_filter_path.get() or self.dwg_org_excel.get())
@@ -6233,6 +6259,7 @@ class UnifiedApp(ctk.CTk):
             text_color=_GREEN[1]
         )
         self._refresh_dwg_org_filter_preview()
+        self._auto_detect_dwg_org_asmb_pdf_dir()
 
     def _on_dwg_org_excel_selected(self, filepath):
         try:
@@ -6251,7 +6278,62 @@ class UnifiedApp(ctk.CTk):
                 self.lbl_dwg_org_excel_info.configure(text=f"⚠ Eroare la citirea foii Excel: {e}", text_color=_RED[1])
 
     def _on_dwg_org_column_change(self, val=None):
-        pass
+        self._refresh_dwg_org_filter_preview()
+
+    def _auto_detect_dwg_org_asmb_pdf_dir(self):
+        curr = self.dwg_org_asmb_pdf_dir.get().strip()
+        if not curr or not os.path.isdir(curr):
+            detected = dwg_organizer.find_assembly_pdf_dir(
+                excel_path=self.dwg_org_excel.get().strip(),
+                source_dir=self.dwg_org_source.get().strip(),
+            )
+            if detected:
+                self.dwg_org_asmb_pdf_dir.set(detected)
+        self._refresh_dwg_org_asmb_pdf_info()
+
+    def _browse_dwg_org_asmb_pdf_dir(self):
+        initial = self._get_browse_initial_dir(
+            "dest_based",
+            self.dwg_org_asmb_pdf_dir.get() or os.path.dirname(self.dwg_org_excel.get().strip() or "") or self.dwg_org_source.get(),
+        )
+        d = filedialog.askdirectory(title="Selectează Folderul cu Desene de Ansamblu (PDF)", initialdir=initial)
+        if d:
+            self.dwg_org_asmb_pdf_dir.set(os.path.normpath(d))
+            self.save_settings()
+            self._refresh_dwg_org_asmb_pdf_info()
+
+    def _clear_dwg_org_asmb_pdf_dir(self):
+        self.dwg_org_asmb_pdf_dir.set("")
+        self.save_settings()
+        self._refresh_dwg_org_asmb_pdf_info()
+
+    def _refresh_dwg_org_asmb_pdf_info(self):
+        p = self.dwg_org_asmb_pdf_dir.get().strip()
+        if p:
+            if not os.path.isdir(p):
+                self.lbl_dwg_org_asmb_pdf_info.configure(text=f"⚠ Folderul Desene Ansamblu nu există: {p}", text_color=_RED[1])
+                return
+            cnt = len(dwg_organizer.scan_pdf_directory(p))
+            self.lbl_dwg_org_asmb_pdf_info.configure(
+                text=f"📋 Găsit în folderul de ansambluri: {cnt} desene PDF ({os.path.basename(p)})",
+                text_color=_GREEN[1] if cnt > 0 else _RED[1],
+            )
+            return
+        detected = dwg_organizer.find_assembly_pdf_dir(
+            excel_path=self.dwg_org_excel.get().strip(),
+            source_dir=self.dwg_org_source.get().strip(),
+        )
+        if detected:
+            cnt = len(dwg_organizer.scan_pdf_directory(detected))
+            self.lbl_dwg_org_asmb_pdf_info.configure(
+                text=f"📋 Auto-detectat ({cnt} PDF-uri): {detected}",
+                text_color=_GREEN[1],
+            )
+        else:
+            self.lbl_dwg_org_asmb_pdf_info.configure(
+                text="ℹ️ Se detectează automat folderul «Desene Ansamblu» de lângă Excel sau poți alege manual folderul cu PDF-uri.",
+                text_color=_TEXT_SEC,
+            )
 
     def _browse_dwg_org_source(self):
         initial = self._get_browse_initial_dir("dest_based", self.dwg_org_source.get())
@@ -6275,6 +6357,7 @@ class UnifiedApp(ctk.CTk):
                     text=f"⚠ Eroare la scanarea sursei: {e}",
                     text_color=_RED[1]
                 )
+            self._auto_detect_dwg_org_asmb_pdf_dir()
 
     def _browse_dwg_org_dest(self):
         initial = self._get_browse_initial_dir("dest_based", self.dwg_org_dest.get())
@@ -6289,14 +6372,36 @@ class UnifiedApp(ctk.CTk):
             return
         excel_p = self.dwg_org_excel.get().strip()
         src_p = self.dwg_org_source.get().strip()
+        asmb_pdf_dir = self.dwg_org_asmb_pdf_dir.get().strip()
         dst_p = self.dwg_org_dest.get().strip()
 
         if not excel_p or not os.path.isfile(excel_p):
-            messagebox.showwarning("Atenție", "Selectează un fișier Excel BOM valid.")
+            messagebox.showwarning("Atenție", "Selectează un fișier Excel BOM / Assembly Part List valid.")
             return
+
+        inc_nc = self.dwg_org_include_nc.get()
+        inc_pdf = self.dwg_org_include_pdf.get()
+        inc_dwg = self.dwg_org_include_dwg.get()
+        flat_pdf = self.dwg_org_flat_pdf.get()
+        create_asmb_folder = self.dwg_org_create_asmb_folder.get()
+        if not flat_pdf and not (inc_nc or inc_pdf or inc_dwg):
+            messagebox.showwarning("Atenție", "Bifează cel puțin un tip de fișier de extras (NC, PDF Ansamblu sau DWG).")
+            return
+
+        if asmb_pdf_dir and not os.path.isdir(asmb_pdf_dir):
+            messagebox.showwarning("Atenție", f"Folderul Desene Ansamblu nu există:\n{asmb_pdf_dir}")
+            return
+
+        pdf_only_mode = flat_pdf or (inc_pdf and not inc_nc and not inc_dwg)
+        resolved_pdf_check = dwg_organizer.find_assembly_pdf_dir(
+            excel_path=excel_p, source_dir=src_p, explicit_dir=asmb_pdf_dir
+        )
         if not src_p or not os.path.isdir(src_p):
-            messagebox.showwarning("Atenție", "Selectează un folder Sursă valid.")
-            return
+            if pdf_only_mode and resolved_pdf_check:
+                src_p = ""
+            else:
+                messagebox.showwarning("Atenție", "Selectează un folder Sursă valid (sau folderul Desene Ansamblu dacă extragi doar PDF-uri).")
+                return
         if not dst_p:
             messagebox.showwarning("Atenție", "Selectează un folder Destinație.")
             return
@@ -6322,14 +6427,7 @@ class UnifiedApp(ctk.CTk):
             messagebox.showwarning("Atenție", f"Calea filtrului nu există:\n{filter_p}")
             return
 
-        inc_nc = self.dwg_org_include_nc.get()
-        inc_pdf = self.dwg_org_include_pdf.get()
-        inc_dwg = self.dwg_org_include_dwg.get()
-        flat_pdf = self.dwg_org_flat_pdf.get()
-        if not flat_pdf and not (inc_nc or inc_pdf or inc_dwg):
-            messagebox.showwarning("Atenție", "Bifează cel puțin un tip de fișier de extras (NC, PDF Ansamblu sau DWG).")
-            return
-
+        self.save_settings()
         self.dwg_org_running = True
         self.dwg_org_cancel = False
         self.btn_dwg_org_run.configure(state="disabled", text="⏳ Se organizează...")
@@ -6369,6 +6467,8 @@ class UnifiedApp(ctk.CTk):
                     include_pdf=inc_pdf,
                     include_dwg=inc_dwg,
                     flat_pdf_only=flat_pdf,
+                    pdf_source_dir=asmb_pdf_dir or None,
+                    create_asmb_folder=create_asmb_folder,
                 )
                 if self.dwg_org_cancel or summary_stats is None:
                     res_payload = {"cancelled": True, "report_path": report_path}
@@ -6380,6 +6480,7 @@ class UnifiedApp(ctk.CTk):
                         "nc_transferred": sum(len(r.get("nc_found", [])) for r in (results_list or [])),
                         "pdf_transferred": sum(len(r.get("pdf_found", [])) for r in (results_list or [])),
                         "dwg_transferred": sum(len(r.get("dwg_found", [])) for r in (results_list or [])),
+                        "asmb_folder_pdfs": summary_stats.get("asmb_folder_pdfs", 0),
                         "total_files_transferred": summary_stats.get("total_files_transferred", 0),
                     }
             except Exception as e:
@@ -6430,6 +6531,8 @@ class UnifiedApp(ctk.CTk):
         elif res.get("error"):
             messagebox.showerror("Eroare", f"A apărut o eroare la organizare:\n{res['error']}")
         else:
+            asmb_cnt = res.get("asmb_folder_pdfs", 0)
+            asmb_line = f"• Desene în folder «Desene Ansamblu»: {asmb_cnt}\n" if asmb_cnt else ""
             messagebox.showinfo(
                 "Organizare Finalizată",
                 f"Organizarea pe piese a fost finalizată cu succes!\n\n"
@@ -6437,6 +6540,7 @@ class UnifiedApp(ctk.CTk):
                 f"• NC-uri transferate: {res.get('nc_transferred', 0)}\n"
                 f"• PDF-uri asociate: {res.get('pdf_transferred', 0)}\n"
                 f"• DWG-uri asociate: {res.get('dwg_transferred', 0)}\n"
+                f"{asmb_line}"
                 f"• Total fișiere transferate: {res.get('total_files_transferred', 0)}\n\n"
                 f"Folder Destinație:\n{dst}"
             )

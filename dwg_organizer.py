@@ -478,7 +478,73 @@ def extract_filter_parts(filter_path):
     }
 
 
-def scan_source_files(source_dir):
+def find_assembly_pdf_dir(excel_path=None, source_dir=None, explicit_dir=None):
+    """Locate an extracted assembly drawings folder ('Desene Ansamblu' / 'Assembly Drawings') with PDFs."""
+    if explicit_dir:
+        exp_s = str(explicit_dir).strip()
+        if exp_s and os.path.isdir(exp_s):
+            return os.path.normpath(exp_s)
+
+    target_names = ("desene ansamblu", "desene_ansamblu", "assembly drawings", "assembly_drawings", "ansambluri")
+    base_parents = []
+    if excel_path:
+        ep = os.path.dirname(os.path.abspath(str(excel_path).strip()))
+        if ep:
+            base_parents.append(ep)
+    if source_dir:
+        sp = os.path.abspath(str(source_dir).strip())
+        if sp:
+            base_parents.append(sp)
+            p1 = os.path.dirname(sp)
+            p2 = os.path.dirname(p1) if p1 else ""
+            if p1:
+                base_parents.append(p1)
+            if p2:
+                base_parents.append(p2)
+
+    seen_dirs = set()
+    for bp in base_parents:
+        if not bp or not os.path.isdir(bp):
+            continue
+        norm_bp = os.path.normcase(os.path.abspath(bp))
+        if norm_bp in seen_dirs:
+            continue
+        seen_dirs.add(norm_bp)
+        try:
+            for entry in os.scandir(bp):
+                if entry.is_dir() and entry.name.strip().lower() in target_names:
+                    has_pdf = any(
+                        f.lower().endswith(".pdf")
+                        for _, _, files in os.walk(entry.path, followlinks=True)
+                        for f in files
+                    )
+                    if has_pdf:
+                        return os.path.normpath(entry.path)
+        except OSError:
+            pass
+    return ""
+
+
+def scan_pdf_directory(pdf_dir):
+    """Walk a dedicated assembly drawings folder and return PDF records marked from_asmb_dir=True."""
+    pdf_files = []
+    if not pdf_dir or not os.path.isdir(pdf_dir):
+        return pdf_files
+    for root, _, files in os.walk(pdf_dir, followlinks=True):
+        for f in sorted(files):
+            if os.path.splitext(f)[1].lower() == ".pdf":
+                full_path = os.path.join(root, f)
+                pdf_files.append({
+                    "filename": f,
+                    "path": full_path,
+                    "ext": ".pdf",
+                    "stem": os.path.splitext(f)[0],
+                    "from_asmb_dir": True,
+                })
+    return pdf_files
+
+
+def scan_source_files(source_dir, skip_dirs=None):
     """
     Walk source directory recursively and index NC, PDF, and DWG files.
     """
@@ -486,8 +552,22 @@ def scan_source_files(source_dir):
     pdf_files = []
     dwg_files = []
     thicknesses_found = set()
+    if not source_dir or not os.path.isdir(source_dir):
+        return {
+            "nc_files": nc_files,
+            "pdf_files": pdf_files,
+            "dwg_files": dwg_files,
+            "thicknesses": [],
+        }
+
+    skip_norm = {os.path.normcase(os.path.abspath(d)) for d in (skip_dirs or ()) if d}
 
     for root, dirs, files in os.walk(source_dir, followlinks=True):
+        if skip_norm:
+            dirs[:] = [
+                d for d in dirs
+                if os.path.normcase(os.path.abspath(os.path.join(root, d))) not in skip_norm
+            ]
         for f in files:
             full_path = os.path.join(root, f)
             ext = os.path.splitext(f)[1].lower()
@@ -657,12 +737,15 @@ def run_pipeline(
     include_pdf=True,
     include_dwg=True,
     flat_pdf_only=False,
+    pdf_source_dir=None,
+    create_asmb_folder=False,
 ):
     """
     Full pipeline runner.
     Calls progress_callback(fraction, current_message) and log_callback(msg, level).
-    Supports optional filtering by part/cheson list (Excel or folder), selective
-    file-type extraction (NC / PDF / DWG), existing subfolder reuse, and flat PDF mode.
+    Supports optional filtering by part/cheson list (Excel or folder), dedicated
+    extracted assembly PDF folder (Desene Ansamblu), collective output subfolder,
+    selective file-type extraction (NC / PDF / DWG), and flat PDF mode.
     Returns (summary_dict, results_list, report_path).
     """
     def log(msg, level="INFO"):
@@ -688,19 +771,39 @@ def run_pipeline(
     eff_pdf = True if flat_pdf_only else bool(include_pdf)
     eff_dwg = False if flat_pdf_only else bool(include_dwg)
 
+    resolved_pdf_dir = ""
+    if eff_pdf:
+        resolved_pdf_dir = find_assembly_pdf_dir(
+            excel_path=excel_path,
+            source_dir=source_dir,
+            explicit_dir=pdf_source_dir,
+        )
+    is_separate_pdf_dir = bool(resolved_pdf_dir) and (
+        not source_dir or _norm_abs(resolved_pdf_dir) != _norm_abs(source_dir)
+    )
+
     log("=" * 60, "INFO")
     log("🚀 Inițializare proces organizare piese...", "INFO")
     log(f"📄 Fișier Excel BOM: {os.path.basename(excel_path)} (Foaia: {sheet_name})", "INFO")
     if filter_path:
         log(f"🎯 Filtru Piese/Chesoane: {filter_path}", "INFO")
-    log(f"📁 Folder Sursă: {source_dir}", "INFO")
+    log(f"📁 Folder Sursă (NC/DWG): {source_dir or '(Neconfigurat - doar PDF Ansamblu)'}", "INFO")
+    if resolved_pdf_dir:
+        src_kind = "selectat" if (pdf_source_dir and str(pdf_source_dir).strip()) else "detectat automat"
+        log(f"📋 Folder Desene Ansamblu (PDF, {src_kind}): {resolved_pdf_dir}", "INFO")
     log(f"📁 Folder Destinație: {dest_dir}", "INFO")
     log(f"⚙️ Mod Operare: {'MUTARE (Move)' if mode == 'move' else 'COPIERE (Copy)'}", "INFO")
     if flat_pdf_only:
-        log("📄 Mod Special: Doar PDF-uri de ansamblu direct în Destinație (plat)", "INFO")
+        log(
+            "📄 Mod Special: Doar PDF-uri de ansamblu direct în "
+            + ("Destinație/Desene Ansamblu" if create_asmb_folder else "Destinație (plat)"),
+            "INFO",
+        )
     else:
         active_types = [t for t, en in (("NC", eff_nc), ("PDF Ansamblu", eff_pdf), ("DWG", eff_dwg)) if en]
         log(f"📦 Tipuri active: {', '.join(active_types) if active_types else 'Niciunul'}", "INFO")
+        if eff_pdf and create_asmb_folder:
+            log("📂 Se va crea și folderul centralizat «Desene Ansamblu» în Destinație.", "INFO")
         if eff_dwg:
             log(f"🔍 Suport Variații DWG (T, L, C): {'DA' if allow_variations else 'NU'}", "INFO")
     log("=" * 60, "INFO")
@@ -752,17 +855,41 @@ def run_pipeline(
     if is_cancelled and is_cancelled():
         return None, None, None
 
-    # 2. Scan source directory
-    set_progress(0.15, "Scanare folder sursă (NC, PDF, DWG)...")
-    src_data = scan_source_files(source_dir)
+    # 2. Scan source directory + dedicated assembly PDF directory
+    set_progress(0.15, "Scanare surse (NC, PDF Ansamblu, DWG)...")
+    asmb_out_dir = os.path.join(dest_dir, "Desene Ansamblu")
+    skip_dirs = [asmb_out_dir] if (is_separate_pdf_dir and create_asmb_folder) else None
+    src_data = scan_source_files(source_dir, skip_dirs=skip_dirs) if source_dir else {
+        "nc_files": [], "pdf_files": [], "dwg_files": [], "thicknesses": []
+    }
     nc_files = src_data["nc_files"]
-    pdf_files = src_data["pdf_files"]
     dwg_files = src_data["dwg_files"]
     thk_list = src_data["thicknesses"]
 
-    log(f"✔️ Sursă scanată:", "SUCCESS")
+    pdf_files = []
+    seen_pdf_paths = set()
+    if eff_pdf and resolved_pdf_dir:
+        extra_pdfs = scan_pdf_directory(resolved_pdf_dir)
+        for epf in extra_pdfs:
+            np_path = _norm_abs(epf["path"])
+            if not is_separate_pdf_dir:
+                epf = {**epf, "from_asmb_dir": False}
+            if np_path not in seen_pdf_paths:
+                seen_pdf_paths.add(np_path)
+                pdf_files.append(epf)
+    for spf in src_data["pdf_files"]:
+        np_path = _norm_abs(spf["path"])
+        if np_path not in seen_pdf_paths:
+            seen_pdf_paths.add(np_path)
+            pdf_files.append(spf)
+
+    log("✔️ Surse scanate:", "SUCCESS")
     log(f"   • {len(nc_files)} fișiere NC (.nc, .nc1)", "INFO")
-    log(f"   • {len(pdf_files)} desene PDF (ansambluri)", "INFO")
+    log(
+        f"   • {len(pdf_files)} desene PDF (ansambluri)"
+        + (" [copiere protejată din Folder Desene Ansamblu]" if is_separate_pdf_dir else ""),
+        "INFO",
+    )
     log(f"   • {len(dwg_files)} piese DWG în {len(thk_list)} subfoldere de grosime ({', '.join(thk_list) if thk_list else 'niciunul'})", "INFO")
 
     if is_cancelled and is_cancelled():
@@ -770,11 +897,16 @@ def run_pipeline(
 
     # 3. Process parts
     os.makedirs(dest_dir, exist_ok=True)
+    if eff_pdf and create_asmb_folder:
+        os.makedirs(asmb_out_dir, exist_ok=True)
+
     existing_dest_dirs = {}
     if not flat_pdf_only:
         try:
             for entry in os.scandir(dest_dir):
                 if entry.is_dir():
+                    if entry.name.strip().lower() == "desene ansamblu":
+                        continue
                     cl_dir = clean_alphanumeric(entry.name)
                     if cl_dir and cl_dir not in existing_dest_dirs:
                         existing_dest_dirs[cl_dir] = entry.name
@@ -785,6 +917,7 @@ def run_pipeline(
     files_to_delete_from_source = set()
     copied_dest_paths = set()
     copied_flat_pdfs = set()
+    copied_asmb_folder_pdfs = set()
     total_files_transferred = 0
 
     complete_parts = 0
@@ -803,8 +936,8 @@ def run_pipeline(
         set_progress(curr_prog, f"Procesare piesa ({idx+1}/{total_parts}): {part}")
 
         if flat_pdf_only:
-            folder_name = "(Direct în Destinație)"
-            part_dest_dir = dest_dir
+            folder_name = "(Desene Ansamblu)" if create_asmb_folder else "(Direct în Destinație)"
+            part_dest_dir = asmb_out_dir if create_asmb_folder else dest_dir
         else:
             cl_part = clean_alphanumeric(part)
             folder_name = existing_dest_dirs.get(cl_part) or sanitize_folder_name(part)
@@ -835,28 +968,50 @@ def run_pipeline(
 
         # B. PDF Match for each associated assembly
         if eff_pdf:
+            matched_pdf_names_for_part = set()
             for asmb in asmbs:
                 for pf in pdf_files:
                     if is_assembly_match(pf["filename"], asmb):
-                        if pf["filename"] not in part_pdf_found:
-                            part_pdf_found.append(pf["filename"])
+                        fn_lower = pf["filename"].lower()
+                        if fn_lower in matched_pdf_names_for_part:
+                            continue
+                        matched_pdf_names_for_part.add(fn_lower)
+                        part_pdf_found.append(pf["filename"])
+
                         dst_file = os.path.join(part_dest_dir, pf["filename"])
                         norm_dst = _norm_abs(dst_file)
                         copied_dest_paths.add(norm_dst)
-                        if flat_pdf_only and norm_dst in copied_flat_pdfs:
-                            continue
-                        if _is_same_file(pf["path"], dst_file):
-                            if flat_pdf_only:
-                                copied_flat_pdfs.add(norm_dst)
-                            continue
-                        try:
-                            shutil.copy2(pf["path"], dst_file)
-                            files_to_delete_from_source.add(pf["path"])
-                            total_files_transferred += 1
-                            if flat_pdf_only:
-                                copied_flat_pdfs.add(norm_dst)
-                        except Exception as e:
-                            log(f"❌ Eroare la copiere PDF '{pf['filename']}': {e}", "ERROR")
+
+                        skip_part_copy = flat_pdf_only and (norm_dst in copied_flat_pdfs)
+                        if not skip_part_copy:
+                            if _is_same_file(pf["path"], dst_file):
+                                if flat_pdf_only:
+                                    copied_flat_pdfs.add(norm_dst)
+                            else:
+                                try:
+                                    shutil.copy2(pf["path"], dst_file)
+                                    if not pf.get("from_asmb_dir"):
+                                        files_to_delete_from_source.add(pf["path"])
+                                    total_files_transferred += 1
+                                    if flat_pdf_only:
+                                        copied_flat_pdfs.add(norm_dst)
+                                except Exception as e:
+                                    log(f"❌ Eroare la copiere PDF '{pf['filename']}': {e}", "ERROR")
+
+                        if create_asmb_folder:
+                            asmb_dst = os.path.join(asmb_out_dir, pf["filename"])
+                            norm_asmb_dst = _norm_abs(asmb_dst)
+                            copied_dest_paths.add(norm_asmb_dst)
+                            if norm_asmb_dst not in copied_asmb_folder_pdfs:
+                                copied_asmb_folder_pdfs.add(norm_asmb_dst)
+                                if not _is_same_file(pf["path"], asmb_dst):
+                                    try:
+                                        shutil.copy2(pf["path"], asmb_dst)
+                                        if not pf.get("from_asmb_dir"):
+                                            files_to_delete_from_source.add(pf["path"])
+                                        total_files_transferred += 1
+                                    except Exception as e:
+                                        log(f"❌ Eroare la copiere PDF în Desene Ansamblu '{pf['filename']}': {e}", "ERROR")
 
         # C. DWG Match in thickness subfolders
         if eff_dwg:
@@ -959,11 +1114,13 @@ def run_pipeline(
         log(f"✔️ S-au șters {del_count} fișiere din sursă.", "SUCCESS")
 
         # Clean empty directories in source
-        if clean_empty_folders:
+        if clean_empty_folders and source_dir and os.path.isdir(source_dir):
             set_progress(0.92, "Curățare foldere goale...")
             removed_dirs = 0
             for root, dirs, files in os.walk(source_dir, topdown=False):
-                if root == source_dir:
+                if _norm_abs(root) == _norm_abs(source_dir):
+                    continue
+                if eff_pdf and create_asmb_folder and _norm_abs(root) == _norm_abs(asmb_out_dir):
                     continue
                 try:
                     if not os.listdir(root):
@@ -983,7 +1140,9 @@ def run_pipeline(
         "partial_parts": partial_parts,
         "missing_parts": missing_parts,
         "mode": "Mutare" if mode == "move" else "Copiere",
-        "total_files_transferred": total_files_transferred
+        "total_files_transferred": total_files_transferred,
+        "asmb_folder_pdfs": len(copied_asmb_folder_pdfs),
+        "asmb_folder_path": asmb_out_dir if (create_asmb_folder and copied_asmb_folder_pdfs) else None,
     }
 
     try:
