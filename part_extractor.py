@@ -390,7 +390,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.12.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1189,7 +1189,7 @@ class UnifiedApp(ctk.CTk):
         self.cheson_strip_residuals = ctk.BooleanVar(value=True)
         self.cheson_override_length = ctk.StringVar(value="")
         self.cheson_override_web_h = ctk.StringVar(value="")
-        self.cheson_use_layers = ctk.BooleanVar(value=True)
+        self.cheson_use_layers = ctk.BooleanVar(value=False)
         self.cheson_include_marking = ctk.BooleanVar(value=False)
         self.cheson_organize_thickness = ctk.BooleanVar(value=True)
         self.cheson_recursive = ctk.BooleanVar(value=False)
@@ -1370,7 +1370,7 @@ class UnifiedApp(ctk.CTk):
             self.cheson_strip_residuals.set(s.get("cheson_strip_residuals", True))
             self.cheson_override_length.set(s.get("cheson_override_length", ""))
             self.cheson_override_web_h.set(s.get("cheson_override_web_h", ""))
-            self.cheson_use_layers.set(s.get("cheson_use_layers", True))
+            self.cheson_use_layers.set(s.get("cheson_use_extra_layers", False))
             self.cheson_include_marking.set(s.get("cheson_include_marking", False))
             self.cheson_organize_thickness.set(s.get("cheson_organize_thickness", True))
             self.cheson_recursive.set(s.get("cheson_recursive", False))
@@ -1558,7 +1558,7 @@ class UnifiedApp(ctk.CTk):
             "cheson_strip_residuals": self.cheson_strip_residuals.get(),
             "cheson_override_length": self.cheson_override_length.get(),
             "cheson_override_web_h": self.cheson_override_web_h.get(),
-            "cheson_use_layers": self.cheson_use_layers.get(),
+            "cheson_use_extra_layers": self.cheson_use_layers.get(),
             "cheson_include_marking": self.cheson_include_marking.get(),
             "cheson_organize_thickness": self.cheson_organize_thickness.get(),
             "cheson_recursive": self.cheson_recursive.get(),
@@ -7365,7 +7365,7 @@ class UnifiedApp(ctk.CTk):
         # Row 6: Compact checkboxes
         chk_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
         chk_frame.grid(row=6, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
-        ctk.CTkCheckBox(chk_frame, text="Layere Nesting (CUT_OUTER/INNER)", variable=self.cheson_use_layers).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(chk_frame, text="Layere extra (implicit: Layer 0)", variable=self.cheson_use_layers).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Text Marcare (MARKING)", variable=self.cheson_include_marking).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Subfoldere Grosimi (T8/T25)", variable=self.cheson_organize_thickness).pack(side="left", padx=(0, 12))
         ctk.CTkCheckBox(chk_frame, text="Recursiv (.nc1)", variable=self.cheson_recursive).pack(side="left", padx=(0, 12))
@@ -7588,13 +7588,14 @@ class UnifiedApp(ctk.CTk):
                 override_web_height_mm=ovr_web_h,
                 recursive=self.cheson_recursive.get(),
                 strip_residual_fragments=self.cheson_strip_residuals.get(),
+                use_nesting_layers=self.cheson_use_layers.get(),
             )
         except Exception as exc:
             messagebox.showerror("Eroare Previzualizare", str(exc))
             return
 
         self.cheson_log_box.delete("1.0", "end")
-        self.cheson_log("🔍 PREVIZUALIZARE & VERIFICARE COTE GABARIT (±0.001 mm)")
+        self.cheson_log("🔍 PREVIZUALIZARE, REVERIFICARE POST-DESENARE & SIMULARE 3D")
         if prev["a_drawing"]:
             self.cheson_log(f"📋 A-drawing STYKKLISTE: {prev['a_drawing']} ({prev['bom_assembly_id']}, {prev['bom_rows_count']} repere)")
         else:
@@ -7604,7 +7605,9 @@ class UnifiedApp(ctk.CTk):
 
         for item in prev["nc1_items"]:
             v = item["verification"]
-            badge = "✅ PASS" if v["passed"] else "⚠ CHECK"
+            pda = item.get("post_draw_audit") or {}
+            s3 = pda.get("sim_3d") or {}
+            badge = "✅ PASS" if (v["passed"] and pda.get("passed", True)) else "⚠ CHECK"
             self.cheson_log(f"\n🧩 {item['file']} | {item['profile']}")
             self.cheson_log(f"   Tip detectat : {v['detected_type_label']}")
             self.cheson_log(
@@ -7614,8 +7617,23 @@ class UnifiedApp(ctk.CTk):
                 f"   Secțiune     : H={v['h_assembled_mm']:.3f}/{v['h_target_mm']:.3f} mm | B={v['w_assembled_mm']:.3f}/{v['w_target_mm']:.3f} mm"
             )
             self.cheson_log(
-                f"   Audit        : {badge} | Eroare max gabarit = {v['max_gabarit_error_mm']:.4f} mm | Contact talpă-laterală = {v['flange_web_contact_error_mm']:.4f} mm"
+                f"   Audit        : {badge} | Eroare max gabarit = {v['max_gabarit_error_mm']:.4f} mm | Layer 0 pur = {pda.get('all_layer_zero')}"
             )
+            if s3:
+                iou_str = ", ".join(f"{k}={val:.2f}%" for k, val in (s3.get("face_iou_pct") or {}).items())
+                mass_s = (
+                    f"{s3['mass_3d_kg']:.2f} kg (BOM {s3['mass_bom_kg']:.2f} kg)"
+                    if s3.get("mass_bom_kg")
+                    else f"{s3['mass_3d_kg']:.2f} kg"
+                )
+                self.cheson_log(
+                    f"   Simulare 3D  : {s3['l_3d_mm']:.3f} × {s3['b_3d_mm']:.3f} × {s3['h_3d_mm']:.3f} mm | "
+                    f"Coliziuni={s3['max_interference_mm']:.3f} mm | Fidelitate={s3['overall_3d_similarity_pct']:.2f}% ({iou_str}) | "
+                    f"Găuri 3D={s3['holes_3d_matched']}/{s3['holes_3d_expected']} | Masă={mass_s}"
+                )
+            if pda.get("pdf_drawing_name") and pda.get("pdf_dims_confirmed"):
+                dims_s = ", ".join(f"{d:g}" for d in pda["pdf_dims_confirmed"][:10])
+                self.cheson_log(f"   Cote PDF OK  : [{dims_s}]")
             for pl in item["plates"]:
                 res_msg = f" | 🧹 {pl['removed_residuals']} reziduuri eliminate" if pl.get("removed_residuals", 0) > 0 else ""
                 self.cheson_log(
@@ -7704,12 +7722,23 @@ class UnifiedApp(ctk.CTk):
         self.cheson_progress.set(1.0)
         dest_dir = res["dest_dir"]
         self.cheson_last_dest_dir = dest_dir
+        audits = res.get("post_draw_audits") or []
+        audit_line = ""
+        if audits:
+            passed_cnt = sum(1 for a in audits if a.get("passed"))
+            avg_sim = sum((a.get("sim_3d") or {}).get("overall_3d_similarity_pct", 0.0) for a in audits) / len(audits)
+            all_l0 = all(a.get("all_layer_zero") for a in audits)
+            audit_line = (
+                f"• Reverificare Post-Desenare + Sim 3D: {passed_cnt}/{len(audits)} PASS "
+                f"(Fidelitate 3D {avg_sim:.2f}%, Layer 0={'OK' if all_l0 else 'Extra'})\n"
+            )
         summary = (
             f"Extragere finalizată!\n\n"
             f"• Piese cheson (.nc1): {res['plates_generated']}\n"
             f"• W-drawings convertite: {res['w_drawings_converted']}\n"
             f"• Plăci BOM sintetizate: {res['bom_plates_generated']}\n"
-            f"• Total fișiere CAD generate: {len(res['files'])}\n\n"
+            f"• Total fișiere CAD generate: {len(res['files'])}\n"
+            f"{audit_line}\n"
             f"Folder destinație:\n{dest_dir}"
         )
         if res.get("errors"):

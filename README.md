@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.11.3)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.3/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.11.3)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.12.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.12.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.12.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.11.3)](https://github.com/DMan1906/SteelSync/releases/download/v1.11.3/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.12.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.12.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,11 +16,13 @@
 
 ## 🚀 Funcționalități
 
-- **📦 Cheson / HSQ Extractor (Actualizat în v1.11.3 — Găuri Ovale/Alungite DSTV `BO`, Calibrare 3D Skew & Gabarit Fix ±0.001 mm)**:
+- **📦 Cheson / HSQ Extractor (Actualizat în v1.12.0 — Layer `0` Default, Reverificare Post-Desenare & Simulare Asamblare 3D)**:
   - **Auto-Detecție pentru toate cele 3 tipuri reale de secțiune**:
     1. **Tip 1 (Cheson cu Talpă):** talpă lată (`T`) + capac între inimi (`C`) + 2 laterale cu lățimea exactă `H - tf - tw`.
     2. **Tip 2 (Cheson fără Talpă):** 2 capace între inimi (`C1`, `C2`) + 2 laterale cu lățimea `H - 2*tw`.
     3. **Tip 3 (Cheson Dublu cu Talpă la Mijloc):** 2 capace (`C1`, `C2`) + 4 laterale (`L1..L4`) cu retragere `tw`.
+  - **Layer `0` Implicit (fără layere extra):** toate contururile exterioare, interioare, găurile și marcajele sunt generate curat pe layer-ul nativ `0` (opțiunea de layere separate rămâne disponibilă opțional).
+  - **Reverificare Automată Post-Desenare (`DXF` recitit vs `.nc1` & desen `PDF`) + Simulare Asamblare 3D Calculată:** după generarea fiecărui fișier DXF, motorul reciteste geometria de pe disc, verifică toate cotele de gabarit, originile, contururile închise, forma și poziția găurilor/sloturilor față de `.nc1` și cotele din `A-drawing.pdf`/`STYKKLISTE`, apoi reasamblează virtual piesele în spațiu 3D verificând dimensiunile `L×B×H`, coliziunile (`0.000 mm`), rosturile de sudură, fidelitatea geometrică 3D vs `.nc1` (%) și masa netă (`kg`).
   - **Suport Complet Găuri Alungite / Ovale (`BO ... l`) și Rotunde:** citește și exportă nativ ca `LWPOLYLINE` închise cu arce (`bulge`) găurile ovale verticale, orizontale, rotite sau decupajele dreptunghiulare cu colțuri rotunjite din DSTV `.nc1` (inclusiv oglindire exactă pe tălpi/inimi).
   - **Calibrare Exactă pentru Capete Oblice (3D Skew) & Trepte + Aliniere Găuri:** conservă cota maximă pe laterala lungă (`0.00`/`L_gabarit`), aliniază laterala scurtă la muchia interioară a capacului (`tw·tan(θ)`), păstrează exact pasul treptelor de capăt (ex. `70.710 mm` la `45°`) și sincronizează poziția găurilor (`BO`) la `±0.001 mm`.
   - **Eliminare Automată Fragmente Reziduale (`≤ grosime tablă`):** curăță automat mustățile/urechile subțiri de tablă rămase la capetele decupajelor de pe toată înălțimea chesonului (când fâșia are lățimea ≤ `tw`/`tf`), cu opțiune de activare/dezactivare direct în tab.

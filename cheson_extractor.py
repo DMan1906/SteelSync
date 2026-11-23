@@ -318,6 +318,87 @@ class VerificationReport:
 
 
 @dataclass
+class DrawnHoleInfo:
+    kind: str  # circle | slot | rect_slot
+    cx: float
+    cy: float
+    width_mm: float
+    length_mm: float
+    angle_deg: float
+    area_mm2: float
+
+
+@dataclass
+class DrawnDxfAudit:
+    plate_name: str
+    role: str
+    face: str
+    thickness_mm: float
+    dxf_errors: int
+    entity_layers: list[str]
+    extra_layers_created: list[str]
+    layer_zero_ok: bool
+    outer_closed: bool
+    origin_err_mm: float
+    length_mm: float
+    width_mm: float
+    outer_area_mm2: float
+    net_area_mm2: float
+    vertex_count: int
+    holes_drawn: list[DrawnHoleInfo]
+    inners_count: int
+    dim_err_mm: float
+    hole_pos_err_mm: float
+    hole_dim_err_mm: float
+    holes_matched: int
+    holes_expected: int
+    passed: bool
+    issues: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Sim3DReport:
+    l_3d_mm: float
+    b_3d_mm: float
+    h_3d_mm: float
+    err_l_mm: float
+    err_b_mm: float
+    err_h_mm: float
+    max_interference_mm: float
+    interference_pairs: list[str]
+    max_seam_gap_mm: float
+    seam_notes: list[str]
+    face_iou_pct: dict[str, float]
+    overall_3d_similarity_pct: float
+    holes_3d_expected: int
+    holes_3d_matched: int
+    max_hole_3d_err_mm: float
+    hole_shape_mismatches: int
+    mass_3d_kg: float
+    mass_bom_kg: Optional[float]
+    mass_diff_pct: Optional[float]
+    passed: bool
+    issues: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PostDrawVerificationReport:
+    piece_id: str
+    plates_audited: int
+    all_dxf_clean: bool
+    all_layer_zero: bool
+    nc1_max_dim_err_mm: float
+    nc1_max_hole_err_mm: float
+    pdf_drawing_name: Optional[str]
+    pdf_bom_length_err_mm: Optional[float]
+    pdf_dims_confirmed: list[float]
+    sim_3d: Sim3DReport
+    plate_audits: list[DrawnDxfAudit]
+    passed: bool
+    issues: list[str] = field(default_factory=list)
+
+
+@dataclass
 class BomRow:
     pos_no: str
     littra: str
@@ -2419,7 +2500,7 @@ def _add_slot_lwpolyline(msp, hole: DSTVHole, layer: str) -> None:
 def write_plate_dxf(
     plate: ExtractedPlate,
     output_path: str | Path,
-    use_nesting_layers: bool = True,
+    use_nesting_layers: bool = False,
     include_marking: bool = False,
     marking_height: float = 20.0,
 ) -> Path:
@@ -2479,6 +2560,957 @@ def write_plate_dxf(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc.saveas(str(out_path))
     return out_path
+
+
+# ─── Post-Draw DXF Re-Verification & 3D Virtual Assembly Simulation ───────────
+
+def _lwpolyline_geometric_info(
+    lwpoly,
+) -> tuple[Ring, tuple[float, float, float, float], float, Optional[DrawnHoleInfo]]:
+    """Compute exact vertices, bulge-aware bbox & area, and classify hole LWPOLYLINEs."""
+    raw = [(float(p[0]), float(p[1]), float(p[2])) for p in lwpoly.get_points("xyb")]
+    n = len(raw)
+    ring: Ring = [(p[0], p[1]) for p in raw]
+    if n < 2:
+        return ring, (0.0, 0.0, 0.0, 0.0), 0.0, None
+
+    xs = [p[0] for p in raw]
+    ys = [p[1] for p in raw]
+    shoelace = 0.0
+    seg_area = 0.0
+    bulges: list[tuple[int, float]] = []
+
+    for i in range(n):
+        x1, y1, b = raw[i]
+        x2, y2, _ = raw[(i + 1) % n]
+        shoelace += x1 * y2 - x2 * y1
+        if abs(b) > 1e-6:
+            bulges.append((i, b))
+            dx, dy = x2 - x1, y2 - y1
+            chord = math.hypot(dx, dy)
+            if chord > 1e-8:
+                theta = 4.0 * math.atan(b)
+                tan_half = math.tan(0.5 * theta)
+                sin_half = math.sin(0.5 * theta)
+                r = abs(chord / (2.0 * sin_half)) if abs(sin_half) > 1e-9 else 0.0
+                if r > 0.0:
+                    seg_area += 0.5 * (r * r) * (theta - math.sin(theta))
+                    d_center = (chord / (2.0 * tan_half)) if abs(tan_half) > 1e-9 else 0.0
+                    nx, ny = -dy / chord, dx / chord
+                    cx = 0.5 * (x1 + x2) + d_center * nx
+                    cy = 0.5 * (y1 + y2) + d_center * ny
+                    a1 = math.atan2(y1 - cy, x1 - cx)
+                    for c_ang in (0.0, 0.5 * math.pi, math.pi, 1.5 * math.pi):
+                        if theta > 0.0:
+                            rel = (c_ang - a1) % (2.0 * math.pi)
+                            inside_arc = 1e-7 < rel < theta - 1e-7
+                        else:
+                            rel = (a1 - c_ang) % (2.0 * math.pi)
+                            inside_arc = 1e-7 < rel < (-theta) - 1e-7
+                        if inside_arc:
+                            xs.append(cx + r * math.cos(c_ang))
+                            ys.append(cy + r * math.sin(c_ang))
+
+    # Signed area: shoelace + 2*seg_area (both multiplied by 0.5)
+    area = abs(0.5 * shoelace + seg_area)
+    bbox = (min(xs), min(ys), max(xs), max(ys))
+    cx_box = 0.5 * (bbox[0] + bbox[2])
+    cy_box = 0.5 * (bbox[1] + bbox[3])
+
+    hole_info: Optional[DrawnHoleInfo] = None
+    if lwpoly.closed and n == 4 and len(bulges) == 2 and all(abs(abs(b) - 1.0) < 0.02 for _, b in bulges):
+        # 1D oval slot: 2 semicircular end arcs (bulge +-1.0) + 2 parallel straight sides
+        b_idx0 = bulges[0][0]
+        p_a = raw[b_idx0]
+        p_b = raw[(b_idx0 + 1) % 4]
+        width = math.hypot(p_b[0] - p_a[0], p_b[1] - p_a[1])
+        straight_segs = [
+            (raw[i], raw[(i + 1) % 4])
+            for i in range(4)
+            if abs(raw[i][2]) < 1e-4
+        ]
+        if straight_segs:
+            s0, s1 = straight_segs[0]
+            sdx, sdy = s1[0] - s0[0], s1[1] - s0[1]
+            span = math.hypot(sdx, sdy)
+            ang = math.degrees(math.atan2(sdy, sdx)) % 180.0
+            hole_info = DrawnHoleInfo(
+                kind="slot",
+                cx=round(cx_box, 4),
+                cy=round(cy_box, 4),
+                width_mm=round(width, 4),
+                length_mm=round(width + span, 4),
+                angle_deg=round(ang, 3),
+                area_mm2=round(area, 4),
+            )
+    elif lwpoly.closed and n == 8 and len(bulges) == 4 and all(abs(abs(b) - (math.sqrt(2.0) - 1.0)) < 0.02 for _, b in bulges):
+        # 2D rounded-rectangle slot: 4 90-deg corner arcs + 4 straight sides
+        arc_chords = [
+            math.hypot(raw[(i + 1) % 8][0] - raw[i][0], raw[(i + 1) % 8][1] - raw[i][1])
+            for i, _ in bulges
+        ]
+        diam = math.sqrt(2.0) * (sum(arc_chords) / len(arc_chords))
+        straight_lens = [
+            math.hypot(raw[(i + 1) % 8][0] - raw[i][0], raw[(i + 1) % 8][1] - raw[i][1])
+            for i in range(8)
+            if abs(raw[i][2]) < 1e-4
+        ]
+        if len(straight_lens) >= 2:
+            s_pair = sorted(straight_lens)
+            w_s = diam + 0.5 * (s_pair[0] + s_pair[1])
+            l_s = diam + 0.5 * (s_pair[-2] + s_pair[-1])
+            hole_info = DrawnHoleInfo(
+                kind="rect_slot",
+                cx=round(cx_box, 4),
+                cy=round(cy_box, 4),
+                width_mm=round(w_s, 4),
+                length_mm=round(l_s, 4),
+                angle_deg=0.0,
+                area_mm2=round(area, 4),
+            )
+
+    return ring, bbox, area, hole_info
+
+
+def _expected_hole_geom(hole: DSTVHole) -> tuple[str, float, float, float, float, float]:
+    """Return (kind, exp_cx, exp_cy, exp_width, exp_length, exp_angle_mod180)."""
+    d = float(hole.diameter)
+    if hole.hole_type == "l" and (abs(hole.slot_length) > 0.05 or abs(hole.slot_width) > 0.05):
+        rad = math.radians(hole.slot_angle)
+        ux, uy = math.cos(rad), math.sin(rad)
+        vx, vy = -uy, ux
+        dx_s, dy_s = float(hole.slot_length), float(hole.slot_width)
+        exp_cx = hole.x + 0.5 * (dx_s * ux + dy_s * vx)
+        exp_cy = hole.y + 0.5 * (dx_s * uy + dy_s * vy)
+        if abs(dx_s) > 0.05 and abs(dy_s) > 0.05:
+            return ("rect_slot", exp_cx, exp_cy, d + min(abs(dx_s), abs(dy_s)), d + max(abs(dx_s), abs(dy_s)), hole.slot_angle % 180.0)
+        span = math.hypot(dx_s * ux + dy_s * vx, dx_s * uy + dy_s * vy)
+        ang = math.degrees(math.atan2(dx_s * uy + dy_s * vy, dx_s * ux + dy_s * vx)) % 180.0
+        return ("slot", exp_cx, exp_cy, d, d + span, ang)
+    return ("circle", hole.x, hole.y, d, d, 0.0)
+
+
+def inspect_drawn_dxf(
+    dxf_path: Path,
+    plate: ExtractedPlate,
+    expect_layer_zero: bool = True,
+) -> tuple[DrawnDxfAudit, Ring]:
+    """Re-read a written DXF file via ezdxf and audit layers, dimensions, origin, contours, and holes."""
+    if ezdxf is None:
+        return (
+            DrawnDxfAudit(
+                plate_name=plate.name,
+                role=plate.role,
+                face=plate.face,
+                thickness_mm=plate.thickness,
+                dxf_errors=1,
+                entity_layers=[],
+                extra_layers_created=[],
+                layer_zero_ok=False,
+                outer_closed=False,
+                origin_err_mm=999.0,
+                length_mm=0.0,
+                width_mm=0.0,
+                outer_area_mm2=0.0,
+                net_area_mm2=0.0,
+                vertex_count=0,
+                holes_drawn=[],
+                inners_count=0,
+                dim_err_mm=999.0,
+                hole_pos_err_mm=999.0,
+                hole_dim_err_mm=999.0,
+                holes_matched=0,
+                holes_expected=len(plate.holes),
+                passed=False,
+                issues=["ezdxf indisponibil"],
+            ),
+            list(plate.exterior),
+        )
+
+    doc = ezdxf.readfile(str(dxf_path))
+    aud = doc.audit()
+    dxf_errors = len(aud.errors)
+    extra_layers = sorted(
+        l.dxf.name for l in doc.layers if l.dxf.name not in ("0", "Defpoints")
+    )
+    msp = doc.modelspace()
+    entity_layers = sorted({e.dxf.layer for e in msp})
+    layer_zero_ok = (not expect_layer_zero) or (
+        set(entity_layers).issubset({"0"}) and len(extra_layers) == 0
+    )
+
+    polys_data = []
+    holes_drawn: list[DrawnHoleInfo] = []
+    for e in msp:
+        etype = e.dxftype()
+        if etype == "LWPOLYLINE":
+            ring, bbox, area, hinfo = _lwpolyline_geometric_info(e)
+            polys_data.append((e.closed, ring, bbox, area, hinfo))
+        elif etype == "CIRCLE":
+            c = e.dxf.center
+            d = 2.0 * float(e.dxf.radius)
+            holes_drawn.append(
+                DrawnHoleInfo(
+                    kind="circle",
+                    cx=round(float(c.x), 4),
+                    cy=round(float(c.y), 4),
+                    width_mm=round(d, 4),
+                    length_mm=round(d, 4),
+                    angle_deg=0.0,
+                    area_mm2=round(math.pi * (0.5 * d) ** 2, 4),
+                )
+            )
+
+    issues: list[str] = []
+    if dxf_errors > 0:
+        issues.append(f"Erori ezdxf audit: {dxf_errors}")
+    if expect_layer_zero and not layer_zero_ok:
+        issues.append(f"Layere neconforme: entități={entity_layers}, extra={extra_layers}")
+
+    if not polys_data:
+        issues.append("Lipsă contur exterior LWPOLYLINE în DXF")
+        return (
+            DrawnDxfAudit(
+                plate_name=plate.name,
+                role=plate.role,
+                face=plate.face,
+                thickness_mm=plate.thickness,
+                dxf_errors=dxf_errors,
+                entity_layers=entity_layers,
+                extra_layers_created=extra_layers,
+                layer_zero_ok=layer_zero_ok,
+                outer_closed=False,
+                origin_err_mm=999.0,
+                length_mm=0.0,
+                width_mm=0.0,
+                outer_area_mm2=0.0,
+                net_area_mm2=0.0,
+                vertex_count=0,
+                holes_drawn=holes_drawn,
+                inners_count=0,
+                dim_err_mm=999.0,
+                hole_pos_err_mm=0.0,
+                hole_dim_err_mm=0.0,
+                holes_matched=0,
+                holes_expected=len(plate.holes),
+                passed=False,
+                issues=issues,
+            ),
+            list(plate.exterior),
+        )
+
+    # Outer contour is largest LWPOLYLINE by area
+    polys_data.sort(key=lambda item: item[3], reverse=True)
+    outer_closed, outer_ring, outer_bbox, outer_area, _ = polys_data[0]
+    if not outer_closed:
+        issues.append("Conturul exterior NU este închis")
+
+    l_drawn = outer_bbox[2] - outer_bbox[0]
+    w_drawn = outer_bbox[3] - outer_bbox[1]
+    origin_err = max(abs(outer_bbox[0]), abs(outer_bbox[1]))
+    if origin_err > 0.01:
+        issues.append(f"Origine DXF deplasată ({outer_bbox[0]:.3f}, {outer_bbox[1]:.3f})")
+
+    exp_b = plate.bounds
+    l_exp = exp_b[2] - exp_b[0]
+    w_exp = exp_b[3] - exp_b[1]
+    dim_err = max(abs(l_drawn - l_exp), abs(w_drawn - w_exp))
+    if dim_err > 0.01:
+        issues.append(f"Diferență gabarit DXF vs NC1: {dim_err:.4f} mm")
+
+    inner_area_sum = 0.0
+    inners_count = 0
+    for is_closed, _, _, p_area, hinfo in polys_data[1:]:
+        if hinfo is not None:
+            holes_drawn.append(hinfo)
+        else:
+            inners_count += 1
+            inner_area_sum += p_area
+
+    for h in holes_drawn:
+        inner_area_sum += h.area_mm2
+        if not point_in_polygon(h.cx, h.cy, outer_ring, tol=0.05):
+            issues.append(f"Gaură ({h.cx:.2f}, {h.cy:.2f}) în afara conturului exterior")
+
+    # Match expected DSTV holes 1-to-1 against drawn holes
+    used_idx: set[int] = set()
+    hole_pos_err = 0.0
+    hole_dim_err = 0.0
+    holes_matched = 0
+    for exp_h in plate.holes:
+        ekind, ecx, ecy, ew, el, _ = _expected_hole_geom(exp_h)
+        best_i = None
+        best_dist = 1e9
+        for i_d, dh in enumerate(holes_drawn):
+            if i_d in used_idx:
+                continue
+            dist = math.hypot(dh.cx - ecx, dh.cy - ecy)
+            if dist < best_dist:
+                best_dist = dist
+                best_i = i_d
+        if best_i is None or best_dist > 1.0:
+            issues.append(f"Gaură lipsă/deplasată la ({ecx:.2f}, {ecy:.2f})")
+            hole_pos_err = max(hole_pos_err, best_dist if best_i is not None else 999.0)
+            continue
+        used_idx.add(best_i)
+        dh = holes_drawn[best_i]
+        if dh.kind != ekind:
+            issues.append(f"Tip gaură greșit la ({ecx:.2f}, {ecy:.2f}): desenat {dh.kind}, așteptat {ekind}")
+        d_err = max(abs(dh.width_mm - ew), abs(dh.length_mm - el))
+        hole_pos_err = max(hole_pos_err, best_dist)
+        hole_dim_err = max(hole_dim_err, d_err)
+        if best_dist <= 0.05 and d_err <= 0.05 and dh.kind == ekind:
+            holes_matched += 1
+        else:
+            issues.append(
+                f"Abatere gaură ({ecx:.2f}, {ecy:.2f}): pos={best_dist:.3f} mm, dim={d_err:.3f} mm"
+            )
+
+    net_area = max(0.0, outer_area - inner_area_sum)
+    passed = (
+        dxf_errors == 0
+        and layer_zero_ok
+        and outer_closed
+        and origin_err <= 0.01
+        and dim_err <= 0.01
+        and holes_matched == len(plate.holes)
+        and len(holes_drawn) == len(plate.holes)
+        and len(issues) == 0
+    )
+
+    return (
+        DrawnDxfAudit(
+            plate_name=plate.name,
+            role=plate.role,
+            face=plate.face,
+            thickness_mm=plate.thickness,
+            dxf_errors=dxf_errors,
+            entity_layers=entity_layers,
+            extra_layers_created=extra_layers,
+            layer_zero_ok=layer_zero_ok,
+            outer_closed=outer_closed,
+            origin_err_mm=round(origin_err, 4),
+            length_mm=round(l_drawn, 4),
+            width_mm=round(w_drawn, 4),
+            outer_area_mm2=round(outer_area, 2),
+            net_area_mm2=round(net_area, 2),
+            vertex_count=len(outer_ring),
+            holes_drawn=holes_drawn,
+            inners_count=inners_count,
+            dim_err_mm=round(dim_err, 4),
+            hole_pos_err_mm=round(hole_pos_err, 4),
+            hole_dim_err_mm=round(hole_dim_err, 4),
+            holes_matched=holes_matched,
+            holes_expected=len(plate.holes),
+            passed=passed,
+            issues=issues,
+        ),
+        outer_ring,
+    )
+
+
+def _merge_intervals_1d(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not intervals:
+        return []
+    ordered = sorted(intervals, key=lambda t: (t[0], t[1]))
+    merged: list[list[float]] = [[ordered[0][0], ordered[0][1]]]
+    for a, b in ordered[1:]:
+        if a <= merged[-1][1] + 1e-7:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [(m[0], m[1]) for m in merged]
+
+
+def _y_intervals_at_x(rings: list[Ring], x_mid: float) -> list[tuple[float, float]]:
+    ivs: list[tuple[float, float]] = []
+    for ring in rings:
+        n = len(ring)
+        if n < 3:
+            continue
+        ys_cross: list[float] = []
+        for i in range(n):
+            x1, y1 = ring[i]
+            x2, y2 = ring[(i + 1) % n]
+            lo_x, hi_x = (x1, x2) if x1 < x2 else (x2, x1)
+            if lo_x < x_mid < hi_x:
+                ys_cross.append(y1 + (x_mid - x1) * (y2 - y1) / (x2 - x1))
+        ys_cross.sort()
+        for j in range(0, len(ys_cross) - 1, 2):
+            if ys_cross[j + 1] - ys_cross[j] > 1e-7:
+                ivs.append((ys_cross[j], ys_cross[j + 1]))
+    return _merge_intervals_1d(ivs)
+
+
+def _rings_x_slab_metrics(
+    rings_a: list[Ring],
+    rings_b: list[Ring],
+) -> tuple[float, float, float]:
+    """Exact 2D (inter_area, union_area, iou_pct) via X-slab sweep with edge crossings."""
+    segs: list[tuple[float, float, float, float]] = []
+    xs_set: list[float] = []
+    for r in list(rings_a) + list(rings_b):
+        n = len(r)
+        for i in range(n):
+            x1, y1 = r[i]
+            x2, y2 = r[(i + 1) % n]
+            xs_set.append(x1)
+            if abs(x2 - x1) > 1e-6:
+                segs.append((x1, y1, x2, y2))
+
+    if len(xs_set) < 2:
+        return 0.0, 0.0, 0.0
+
+    # Include intersection X points between non-vertical segments so crossing slopes are exact
+    for i in range(len(segs)):
+        ax1, ay1, ax2, ay2 = segs[i]
+        ma_x = max(ax1, ax2)
+        mi_x = min(ax1, ax2)
+        for j in range(i + 1, len(segs)):
+            bx1, by1, bx2, by2 = segs[j]
+            if min(bx1, bx2) >= ma_x or max(bx1, bx2) <= mi_x:
+                continue
+            denom = (ax2 - ax1) * (by2 - by1) - (ay2 - ay1) * (bx2 - bx1)
+            if abs(denom) < 1e-9:
+                continue
+            t = ((bx1 - ax1) * (by2 - by1) - (by1 - ay1) * (bx2 - bx1)) / denom
+            u = ((bx1 - ax1) * (ay2 - ay1) - (by1 - ay1) * (ax2 - ax1)) / denom
+            if 1e-6 < t < 1.0 - 1e-6 and 1e-6 < u < 1.0 - 1e-6:
+                xs_set.append(ax1 + t * (ax2 - ax1))
+
+    xs_sorted = sorted(xs_set)
+    xs: list[float] = [xs_sorted[0]]
+    for x in xs_sorted[1:]:
+        if x - xs[-1] > 1e-5:
+            xs.append(x)
+
+    inter_area = 0.0
+    union_area = 0.0
+    for idx in range(len(xs) - 1):
+        xl, xr = xs[idx], xs[idx + 1]
+        dx = xr - xl
+        if dx <= 1e-5:
+            continue
+        xm = 0.5 * (xl + xr)
+        iv_a = _y_intervals_at_x(rings_a, xm)
+        iv_b = _y_intervals_at_x(rings_b, xm)
+        if not iv_a and not iv_b:
+            continue
+        len_a = sum(b - a for a, b in iv_a)
+        len_b = sum(b - a for a, b in iv_b)
+        len_i = 0.0
+        ia = ib = 0
+        while ia < len(iv_a) and ib < len(iv_b):
+            lo = max(iv_a[ia][0], iv_b[ib][0])
+            hi = min(iv_a[ia][1], iv_b[ib][1])
+            if hi > lo:
+                len_i += hi - lo
+            if iv_a[ia][1] < iv_b[ib][1]:
+                ia += 1
+            else:
+                ib += 1
+        inter_area += dx * len_i
+        union_area += dx * (len_a + len_b - len_i)
+
+    iou_pct = (100.0 * inter_area / union_area) if union_area > 1e-6 else (100.0 if inter_area <= 1e-6 else 0.0)
+    return inter_area, union_area, iou_pct
+
+
+def _x_span_at_y(ring: Ring, y_target: float) -> Optional[tuple[float, float]]:
+    """Return (min_x, max_x) where a polygon edge or horizontal scanline intersects y_target."""
+    if not ring:
+        return None
+    xs: list[float] = []
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        if abs(y1 - y_target) <= 0.1 and abs(y2 - y_target) <= 0.1:
+            xs.extend([x1, x2])
+        elif (y1 <= y_target <= y2) or (y2 <= y_target <= y1):
+            dy = y2 - y1
+            if abs(dy) > 1e-9:
+                xs.append(x1 + (y_target - y1) * (x2 - x1) / dy)
+    return (min(xs), max(xs)) if xs else None
+
+
+def _untransform_dxf_ring(
+    dxf_ring: Ring,
+    source_bounds: tuple[float, float, float, float],
+    mirror_x: bool = False,
+    mirror_y: bool = False,
+) -> Ring:
+    if not dxf_ring:
+        return []
+    d0, d1, d2, d3 = polygon_bounds(dxf_ring)
+    dcx = 0.5 * (d0 + d2)
+    dcy = 0.5 * (d1 + d3)
+    unm = mirror_ring(dxf_ring, dcx, dcy, mirror_x=mirror_x, mirror_y=mirror_y)
+    u0, u1, _, _ = polygon_bounds(unm)
+    sx0, sy0, _, _ = source_bounds
+    return clean_ring(translate_ring(unm, sx0 - u0, sy0 - u1), min_seg_len=0.05, ccw=True)
+
+
+def simulate_3d_assembly(
+    dstv: DSTVFile,
+    spec: CompoundProfileSpec,
+    cfg: ChesonConfig,
+    plates: list[ExtractedPlate],
+    re_read_rings: dict[str, Ring],
+    dxf_audits: list[DrawnDxfAudit],
+    locked_rings: dict[str, list[Ring]],
+    l_gabarit: float,
+    detected_type: str,
+    talpa_side: str,
+    bom_row: Optional[BomRow],
+    applied_delta_l: float,
+    mid_x_raw: float,
+) -> Sim3DReport:
+    """Virtually reassemble re-read DXF plates into 3D solids and audit vs locked .nc1 & BOM."""
+    H = spec.total_height
+    B = spec.total_width
+    tw = spec.tw
+
+    # 1. Recover 3D placements for every drawn plate
+    # Each solid entry: (plate, ring_2d, plane='XY'|'XZ', z_band=(z0, z1), y_band=(y0, y1), bbox3d=(x0,y0,z0,x1,y1,z1))
+    solids: list[dict[str, Any]] = []
+
+    for p in plates:
+        dxf_r = re_read_rings.get(p.name, p.exterior)
+        if p.face == "o":
+            r_glob = _untransform_dxf_ring(dxf_r, p.source_bounds, mirror_x=False, mirror_y=cfg.mirror_flange_o_y)
+            bx0, by0, bx1, by1 = polygon_bounds(r_glob)
+            z0, z1 = max(0.0, H - p.thickness), H
+            solids.append({
+                "plate": p,
+                "ring": r_glob,
+                "plane": "XY",
+                "z_band": (z0, z1),
+                "y_band": (by0, by1),
+                "bbox3d": (bx0, by0, z0, bx1, by1, z1),
+            })
+        elif p.face == "u":
+            r_glob = _untransform_dxf_ring(dxf_r, p.source_bounds, mirror_x=False, mirror_y=cfg.mirror_flange_u_y)
+            bx0, by0, bx1, by1 = polygon_bounds(r_glob)
+            z0, z1 = 0.0, p.thickness
+            solids.append({
+                "plate": p,
+                "ring": r_glob,
+                "plane": "XY",
+                "z_band": (z0, z1),
+                "y_band": (by0, by1),
+                "bbox3d": (bx0, by0, z0, bx1, by1, z1),
+            })
+        elif p.face in ("v", "h"):
+            mx = cfg.mirror_web_h_x if p.face == "h" else False
+            r_glob = _untransform_dxf_ring(dxf_r, p.source_bounds, mirror_x=mx, mirror_y=False)
+            bx0, bz0, bx1, bz1 = polygon_bounds(r_glob)
+            y0, y1 = (B - tw, B) if p.face == "v" else (0.0, tw)
+            solids.append({
+                "plate": p,
+                "ring": r_glob,
+                "plane": "XZ",
+                "z_band": (bz0, bz1),
+                "y_band": (y0, y1),
+                "bbox3d": (bx0, y0, bz0, bx1, y1, bz1),
+            })
+
+    if not solids:
+        return Sim3DReport(
+            l_3d_mm=0.0, b_3d_mm=0.0, h_3d_mm=0.0,
+            err_l_mm=l_gabarit, err_b_mm=B, err_h_mm=H,
+            max_interference_mm=0.0, interference_pairs=[],
+            max_seam_gap_mm=0.0, seam_notes=[],
+            face_iou_pct={}, overall_3d_similarity_pct=0.0,
+            holes_3d_expected=0, holes_3d_matched=0,
+            max_hole_3d_err_mm=0.0, hole_shape_mismatches=0,
+            mass_3d_kg=0.0, mass_bom_kg=(bom_row.weight_unit_kg if bom_row else None),
+            mass_diff_pct=None, passed=False, issues=["Nicio placă pentru simulare 3D"],
+        )
+
+    # 2. Global 3D envelope
+    min_x = min(s["bbox3d"][0] for s in solids)
+    min_y = min(s["bbox3d"][1] for s in solids)
+    min_z = min(s["bbox3d"][2] for s in solids)
+    max_x = max(s["bbox3d"][3] for s in solids)
+    max_y = max(s["bbox3d"][4] for s in solids)
+    max_z = max(s["bbox3d"][5] for s in solids)
+
+    l_3d = max_x - min_x
+    b_3d = max_y - min_y
+    h_3d = max_z - min_z
+    err_l = abs(l_3d - l_gabarit)
+    err_b = abs(b_3d - B)
+    err_h = abs(h_3d - H)
+
+    issues: list[str] = []
+    if err_l > 0.01:
+        issues.append(f"Lungime 3D {l_3d:.3f} != țintă {l_gabarit:.3f} mm")
+    if err_b > 0.01:
+        issues.append(f"Lățime 3D {b_3d:.3f} != profil {B:.3f} mm")
+    if err_h > 0.01:
+        issues.append(f"Înălțime 3D {h_3d:.3f} != profil {H:.3f} mm")
+
+    # 3. Pairwise 3D collision / interference check (solid interiors must not penetrate > 0.01 mm)
+    max_inter = 0.0
+    inter_pairs: list[str] = []
+    for i in range(len(solids)):
+        ax0, ay0, az0, ax1, ay1, az1 = solids[i]["bbox3d"]
+        for j in range(i + 1, len(solids)):
+            bx0, by0, bz0, bx1, by1, bz1 = solids[j]["bbox3d"]
+            ox = min(ax1, bx1) - max(ax0, bx0)
+            oy = min(ay1, by1) - max(ay0, by0)
+            oz = min(az1, bz1) - max(az0, bz0)
+            if ox > 0.01 and oy > 0.01 and oz > 0.01:
+                if solids[i]["plane"] == solids[j]["plane"]:
+                    i_area, _, _ = _rings_x_slab_metrics([solids[i]["ring"]], [solids[j]["ring"]])
+                    if i_area <= 0.1:
+                        continue
+                pen = min(ox, oy, oz)
+                max_inter = max(max_inter, pen)
+                inter_pairs.append(f"{solids[i]['plate'].name}↔{solids[j]['plate'].name} ({pen:.3f} mm)")
+
+    if max_inter > 0.01:
+        issues.append(f"Coliziune 3D detectată ({max_inter:.3f} mm): {', '.join(inter_pairs)}")
+
+    # 4. Weld seam alignment checks (flanges <-> webs)
+    flange_solids = [s for s in solids if s["plane"] == "XY"]
+    web_solids = [s for s in solids if s["plane"] == "XZ"]
+    max_seam_gap = 0.0
+    seam_notes: list[str] = []
+
+    for ws in web_solids:
+        wp: ExtractedPlate = ws["plate"]
+        wy_mid = 0.5 * (ws["y_band"][0] + ws["y_band"][1])
+        wz0, wz1 = ws["z_band"]
+        wx0, _, _, wx1, _, _ = ws["bbox3d"]
+        for fs in flange_solids:
+            fp: ExtractedPlate = fs["plate"]
+            fz0, fz1 = fs["z_band"]
+            fy0, fy1 = fs["y_band"]
+            # Check transverse contact gap (flush at Y or Z)
+            if fy0 - 0.5 <= ws["y_band"][1] <= fy1 + 0.5 and fy0 - 0.5 <= ws["y_band"][0] <= fy1 + 0.5:
+                # Over-web flange (e.g. talpa): Z should touch web top/bot
+                gap_z = min(abs(wz0 - fz1), abs(fz0 - wz1))
+                max_seam_gap = max(max_seam_gap, gap_z)
+            elif (ws["y_band"][1] <= fy0 + 0.5) or (ws["y_band"][0] >= fy1 - 0.5):
+                # Between-web capac: Y face touches web inner wall
+                gap_y = abs(fy0 - ws["y_band"][1]) if ws["y_band"][1] <= fy0 + 0.5 else abs(ws["y_band"][0] - fy1)
+                max_seam_gap = max(max_seam_gap, gap_y)
+                # Also check X alignment along contact Y line if web wasn't shortened by cutout residuals
+                if wp.removed_residuals == 0:
+                    contact_y = fy0 if wp.face == "h" else fy1
+                    f_span = _x_span_at_y(fs["ring"], contact_y)
+                    w_z_ref = wz1 if fp.face == "o" else wz0
+                    w_span = _x_span_at_y(ws["ring"], w_z_ref)
+                    if f_span is not None and w_span is not None:
+                        # Check if web spans at least flange contact (allowing outer chamfer/overhang)
+                        if w_span[0] > f_span[0] + 0.05:
+                            gap_x = w_span[0] - f_span[0]
+                            max_seam_gap = max(max_seam_gap, gap_x)
+                            seam_notes.append(f"{wp.name}/{fp.name} stânga +{gap_x:.3f}mm")
+                        if w_span[1] < f_span[1] - 0.05:
+                            gap_x = f_span[1] - w_span[1]
+                            max_seam_gap = max(max_seam_gap, gap_x)
+                            seam_notes.append(f"{wp.name}/{fp.name} dreapta +{gap_x:.3f}mm")
+
+    if max_seam_gap > 0.05:
+        issues.append(f"Rost/decalaj sudură talpă-laterală: {max_seam_gap:.3f} mm")
+
+    # 5. 4-face 3D projection silhouette IoU vs locked .nc1 faces
+    face_iou: dict[str, float] = {}
+    for face_xy in ("o", "u"):
+        nc_rings = locked_rings.get(face_xy, [])
+        if not nc_rings:
+            continue
+        proj_xy: list[Ring] = [s["ring"] for s in flange_solids if s["plate"].face == face_xy]
+        z_probe = (H - 0.5 * spec.tf_top) if face_xy == "o" else (0.5 * spec.tf_bot)
+        for ws in web_solids:
+            wy0, wy1 = ws["y_band"]
+            # Check web footprint at outer top/bot band
+            span_x = _x_span_at_y(ws["ring"], ws["z_band"][1] if face_xy == "o" else ws["z_band"][0])
+            if span_x is not None and span_x[1] - span_x[0] > 0.1:
+                # Only project top-half / bottom-half web belonging to this outer face (for Tip 3 multi-band)
+                wz_mid = 0.5 * (ws["z_band"][0] + ws["z_band"][1])
+                if detected_type == "cheson_dublu":
+                    if face_xy == "o" and wz_mid < 0.5 * H:
+                        continue
+                    if face_xy == "u" and wz_mid > 0.5 * H:
+                        continue
+                proj_xy.append([(span_x[0], wy0), (span_x[1], wy0), (span_x[1], wy1), (span_x[0], wy1)])
+        _, _, iou = _rings_x_slab_metrics(proj_xy, nc_rings)
+        face_iou[face_xy] = round(iou, 2)
+
+    for face_xz in ("v", "h"):
+        nc_rings = locked_rings.get(face_xz, [])
+        if not nc_rings:
+            continue
+        proj_xz: list[Ring] = [s["ring"] for s in web_solids if s["plate"].face == face_xz]
+        y_probe = (B - tw) if face_xz == "v" else tw
+        for fs in flange_solids:
+            fz0, fz1 = fs["z_band"]
+            fy0, fy1 = fs["y_band"]
+            # Clamp y_probe to flange Y range (so over-web talpa projects its outer edge, between-web projects inner edge)
+            yp = min(max(y_probe, fy0), fy1)
+            span_x = _x_span_at_y(fs["ring"], yp)
+            if span_x is not None and span_x[1] - span_x[0] > 0.1:
+                proj_xz.append([(span_x[0], fz0), (span_x[1], fz0), (span_x[1], fz1), (span_x[0], fz1)])
+        _, _, iou = _rings_x_slab_metrics(proj_xz, nc_rings)
+        face_iou[face_xz] = round(iou, 2)
+
+    overall_iou = round(sum(face_iou.values()) / len(face_iou), 2) if face_iou else 100.0
+
+    # 6. 3D Hole/Slot Cross-Check vs DSTV BO
+    audit_by_name = {a.plate_name: a for a in dxf_audits}
+    drawn_3d_holes: list[tuple[str, str, float, float, float, float, float]] = []
+    for s in solids:
+        p = s["plate"]
+        aud = audit_by_name.get(p.name)
+        if not aud:
+            continue
+        dxf_r = re_read_rings.get(p.name, p.exterior)
+        d0, d1, d2, d3 = polygon_bounds(dxf_r)
+        dcx, dcy = 0.5 * (d0 + d2), 0.5 * (d1 + d3)
+        sx0, sy0, _, _ = p.source_bounds
+        r_glob = s["ring"]
+        gx0, gy0, _, _ = polygon_bounds(r_glob)
+        mir_x = (cfg.mirror_web_h_x if p.face == "h" else False)
+        mir_y = (cfg.mirror_flange_o_y if p.face == "o" else (cfg.mirror_flange_u_y if p.face == "u" else False))
+        # Un-mirror & translate from dxf_r origin to global plate origin
+        for dh in aud.holes_drawn:
+            ux = (2.0 * dcx - dh.cx) if mir_x else dh.cx
+            uy = (2.0 * dcy - dh.cy) if mir_y else dh.cy
+            # Offset from unmirrored dxf bbox min
+            unm_x = ux - (d0 if not mir_x else d0)
+            unm_y = uy - (d1 if not mir_y else d1)
+            gx = sx0 + (ux - d0)
+            gy = sy0 + (uy - d1)
+            drawn_3d_holes.append((p.face, dh.kind, gx, gy, dh.width_mm, dh.length_mm, dh.angle_deg))
+
+    expected_3d_holes: list[tuple[str, str, float, float, float, float, float]] = []
+    for f, hlist in dstv.holes.items():
+        for hole in hlist:
+            ekind, ecx, ecy, ew, el, eang = _expected_hole_geom(hole)
+            if abs(applied_delta_l) > 1e-7 and ecx > mid_x_raw:
+                ecx += applied_delta_l
+            expected_3d_holes.append((f, ekind, ecx, ecy, ew, el, eang))
+
+    holes_3d_matched = 0
+    max_hole_3d_err = 0.0
+    hole_shape_mismatches = 0
+    used_3d: set[int] = set()
+    for ef, ekind, ecx, ecy, ew, el, _ in expected_3d_holes:
+        best_i = None
+        best_d = 1e9
+        for i_d, (df, dkind, dgx, dgy, dw, dl, _) in enumerate(drawn_3d_holes):
+            if i_d in used_3d or df != ef:
+                continue
+            dist = math.hypot(dgx - ecx, dgy - ecy)
+            if dist < best_d:
+                best_d = dist
+                best_i = i_d
+        if best_i is None or best_d > 1.0:
+            max_hole_3d_err = max(max_hole_3d_err, best_d if best_i is not None else 999.0)
+            continue
+        used_3d.add(best_i)
+        _, dkind, _, _, dw, dl, _ = drawn_3d_holes[best_i]
+        dim_e = max(abs(dw - ew), abs(dl - el))
+        err_total = max(best_d, dim_e)
+        max_hole_3d_err = max(max_hole_3d_err, err_total)
+        if dkind != ekind:
+            hole_shape_mismatches += 1
+        elif err_total <= 0.05:
+            holes_3d_matched += 1
+
+    # 7. Net 3D steel mass vs STYKKLISTE BOM VEKT/STK (7.85 kg/dm3 = 7.85e-6 kg/mm3)
+    mass_3d = round(sum(a.net_area_mm2 * a.thickness_mm * 7.85e-6 for a in dxf_audits), 2)
+    mass_bom = bom_row.weight_unit_kg if (bom_row and bom_row.weight_unit_kg) else None
+    mass_diff_pct = (
+        round(abs(mass_3d - mass_bom) / mass_bom * 100.0, 2)
+        if (mass_bom and mass_bom > 0.0)
+        else None
+    )
+
+    sim_passed = (
+        err_l <= 0.001 + 1e-6
+        and err_b <= 0.001 + 1e-6
+        and err_h <= 0.001 + 1e-6
+        and max_inter <= 0.01
+        and max_seam_gap <= 0.05
+        and holes_3d_matched == len(expected_3d_holes)
+        and hole_shape_mismatches == 0
+        and max_hole_3d_err <= 0.05
+        and overall_iou >= 95.0
+    )
+
+    return Sim3DReport(
+        l_3d_mm=round(l_3d, 4),
+        b_3d_mm=round(b_3d, 4),
+        h_3d_mm=round(h_3d, 4),
+        err_l_mm=round(err_l, 4),
+        err_b_mm=round(err_b, 4),
+        err_h_mm=round(err_h, 4),
+        max_interference_mm=round(max_inter, 4),
+        interference_pairs=inter_pairs,
+        max_seam_gap_mm=round(max_seam_gap, 4),
+        seam_notes=seam_notes,
+        face_iou_pct=face_iou,
+        overall_3d_similarity_pct=overall_iou,
+        holes_3d_expected=len(expected_3d_holes),
+        holes_3d_matched=holes_3d_matched,
+        max_hole_3d_err_mm=round(max_hole_3d_err, 4),
+        hole_shape_mismatches=hole_shape_mismatches,
+        mass_3d_kg=mass_3d,
+        mass_bom_kg=mass_bom,
+        mass_diff_pct=mass_diff_pct,
+        passed=sim_passed,
+        issues=issues,
+    )
+
+
+def verify_post_draw_and_3d(
+    dstv: DSTVFile,
+    cfg: ChesonConfig,
+    plates: list[ExtractedPlate],
+    dxf_audits: list[DrawnDxfAudit],
+    re_read_rings: dict[str, Ring],
+    bom: Optional[BomTable] = None,
+    bom_row: Optional[BomRow] = None,
+    pdf_dims: Optional[set[float]] = None,
+) -> PostDrawVerificationReport:
+    """Post-draw verification: re-read DXFs vs NC1 geometry, PDF drawing dimensions, and 3D simulation."""
+    spec = parse_compound_profile(dstv.header.profile_str, dstv.header)
+    detected_type, talpa_side = detect_cheson_type(dstv, spec, cfg)
+
+    raw_rings: dict[str, list[Ring]] = {}
+    for face in ("o", "u", "v", "h"):
+        raw_rings[face] = []
+        for c in dstv.ak_contours.get(face, []):
+            r = contour_to_ring(c, cfg)
+            if len(r) >= 3 and abs(polygon_area(r)) > 0.1:
+                raw_rings[face].append(r)
+
+    x_min_env, _, l_nc1_raw = _compute_raw_x_envelope(raw_rings)
+    l_gabarit, _ = _resolve_gabarit_length(l_nc1_raw, cfg)
+    if cfg.exact_gabarit_lock:
+        max_delta = 100.0 if (cfg.target_length_mm is not None and cfg.target_length_mm > 0.0) else 20.0
+        locked_rings = _apply_gabarit_x_lock_to_rings(
+            raw_rings, x_min_env, l_nc1_raw, l_gabarit, max_delta_mm=max_delta
+        )
+    else:
+        locked_rings = raw_rings
+    _, _, l_assembled_env = _compute_raw_x_envelope(locked_rings)
+    mid_x_raw = x_min_env + 0.5 * l_nc1_raw
+    applied_delta_l = (l_assembled_env - l_nc1_raw) if cfg.exact_gabarit_lock else 0.0
+
+    sim_3d = simulate_3d_assembly(
+        dstv=dstv,
+        spec=spec,
+        cfg=cfg,
+        plates=plates,
+        re_read_rings=re_read_rings,
+        dxf_audits=dxf_audits,
+        locked_rings=locked_rings,
+        l_gabarit=l_gabarit,
+        detected_type=detected_type,
+        talpa_side=talpa_side,
+        bom_row=bom_row,
+        applied_delta_l=applied_delta_l,
+        mid_x_raw=mid_x_raw,
+    )
+
+    all_dxf_clean = all(a.dxf_errors == 0 and a.outer_closed and a.passed for a in dxf_audits)
+    all_layer_zero = all(a.layer_zero_ok for a in dxf_audits)
+    nc1_max_dim_err = max((a.dim_err_mm for a in dxf_audits), default=0.0)
+    nc1_max_hole_err = max(
+        (max(a.hole_pos_err_mm, a.hole_dim_err_mm) for a in dxf_audits), default=0.0
+    )
+
+    pdf_bom_len_err: Optional[float] = None
+    if bom_row and bom_row.length_mm:
+        pdf_bom_len_err = round(abs(sim_3d.l_3d_mm - bom_row.length_mm), 4)
+
+    # Confirm key dimensions appearing both in the PDF drawing and in our generated DXF geometry
+    candidate_dims: set[float] = {
+        round(sim_3d.l_3d_mm, 1),
+        round(sim_3d.b_3d_mm, 1),
+        round(sim_3d.h_3d_mm, 1),
+        round(spec.h_web, 1),
+        round(spec.b_bot, 1),
+        round(spec.b_top, 1),
+    }
+    for a in dxf_audits:
+        candidate_dims.add(round(a.length_mm, 1))
+        candidate_dims.add(round(a.width_mm, 1))
+    # Edge distances of holes / cutouts from plate borders and hole-to-hole pitches
+    for a in dxf_audits:
+        for h in a.holes_drawn:
+            candidate_dims.add(round(h.cx, 1))
+            candidate_dims.add(round(a.length_mm - h.cx, 1))
+            candidate_dims.add(round(h.cy, 1))
+            candidate_dims.add(round(a.width_mm - h.cy, 1))
+            candidate_dims.add(round(h.width_mm, 1))
+            candidate_dims.add(round(h.length_mm, 1))
+        for i_h in range(len(a.holes_drawn)):
+            for j_h in range(i_h + 1, len(a.holes_drawn)):
+                dx_p = abs(a.holes_drawn[i_h].cx - a.holes_drawn[j_h].cx)
+                dy_p = abs(a.holes_drawn[i_h].cy - a.holes_drawn[j_h].cy)
+                if dx_p >= 10.0:
+                    candidate_dims.add(round(dx_p, 1))
+                if dy_p >= 10.0:
+                    candidate_dims.add(round(dy_p, 1))
+        rr = re_read_rings.get(a.plate_name, [])
+        for px, py in rr:
+            if 10.0 <= px <= a.length_mm - 10.0:
+                candidate_dims.add(round(px, 1))
+                candidate_dims.add(round(a.length_mm - px, 1))
+        if sim_3d.l_3d_mm - a.length_mm >= 10.0:
+            candidate_dims.add(round(sim_3d.l_3d_mm - a.length_mm, 1))
+    for i_a in range(len(dxf_audits)):
+        for j_a in range(i_a + 1, len(dxf_audits)):
+            dl_p = abs(dxf_audits[i_a].length_mm - dxf_audits[j_a].length_mm)
+            if dl_p >= 10.0:
+                candidate_dims.add(round(dl_p, 1))
+
+    pdf_confirmed: list[float] = []
+    if pdf_dims:
+        for cval in sorted(candidate_dims):
+            if cval >= 10.0 and any(abs(cval - pd_val) <= 0.5 for pd_val in pdf_dims):
+                pdf_confirmed.append(round(cval, 2))
+
+    issues: list[str] = []
+    for a in dxf_audits:
+        for iss in a.issues:
+            issues.append(f"[{a.plate_name}] {iss}")
+    for iss in sim_3d.issues:
+        issues.append(f"[Sim3D] {iss}")
+    if pdf_bom_len_err is not None and pdf_bom_len_err > 0.01:
+        issues.append(f"Gabarit 3D {sim_3d.l_3d_mm:.3f} != STYKKLISTE {bom_row.length_mm:.3f}")
+
+    passed = (
+        all_dxf_clean
+        and all_layer_zero
+        and nc1_max_dim_err <= 0.01
+        and nc1_max_hole_err <= 0.05
+        and (pdf_bom_len_err is None or pdf_bom_len_err <= 0.01)
+        and sim_3d.passed
+    )
+
+    return PostDrawVerificationReport(
+        piece_id=dstv.header.piece_id,
+        plates_audited=len(dxf_audits),
+        all_dxf_clean=all_dxf_clean,
+        all_layer_zero=all_layer_zero,
+        nc1_max_dim_err_mm=round(nc1_max_dim_err, 4),
+        nc1_max_hole_err_mm=round(nc1_max_hole_err, 4),
+        pdf_drawing_name=(bom.source_pdf.name if bom else None),
+        pdf_bom_length_err_mm=pdf_bom_len_err,
+        pdf_dims_confirmed=pdf_confirmed,
+        sim_3d=sim_3d,
+        plate_audits=dxf_audits,
+        passed=passed,
+        issues=issues,
+    )
 
 
 def find_oda_exe(custom_path: Optional[str] = None) -> Optional[str]:
@@ -2642,6 +3674,29 @@ def extract_bom_from_pdf(pdf_path: str | Path) -> Optional[BomTable]:
         return None
     finally:
         doc.close()
+
+
+def extract_pdf_drawing_dimensions(pdf_path: Optional[str | Path]) -> set[float]:
+    """Extract numeric dimensions from an A-drawing PDF for post-draw cross-verification."""
+    if pymupdf is None or not pdf_path:
+        return set()
+    path = Path(pdf_path)
+    if not path.is_file():
+        return set()
+    dims: set[float] = set()
+    doc = pymupdf.open(str(path))
+    try:
+        for page in doc:
+            for w in page.get_text("words") or []:
+                t = str(w[4]).strip()
+                if re.match(r"^\d{2,5}(?:[.,]\d{1,2})?$", t):
+                    try:
+                        dims.add(float(t.replace(",", ".")))
+                    except ValueError:
+                        pass
+    finally:
+        doc.close()
+    return dims
 
 
 def _parse_bom_from_words(
@@ -2908,7 +3963,7 @@ def _export_plate_cad(
     organize_by_thickness: bool,
     oda_path: Optional[str],
     log_cb: Callable[[str], None],
-) -> tuple[list[Path], str]:
+) -> tuple[list[Path], str, DrawnDxfAudit, Ring]:
     target_dir = (out_dir / plate.folder) if organize_by_thickness else out_dir
     target_dir.mkdir(parents=True, exist_ok=True)
     dxf_path = target_dir / f"{plate.name}.dxf"
@@ -2918,11 +3973,14 @@ def _export_plate_cad(
         use_nesting_layers=use_nesting_layers,
         include_marking=include_marking,
     )
+    dxf_audit, re_read_ring = inspect_drawn_dxf(
+        dxf_path, plate, expect_layer_zero=(not use_nesting_layers)
+    )
 
     fmt = (export_format or "dwg_fallback").lower()
     if fmt == "dxf":
         rel = f"{plate.folder}/{plate.name}.dxf" if organize_by_thickness else f"{plate.name}.dxf"
-        return [dxf_path], rel
+        return [dxf_path], rel, dxf_audit, re_read_ring
 
     dwg_path = target_dir / f"{plate.name}.dwg"
     exe = find_oda_exe(oda_path)
@@ -2931,13 +3989,13 @@ def _export_plate_cad(
             convert_dxf_to_dwg(dxf_path, dwg_path, oda_path=exe)
             if fmt == "both":
                 rel = f"{plate.folder}/{plate.name}.dwg" if organize_by_thickness else f"{plate.name}.dwg"
-                return [dxf_path, dwg_path], rel
+                return [dxf_path, dwg_path], rel, dxf_audit, re_read_ring
             try:
                 dxf_path.unlink()
             except Exception:
                 pass
             rel = f"{plate.folder}/{plate.name}.dwg" if organize_by_thickness else f"{plate.name}.dwg"
-            return [dwg_path], rel
+            return [dwg_path], rel, dxf_audit, re_read_ring
         except Exception as exc:
             log_cb(f"  ⚠ Eroare conversie ODA pentru {plate.name}: {exc} (păstrat DXF)")
 
@@ -2945,7 +4003,7 @@ def _export_plate_cad(
         raise RuntimeError(f"Conversia DWG direct a eșuat pentru {plate.name} (ODA indisponibil).")
 
     rel = f"{plate.folder}/{plate.name}.dxf" if organize_by_thickness else f"{plate.name}.dxf"
-    return [dxf_path], rel
+    return [dxf_path], rel, dxf_audit, re_read_ring
 
 
 def _collect_inputs(
@@ -2987,11 +4045,13 @@ def preview_cheson_pipeline(
     override_web_height_mm: Optional[float] = None,
     recursive: bool = False,
     strip_residual_fragments: bool = True,
+    use_nesting_layers: bool = False,
 ) -> dict[str, Any]:
-    """Dry-run inspection: detects cheson type, STYKKLISTE LENGDE, and verifies <= 0.001 mm tolerance."""
+    """Dry-run inspection: detects cheson type, STYKKLISTE LENGDE, DXF audit, PDF check & 3D sim."""
     _, _, nc1_files, a_pdf, bom, w_map = _collect_inputs(
         source_path, source_mode, scope_mode, recursive
     )
+    pdf_dims = extract_pdf_drawing_dimensions(a_pdf)
     bom_by_key: dict[str, BomRow] = {}
     if bom:
         for r in bom.rows:
@@ -3000,42 +4060,66 @@ def preview_cheson_pipeline(
     items_preview: list[dict[str, Any]] = []
     all_passed = True
 
-    for nc1_path in nc1_files:
-        dstv = parse_dstv(nc1_path)
-        piece_key = clean_piece_name(dstv.header.piece_id or nc1_path.stem, lowercase=True)
-        bom_row = bom_by_key.get(piece_key)
-        target_len = override_length_mm if (override_length_mm and override_length_mm > 0) else (
-            bom_row.length_mm if (bom_row and bom_row.length_mm) else None
-        )
-        cfg = ChesonConfig.from_preset(
-            preset,
-            exact_gabarit_lock=exact_gabarit_lock,
-            target_length_mm=target_len,
-            override_web_height_mm=override_web_height_mm,
-            strip_residual_fragments=strip_residual_fragments,
-        )
-        plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
-        if not ver.passed:
-            all_passed = False
-        items_preview.append(
-            {
-                "file": nc1_path.name,
-                "profile": dstv.header.profile_str,
-                "verification": asdict(ver),
-                "plates": [
-                    {
-                        "name": p.name,
-                        "folder": p.folder,
-                        "role": p.role,
-                        "thickness": p.thickness,
-                        "length_mm": round(p.bounds[2] - p.bounds[0], 4),
-                        "width_mm": round(p.bounds[3] - p.bounds[1], 4),
-                        "removed_residuals": p.removed_residuals,
-                    }
-                    for p in plates
-                ],
-            }
-        )
+    with tempfile.TemporaryDirectory(prefix="steel_prev_") as tmp_root:
+        tmp_dir = Path(tmp_root)
+        for nc1_path in nc1_files:
+            dstv = parse_dstv(nc1_path)
+            piece_key = clean_piece_name(dstv.header.piece_id or nc1_path.stem, lowercase=True)
+            bom_row = bom_by_key.get(piece_key)
+            target_len = override_length_mm if (override_length_mm and override_length_mm > 0) else (
+                bom_row.length_mm if (bom_row and bom_row.length_mm) else None
+            )
+            cfg = ChesonConfig.from_preset(
+                preset,
+                exact_gabarit_lock=exact_gabarit_lock,
+                target_length_mm=target_len,
+                override_web_height_mm=override_web_height_mm,
+                strip_residual_fragments=strip_residual_fragments,
+            )
+            plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
+
+            dxf_audits: list[DrawnDxfAudit] = []
+            re_read_rings: dict[str, Ring] = {}
+            for p in plates:
+                tmp_dxf = tmp_dir / f"{p.name}.dxf"
+                write_plate_dxf(p, tmp_dxf, use_nesting_layers=use_nesting_layers, include_marking=False)
+                aud, rr = inspect_drawn_dxf(tmp_dxf, p, expect_layer_zero=(not use_nesting_layers))
+                dxf_audits.append(aud)
+                re_read_rings[p.name] = rr
+
+            post_ver = verify_post_draw_and_3d(
+                dstv=dstv,
+                cfg=cfg,
+                plates=plates,
+                dxf_audits=dxf_audits,
+                re_read_rings=re_read_rings,
+                bom=bom,
+                bom_row=bom_row,
+                pdf_dims=pdf_dims,
+            )
+            if not (ver.passed and post_ver.passed):
+                all_passed = False
+
+            items_preview.append(
+                {
+                    "file": nc1_path.name,
+                    "profile": dstv.header.profile_str,
+                    "verification": asdict(ver),
+                    "post_draw_audit": asdict(post_ver),
+                    "plates": [
+                        {
+                            "name": p.name,
+                            "folder": p.folder,
+                            "role": p.role,
+                            "thickness": p.thickness,
+                            "length_mm": round(p.bounds[2] - p.bounds[0], 4),
+                            "width_mm": round(p.bounds[3] - p.bounds[1], 4),
+                            "removed_residuals": p.removed_residuals,
+                        }
+                        for p in plates
+                    ],
+                }
+            )
 
     return {
         "a_drawing": a_pdf.name if a_pdf else None,
@@ -3054,7 +4138,7 @@ def run_cheson_pipeline(
     scope_mode: str = "cheson_only",
     preset: str = "auto",
     export_format: str = "dwg_fallback",
-    use_nesting_layers: bool = True,
+    use_nesting_layers: bool = False,
     include_marking: bool = False,
     organize_by_thickness: bool = True,
     recursive: bool = False,
@@ -3067,7 +4151,7 @@ def run_cheson_pipeline(
     log_callback: Optional[Callable[[str], None]] = None,
     strip_residual_fragments: bool = True,
 ) -> dict[str, Any]:
-    """Run box-beam (.nc1) plate extraction with exact gabarit verification (±0.001 mm)."""
+    """Run box-beam (.nc1) plate extraction with post-draw audit (NC1+PDF) & 3D assembly simulation."""
     def _log(msg: str) -> None:
         if log_callback:
             log_callback(msg)
@@ -3079,18 +4163,20 @@ def run_cheson_pipeline(
     src, search_root, nc1_files, a_pdf, bom, w_map = _collect_inputs(
         source_path, source_mode, scope_mode, recursive
     )
+    pdf_dims = extract_pdf_drawing_dimensions(a_pdf)
     out_root = Path(dest_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     effective_oda = find_oda_exe(oda_path)
 
+    layer_label = "CUT_OUTER/INNER/MARKING" if use_nesting_layers else "Layer 0 (implicit, fără layere extra)"
     _log(
         f"🚀 Pornire Cheson / HSQ Extractor (Mod: {scope_mode}, Preset: {preset}, "
-        f"GabaritFix={exact_gabarit_lock}, FărăReziduuri={strip_residual_fragments})"
+        f"GabaritFix={exact_gabarit_lock}, FărăReziduuri={strip_residual_fragments}, Layer={layer_label})"
     )
     _log(f"📁 Sursă: {src}")
     _log(f"📁 Destinație: {out_root}")
     if a_pdf is not None and bom is not None:
-        _log(f"📋 STYKKLISTE ({a_pdf.name}): {bom.assembly_id} (qty={bom.assembly_quantity}, {len(bom.rows)} repere)")
+        _log(f"📋 STYKKLISTE ({a_pdf.name}): {bom.assembly_id} (qty={bom.assembly_quantity}, {len(bom.rows)} repere, {len(pdf_dims)} cote PDF)")
     if export_format != "dxf":
         _log(f"🔧 ODA Converter: {effective_oda if effective_oda else 'indisponibil (fallback automat pe DXF R2018)'}")
 
@@ -3104,6 +4190,7 @@ def run_cheson_pipeline(
 
     entries: list[ManifestEntry] = []
     verifications: list[dict[str, Any]] = []
+    post_draw_audits: list[dict[str, Any]] = []
     written_files: list[Path] = []
     processed_keys: set[str] = set()
     nc1_plate_count = 0
@@ -3152,8 +4239,11 @@ def run_cheson_pipeline(
                 f"B={ver.w_assembled_mm:.3f}/{ver.w_target_mm:.3f} | Eroare max={ver.max_gabarit_error_mm:.4f} mm"
             )
 
+            dxf_audits: list[DrawnDxfAudit] = []
+            re_read_rings: dict[str, Ring] = {}
+
             for plate in plates:
-                files, rel = _export_plate_cad(
+                files, rel, dxf_aud, rr = _export_plate_cad(
                     plate,
                     out_dir=out_root,
                     export_format=export_format,
@@ -3163,6 +4253,8 @@ def run_cheson_pipeline(
                     oda_path=effective_oda,
                     log_cb=_log,
                 )
+                dxf_audits.append(dxf_aud)
+                re_read_rings[plate.name] = rr
                 written_files.extend(files)
                 nc1_plate_count += 1
                 minx, miny, maxx, maxy = plate.bounds
@@ -3172,7 +4264,15 @@ def run_cheson_pipeline(
                     if plate.removed_residuals > 0
                     else ""
                 )
-                _log(f"   📄 {rel} ({dim_l:.3f} × {dim_w:.3f} mm, T{int(round(plate.thickness))}){res_msg}")
+                holes_msg = (
+                    f" | 🕳️ {dxf_aud.holes_matched}/{dxf_aud.holes_expected} găuri"
+                    if dxf_aud.holes_expected > 0
+                    else ""
+                )
+                _log(
+                    f"   📄 {rel} ({dim_l:.3f} × {dim_w:.3f} mm, T{int(round(plate.thickness))}, "
+                    f"Layer={','.join(dxf_aud.entity_layers) or '0'}){res_msg}{holes_msg}"
+                )
                 entries.append(
                     ManifestEntry(
                         pos_no=dstv.header.piece_id or nc1_path.stem,
@@ -3190,9 +4290,53 @@ def run_cheson_pipeline(
                         source_file=nc1_path.name,
                         output_folder=plate.folder if organize_by_thickness else "",
                         output_file=rel,
-                        notes=f"type={ver.detected_type}, face={plate.face}, role={plate.role}, err_max={ver.max_gabarit_error_mm:.4f}mm",
+                        notes=(
+                            f"type={ver.detected_type}, face={plate.face}, role={plate.role}, "
+                            f"layers={','.join(dxf_aud.entity_layers)}, dim_err={dxf_aud.dim_err_mm:.4f}mm"
+                        ),
                     )
                 )
+
+            post_ver = verify_post_draw_and_3d(
+                dstv=dstv,
+                cfg=cfg,
+                plates=plates,
+                dxf_audits=dxf_audits,
+                re_read_rings=re_read_rings,
+                bom=bom,
+                bom_row=bom_row,
+                pdf_dims=pdf_dims,
+            )
+            post_draw_audits.append(asdict(post_ver))
+            s3 = post_ver.sim_3d
+            p_badge = "✅ PASS" if post_ver.passed else "⚠ CHECK"
+            _log(
+                f"   🔎 REVERIFICARE POST-DESENARE ({p_badge}): DXF curat={post_ver.all_dxf_clean} | "
+                f"Layer 0 pur={post_ver.all_layer_zero} | Err cote={post_ver.nc1_max_dim_err_mm:.4f} mm | "
+                f"Err găuri={post_ver.nc1_max_hole_err_mm:.4f} mm"
+            )
+            if post_ver.pdf_drawing_name:
+                pdf_preview_dims = ", ".join(f"{v:g}" for v in post_ver.pdf_dims_confirmed[:10])
+                bom_err_s = f"{post_ver.pdf_bom_length_err_mm:.4f} mm" if post_ver.pdf_bom_length_err_mm is not None else "-"
+                _log(
+                    f"   📋 PDF ({post_ver.pdf_drawing_name}): ΔL STYKKLISTE={bom_err_s} | "
+                    f"Cote confirmate ({len(post_ver.pdf_dims_confirmed)}): [{pdf_preview_dims}]"
+                )
+            iou_str = ", ".join(f"{k}={v:.2f}%" for k, v in s3.face_iou_pct.items())
+            mass_str = (
+                f"{s3.mass_3d_kg:.2f} kg (BOM {s3.mass_bom_kg:.2f} kg, Δ{s3.mass_diff_pct:.2f}%)"
+                if s3.mass_bom_kg
+                else f"{s3.mass_3d_kg:.2f} kg"
+            )
+            _log(
+                f"   🧊 SIMULARE ASAMBLARE 3D: {s3.l_3d_mm:.3f} × {s3.b_3d_mm:.3f} × {s3.h_3d_mm:.3f} mm | "
+                f"Coliziuni={s3.max_interference_mm:.3f} mm | Rost sudură={s3.max_seam_gap_mm:.3f} mm | "
+                f"Fidelitate 3D vs NC1={s3.overall_3d_similarity_pct:.2f}% ({iou_str}) | "
+                f"Găuri 3D={s3.holes_3d_matched}/{s3.holes_3d_expected} | Masă={mass_str}"
+            )
+            if post_ver.issues:
+                for iss in post_ver.issues[:5]:
+                    _log(f"      ⚠ {iss}")
         except Exception as exc:
             err = f"Eroare la procesarea {nc1_path.name}: {exc}"
             errors.append(err)
@@ -3325,7 +4469,7 @@ def run_cheson_pipeline(
                     exterior=[(0.0, 0.0), (dim_x, 0.0), (dim_x, dim_y), (0.0, dim_y)],
                     source_bounds=(0.0, 0.0, dim_x, dim_y),
                 )
-                files, rel = _export_plate_cad(
+                files, rel, _, _ = _export_plate_cad(
                     rect_plate,
                     out_dir=out_root,
                     export_format=export_format,
@@ -3403,9 +4547,11 @@ def run_cheson_pipeline(
                 "preset": preset,
                 "exact_gabarit_lock": exact_gabarit_lock,
                 "strip_residual_fragments": strip_residual_fragments,
+                "use_extra_layers": use_nesting_layers,
                 "export_format": export_format,
             },
             "verifications": verifications,
+            "post_draw_audits": post_draw_audits,
             "summary": {
                 "total_entries": len(entries),
                 "by_status": status_counts,
@@ -3439,6 +4585,7 @@ def run_cheson_pipeline(
         "bom_plates_generated": bom_plate_count,
         "skipped": skipped_count,
         "verifications": verifications,
+        "post_draw_audits": post_draw_audits,
         "files": [str(f) for f in written_files],
         "manifest_path": str(manifest_path) if manifest_path else None,
         "csv_path": str(csv_path) if csv_path else None,
