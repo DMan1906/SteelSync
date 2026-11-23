@@ -4,6 +4,7 @@ import shutil
 import threading
 import tkinter as tk
 from pdf_to_dwg import PdfToCadConverter
+import cheson_extractor
 import metalix_importer
 import dwg_organizer
 from tkinter import filedialog, messagebox, ttk
@@ -389,19 +390,20 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # ─── Tab Configuration & Metadata ───────────────────────────────────────────
-DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder", "pdf_to_dwg", "imports_gen"]
+DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder", "pdf_to_dwg", "cheson_ext", "imports_gen"]
 TAB_METADATA = {
     "extractor": {"title": "📄 File Extractor", "icon": "📄"},
     "nc_sorter": {"title": "🔧 NC Sorter", "icon": "🔧"},
     "mod_nc": {"title": "📝 Modify NC", "icon": "📝"},
     "dwg_finder": {"title": "🔍 DWG Finder", "icon": "🔍"},
     "pdf_to_dwg": {"title": "📐 PDF to DWG", "icon": "📐"},
+    "cheson_ext": {"title": "📦 Cheson / HSQ", "icon": "📦"},
     "imports_gen": {"title": "📑 Imports Generator", "icon": "📑"},
 }
 TAB_NAME_MAP = {
@@ -424,6 +426,11 @@ TAB_NAME_MAP = {
     "📐 pdf to dwg": "pdf_to_dwg",
     "pdf2dwg": "pdf_to_dwg",
     "cad generator": "pdf_to_dwg",
+    "cheson_ext": "cheson_ext",
+    "cheson": "cheson_ext",
+    "cheson / hsq": "cheson_ext",
+    "📦 cheson / hsq": "cheson_ext",
+    "hsq": "cheson_ext",
     "imports_gen": "imports_gen",
     "imports generator": "imports_gen",
     "generator import": "imports_gen",
@@ -1170,6 +1177,23 @@ class UnifiedApp(ctk.CTk):
         self.imports_uppercase = ctk.BooleanVar(value=True)
         self.imports_open_folder = ctk.BooleanVar(value=True)
 
+        # ── Cheson / HSQ Extractor Variables ──
+        self.cheson_source_mode = ctk.StringVar(value="Folder Întreg (Batch)")
+        self.cheson_single_file = ctk.StringVar()
+        self.cheson_batch_dir = ctk.StringVar()
+        self.cheson_dest_dir = ctk.StringVar()
+        self.cheson_scope_mode = ctk.StringVar(value="Doar Piese Cheson (.nc1)")
+        self.cheson_preset_label = ctk.StringVar(value="Sudură colț atelier (184mm / -tw)")
+        self.cheson_format = ctk.StringVar(value="DWG (.dwg cu fallback .dxf)")
+        self.cheson_use_layers = ctk.BooleanVar(value=True)
+        self.cheson_include_marking = ctk.BooleanVar(value=False)
+        self.cheson_organize_thickness = ctk.BooleanVar(value=True)
+        self.cheson_recursive = ctk.BooleanVar(value=False)
+        self.cheson_generate_reports = ctk.BooleanVar(value=True)
+        self.cheson_open_folder = ctk.BooleanVar(value=True)
+        self.cheson_running = False
+        self.cheson_last_dest_dir = ""
+
         # ── Extension tracking ──
         self.available_extensions = ['.nc', '.pdf', '.dwg', '.dxf', '.step', '.stp']
         self.extension_vars = {}
@@ -1329,6 +1353,21 @@ class UnifiedApp(ctk.CTk):
             default_desk = os.path.join(os.path.expanduser("~"), "Desktop")
             self.imports_output_dir.set(s.get("imports_output_dir", default_desk))
             self.imports_open_folder.set(s.get("imports_open_folder", True))
+
+            # Cheson / HSQ Extractor settings
+            self.cheson_source_mode.set(s.get("cheson_source_mode", "Folder Întreg (Batch)"))
+            self.cheson_single_file.set(s.get("cheson_single_file", ""))
+            self.cheson_batch_dir.set(s.get("cheson_batch_dir", ""))
+            self.cheson_dest_dir.set(s.get("cheson_dest_dir", ""))
+            self.cheson_scope_mode.set(s.get("cheson_scope_mode", "Doar Piese Cheson (.nc1)"))
+            self.cheson_preset_label.set(s.get("cheson_preset_label", "Sudură colț atelier (184mm / -tw)"))
+            self.cheson_format.set(s.get("cheson_format", "DWG (.dwg cu fallback .dxf)"))
+            self.cheson_use_layers.set(s.get("cheson_use_layers", True))
+            self.cheson_include_marking.set(s.get("cheson_include_marking", False))
+            self.cheson_organize_thickness.set(s.get("cheson_organize_thickness", True))
+            self.cheson_recursive.set(s.get("cheson_recursive", False))
+            self.cheson_generate_reports.set(s.get("cheson_generate_reports", True))
+            self.cheson_open_folder.set(s.get("cheson_open_folder", True))
 
             # Restore browse directory memories (Requirement #3)
             self.extractor_source_last_dir = s.get("extractor_source_last_dir", "")
@@ -1500,6 +1539,19 @@ class UnifiedApp(ctk.CTk):
             "imports_consolidated_name": self.imports_consolidated_name.get(),
             "imports_output_dir": self.imports_output_dir.get(),
             "imports_open_folder": self.imports_open_folder.get(),
+            "cheson_source_mode": self.cheson_source_mode.get(),
+            "cheson_single_file": self.cheson_single_file.get(),
+            "cheson_batch_dir": self.cheson_batch_dir.get(),
+            "cheson_dest_dir": self.cheson_dest_dir.get(),
+            "cheson_scope_mode": self.cheson_scope_mode.get(),
+            "cheson_preset_label": self.cheson_preset_label.get(),
+            "cheson_format": self.cheson_format.get(),
+            "cheson_use_layers": self.cheson_use_layers.get(),
+            "cheson_include_marking": self.cheson_include_marking.get(),
+            "cheson_organize_thickness": self.cheson_organize_thickness.get(),
+            "cheson_recursive": self.cheson_recursive.get(),
+            "cheson_generate_reports": self.cheson_generate_reports.get(),
+            "cheson_open_folder": self.cheson_open_folder.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
             "extensions": ext_map,
             "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
@@ -1970,6 +2022,7 @@ class UnifiedApp(ctk.CTk):
         self.tab_mod = self.tab_frames["mod_nc"]
         self.tab_dwg = self.tab_frames["dwg_finder"]
         self.tab_pdf_cad = self.tab_frames["pdf_to_dwg"]
+        self.tab_cheson = self.tab_frames["cheson_ext"]
         self.tab_imports = self.tab_frames["imports_gen"]
 
         # Backwards-compatibility wrapper for any self.tabview.set calls
@@ -1987,6 +2040,7 @@ class UnifiedApp(ctk.CTk):
         self.create_mod_nc_tab()
         self.create_dwg_finder_tab()
         self.create_pdf_to_dwg_tab()
+        self.create_cheson_tab()
         self.create_imports_generator_tab()
 
         self._setup_tabview_drag_and_drop()
@@ -7131,6 +7185,390 @@ class UnifiedApp(ctk.CTk):
             os.startfile(target)
         else:
             messagebox.showwarning("Folder inexistent", f"Folderul nu există încă:\n{target}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  CHESON / HSQ EXTRACTOR TAB
+    # ══════════════════════════════════════════════════════════════════════
+    def create_cheson_tab(self):
+        """Construct the UI for the integrated Cheson / HSQ box-beam extractor tab."""
+        parent = self.tab_cheson
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(3, weight=1)
+
+        # ── Card 1: Header / Description ──
+        hdr_card = ctk.CTkFrame(parent, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        hdr_card.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 6))
+        hdr_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(hdr_card, text="📦", font=("Segoe UI Emoji", 26)).grid(row=0, column=0, rowspan=2, padx=(16, 12), pady=10)
+        ctk.CTkLabel(
+            hdr_card,
+            text="Cheson / HSQ Extractor (Profile Compuse .nc1 ➜ Plăci Debitabile 1:1)",
+            font=("Segoe UI", 15, "bold"),
+            text_color=_TEXT_PRI,
+        ).grid(row=0, column=1, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(
+            hdr_card,
+            text=(
+                "Descompune fișierele DSTV (.nc1) de profile compuse (HSQ / BOX / WQ) în table individuale (tălpi C1/C2 + inimi L1..Ln) "
+                "organizate pe grosimi (T8, T25 etc.), cu opțiune de a genera DOAR chesonul sau și W-drawings / BOM-ul ansamblului."
+            ),
+            font=("Segoe UI", 11),
+            text_color=_TEXT_SEC,
+            wraplength=760,
+            justify="left",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 8))
+
+        # ── Card 2: Configuration Inputs ──
+        cfg_card = ctk.CTkFrame(parent, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        cfg_card.grid(row=1, column=0, sticky="ew", padx=16, pady=4)
+        cfg_card.grid_columnconfigure(1, weight=1)
+
+        # Row 0: Source mode (Folder vs Single .nc1)
+        ctk.CTkLabel(cfg_card, text="Mod Sursă:", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w", padx=14, pady=(10, 6))
+        self.cheson_mode_seg = ctk.CTkSegmentedButton(
+            cfg_card,
+            values=["Folder Întreg (Batch)", "Fișier Unic (.nc1)"],
+            variable=self.cheson_source_mode,
+            command=self._on_cheson_source_mode_change,
+            selected_color=_ACCENT,
+            selected_hover_color=_ACCENT_HOV,
+        )
+        self.cheson_mode_seg.grid(row=0, column=1, sticky="w", padx=8, pady=(10, 6))
+
+        # Row 1: Source Path
+        self.cheson_src_lbl = ctk.CTkLabel(cfg_card, text="Folder Cheson / NC1:", font=("Segoe UI", 12))
+        self.cheson_src_lbl.grid(row=1, column=0, sticky="w", padx=14, pady=5)
+        self.cheson_src_entry = ctk.CTkEntry(cfg_card, textvariable=self.cheson_batch_dir, height=32, corner_radius=6)
+        self.cheson_src_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=5)
+        ctk.CTkButton(
+            cfg_card,
+            text="📁 Browse",
+            width=90,
+            height=32,
+            corner_radius=6,
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            command=self.browse_cheson_source,
+        ).grid(row=1, column=2, padx=(0, 14), pady=5)
+
+        # Row 2: Scope mode (Cheson only vs + W-drawing vs Full Assembly)
+        ctk.CTkLabel(cfg_card, text="Ce Piese Generez:", font=("Segoe UI", 12, "bold")).grid(row=2, column=0, sticky="w", padx=14, pady=6)
+        self.cheson_scope_seg = ctk.CTkSegmentedButton(
+            cfg_card,
+            values=["Doar Piese Cheson (.nc1)", "Cheson + W-Drawings", "Tot Ansamblul (+ BOM)"],
+            variable=self.cheson_scope_mode,
+            selected_color=_ACCENT,
+            selected_hover_color=_ACCENT_HOV,
+        )
+        self.cheson_scope_seg.grid(row=2, column=1, columnspan=2, sticky="w", padx=8, pady=6)
+
+        # Row 3: Destination Folder
+        ctk.CTkLabel(cfg_card, text="Folder Destinație:", font=("Segoe UI", 12)).grid(row=3, column=0, sticky="w", padx=14, pady=5)
+        ctk.CTkEntry(
+            cfg_card,
+            textvariable=self.cheson_dest_dir,
+            placeholder_text="Implicit: subfolder Cheson_Output în folderul sursă",
+            height=32,
+            corner_radius=6,
+        ).grid(row=3, column=1, sticky="ew", padx=8, pady=5)
+        ctk.CTkButton(
+            cfg_card,
+            text="📁 Browse",
+            width=90,
+            height=32,
+            corner_radius=6,
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            command=self.browse_cheson_dest,
+        ).grid(row=3, column=2, padx=(0, 14), pady=5)
+
+        # Row 4: Assembly Rule Preset + Export Format
+        ctk.CTkLabel(cfg_card, text="Regulă & Format:", font=("Segoe UI", 12)).grid(row=4, column=0, sticky="w", padx=14, pady=6)
+        rule_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
+        rule_frame.grid(row=4, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+
+        ctk.CTkOptionMenu(
+            rule_frame,
+            values=[
+                "Sudură colț atelier (184mm / -tw)",
+                "Nominal profil HSQ (NC1)",
+                "Ambele tălpi peste inimi (BOX)",
+                "Ambele tălpi între inimi (fără retragere)",
+            ],
+            variable=self.cheson_preset_label,
+            width=265,
+            height=30,
+            corner_radius=6,
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkOptionMenu(
+            rule_frame,
+            values=[
+                "DWG (.dwg cu fallback .dxf)",
+                "DXF (.dxf R2018)",
+                "Ambele (.dxf + .dwg)",
+            ],
+            variable=self.cheson_format,
+            width=220,
+            height=30,
+            corner_radius=6,
+        ).pack(side="left", padx=(0, 8))
+
+        # Row 5: Compact checkboxes
+        chk_frame = ctk.CTkFrame(cfg_card, fg_color="transparent")
+        chk_frame.grid(row=5, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 6))
+        ctk.CTkCheckBox(chk_frame, text="Layere Nesting (CUT_OUTER/INNER)", variable=self.cheson_use_layers).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(chk_frame, text="Text Marcare (MARKING)", variable=self.cheson_include_marking).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(chk_frame, text="Subfoldere Grosimi (T8/T25)", variable=self.cheson_organize_thickness).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(chk_frame, text="Recursiv (.nc1)", variable=self.cheson_recursive).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(chk_frame, text="Raport CSV/JSON", variable=self.cheson_generate_reports).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(chk_frame, text="Deschide folder la final", variable=self.cheson_open_folder).pack(side="left")
+
+        # Row 6: Shared ODA status strip
+        oda_frame = ctk.CTkFrame(cfg_card, fg_color=("#eef2f6", "#182335"), corner_radius=6)
+        oda_frame.grid(row=6, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 10))
+        oda_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(oda_frame, text="ODA File Converter (DWG nativ):", font=("Segoe UI", 11)).grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        ctk.CTkEntry(
+            oda_frame,
+            textvariable=self.pdf_cad_oda_path,
+            placeholder_text="Cale ODAFileConverter.exe (detectat automat dacă e instalat)",
+            height=28,
+            corner_radius=4,
+        ).grid(row=0, column=1, sticky="ew", padx=8, pady=5)
+        ctk.CTkButton(oda_frame, text="📁 Browse", width=70, height=28, corner_radius=4, command=self.browse_pdf_cad_oda).grid(row=0, column=2, padx=4, pady=5)
+        ctk.CTkButton(oda_frame, text="🔍 Test ODA", width=75, height=28, corner_radius=4, command=self.test_oda_installation).grid(row=0, column=3, padx=(4, 10), pady=5)
+
+        # ── Card 3: Action Bar & Progress ──
+        act_card = ctk.CTkFrame(parent, fg_color="transparent")
+        act_card.grid(row=2, column=0, sticky="ew", padx=16, pady=4)
+        act_card.grid_columnconfigure(0, weight=1)
+
+        btn_row = ctk.CTkFrame(act_card, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(2, 6))
+        btn_row.grid_columnconfigure(0, weight=1)
+
+        self.btn_cheson_start = ctk.CTkButton(
+            btn_row,
+            text="🚀 GENEREAZĂ PIESE CHESON",
+            font=("Segoe UI", 13, "bold"),
+            fg_color=_ACCENT,
+            hover_color=_ACCENT_HOV,
+            height=38,
+            corner_radius=8,
+            command=self.start_cheson_process,
+        )
+        self.btn_cheson_start.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        self.btn_cheson_open = ctk.CTkButton(
+            btn_row,
+            text="📂 Deschide Rezultate",
+            font=("Segoe UI", 12, "bold"),
+            width=170,
+            height=38,
+            corner_radius=8,
+            fg_color=("#475569", "#334155"),
+            hover_color=("#334155", "#475569"),
+            command=self.open_cheson_output_folder,
+        )
+        self.btn_cheson_open.grid(row=0, column=1, sticky="e")
+
+        self.cheson_progress = ctk.CTkProgressBar(act_card, height=10, corner_radius=5)
+        self.cheson_progress.pack(fill="x", pady=2)
+        self.cheson_progress.set(0)
+
+        # ── Card 4: Terminal Log ──
+        log_frame = ctk.CTkFrame(parent, fg_color=_CARD_BG, border_color=_CARD_BORDER, border_width=1, corner_radius=10)
+        log_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(4, 12))
+        log_frame.grid_rowconfigure(0, weight=1)
+        log_frame.grid_columnconfigure(0, weight=1)
+
+        self.cheson_log_box = ctk.CTkTextbox(
+            log_frame,
+            font=("Cascadia Code", 11),
+            fg_color=_LOG_BG,
+            text_color="#a3e635",
+            corner_radius=8,
+        )
+        self.cheson_log_box.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        self._on_cheson_source_mode_change()
+
+    def _on_cheson_source_mode_change(self, val=None):
+        mode = self.cheson_source_mode.get().lower()
+        if "unic" in mode or "single" in mode:
+            self.cheson_src_lbl.configure(text="Fișier Cheson (.nc1):")
+            self.cheson_src_entry.configure(textvariable=self.cheson_single_file)
+        else:
+            self.cheson_src_lbl.configure(text="Folder Cheson / NC1:")
+            self.cheson_src_entry.configure(textvariable=self.cheson_batch_dir)
+
+    def browse_cheson_source(self):
+        mode = self.cheson_source_mode.get().lower()
+        if "unic" in mode or "single" in mode:
+            f = filedialog.askopenfilename(
+                title="Selectează Fișier DSTV (.nc1)",
+                filetypes=[("Fișiere DSTV NC1", "*.nc1"), ("Toate Fișierele", "*.*")],
+                initialdir=getattr(self, "global_last_dir", None),
+            )
+            if f:
+                self.cheson_single_file.set(f)
+                self._set_global_last_dir(f)
+        else:
+            d = filedialog.askdirectory(
+                title="Selectează Folderul Cheson / Ansamblu",
+                initialdir=getattr(self, "global_last_dir", None),
+            )
+            if d:
+                self.cheson_batch_dir.set(d)
+                self._set_global_last_dir(d)
+
+    def browse_cheson_dest(self):
+        d = filedialog.askdirectory(
+            title="Selectează Folderul Destinație pentru Piesele din Cheson",
+            initialdir=getattr(self, "global_last_dir", None),
+        )
+        if d:
+            self.cheson_dest_dir.set(d)
+            self._set_global_last_dir(d)
+
+    def cheson_log(self, msg):
+        if hasattr(self, "cheson_log_box"):
+            self.cheson_log_box.insert("end", msg + "\n")
+            self.cheson_log_box.see("end")
+
+    def open_cheson_output_folder(self):
+        target = (
+            self.cheson_last_dest_dir
+            or self.cheson_dest_dir.get().strip()
+        )
+        if target and os.path.isdir(target):
+            os.startfile(target)
+        else:
+            messagebox.showwarning("Folder inexistent", "Nu există încă un folder destinație generat.")
+
+    def _resolve_cheson_params(self):
+        mode_raw = self.cheson_source_mode.get().lower()
+        source_mode = "single_file" if ("unic" in mode_raw or "single" in mode_raw) else "folder"
+
+        scope_raw = self.cheson_scope_mode.get().lower()
+        if "tot ansamblul" in scope_raw or "bom" in scope_raw:
+            scope_mode = "full_assembly"
+        elif "w-drawing" in scope_raw:
+            scope_mode = "cheson_and_w"
+        else:
+            scope_mode = "cheson_only"
+
+        preset_raw = self.cheson_preset_label.get().lower()
+        if "nominal" in preset_raw:
+            preset = "nominal_parametric"
+        elif "peste inimi" in preset_raw:
+            preset = "box_both_over"
+        elif "fără retragere" in preset_raw:
+            preset = "box_both_between"
+        else:
+            preset = "workshop_corner_weld"
+
+        fmt_raw = self.cheson_format.get().lower()
+        if "ambele" in fmt_raw:
+            export_fmt = "both"
+        elif fmt_raw.startswith("dxf"):
+            export_fmt = "dxf"
+        else:
+            export_fmt = "dwg_fallback"
+
+        return source_mode, scope_mode, preset, export_fmt
+
+    def start_cheson_process(self):
+        if self.cheson_running:
+            return
+
+        source_mode, scope_mode, preset, export_fmt = self._resolve_cheson_params()
+        if source_mode == "single_file":
+            src_path = self.cheson_single_file.get().strip()
+            if not src_path or not os.path.isfile(src_path):
+                messagebox.showerror("Eroare", "Te rog selectează un fișier .nc1 valid.")
+                return
+            default_dest = os.path.join(os.path.dirname(src_path), "Cheson_Output")
+        else:
+            src_path = self.cheson_batch_dir.get().strip()
+            if not src_path or not os.path.isdir(src_path):
+                messagebox.showerror("Eroare", "Te rog selectează un folder sursă valid.")
+                return
+            default_dest = os.path.join(src_path, "Cheson_Output")
+
+        dest_dir = self.cheson_dest_dir.get().strip() or default_dest
+        self.cheson_last_dest_dir = dest_dir
+        self.save_settings()
+
+        self.cheson_running = True
+        self.btn_cheson_start.configure(state="disabled", text="⏳ Extragere în curs...")
+        self.cheson_progress.set(0)
+        self.cheson_log_box.delete("1.0", "end")
+
+        oda_path = self.pdf_cad_oda_path.get().strip() or None
+        use_layers = self.cheson_use_layers.get()
+        include_marking = self.cheson_include_marking.get()
+        org_thick = self.cheson_organize_thickness.get()
+        recursive = self.cheson_recursive.get()
+        gen_reports = self.cheson_generate_reports.get()
+
+        def _worker():
+            try:
+                res = cheson_extractor.run_cheson_pipeline(
+                    source_path=src_path,
+                    dest_dir=dest_dir,
+                    source_mode=source_mode,
+                    scope_mode=scope_mode,
+                    preset=preset,
+                    export_format=export_fmt,
+                    use_nesting_layers=use_layers,
+                    include_marking=include_marking,
+                    organize_by_thickness=org_thick,
+                    recursive=recursive,
+                    generate_reports=gen_reports,
+                    oda_path=oda_path,
+                    progress_callback=lambda p: self.after(0, lambda val=p: self.cheson_progress.set(val)),
+                    log_callback=lambda m: self.after(0, lambda msg=m: self.cheson_log(msg)),
+                )
+                self.after(0, lambda: self._on_cheson_complete(res, None))
+            except Exception as exc:
+                self.after(0, lambda err=str(exc): self._on_cheson_complete(None, err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_cheson_complete(self, res, err):
+        self.cheson_running = False
+        self.btn_cheson_start.configure(state="normal", text="🚀 GENEREAZĂ PIESE CHESON")
+        if err:
+            self.cheson_progress.set(0)
+            self.cheson_log(f"\n❌ EROARE: {err}")
+            messagebox.showerror("Eroare Cheson Extractor", err)
+            return
+
+        self.cheson_progress.set(1.0)
+        dest_dir = res["dest_dir"]
+        self.cheson_last_dest_dir = dest_dir
+        summary = (
+            f"Extragere finalizată!\n\n"
+            f"• Piese cheson (.nc1): {res['plates_generated']}\n"
+            f"• W-drawings convertite: {res['w_drawings_converted']}\n"
+            f"• Plăci BOM sintetizate: {res['bom_plates_generated']}\n"
+            f"• Total fișiere CAD generate: {len(res['files'])}\n\n"
+            f"Folder destinație:\n{dest_dir}"
+        )
+        if res.get("errors"):
+            summary += "\n\nAtenționări:\n" + "\n".join(res["errors"][:5])
+            messagebox.showwarning("Finalizat cu atenționări", summary)
+        else:
+            messagebox.showinfo("Succes — Cheson Extractor", summary)
+
+        if self.cheson_open_folder.get() and os.path.isdir(dest_dir):
+            try:
+                os.startfile(dest_dir)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.9.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.9.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.9.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.10.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.10.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.10.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.9.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.9.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.10.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.10.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -15,6 +15,11 @@
 3. Rulează fișierul direct pe Windows.
 
 ## 🚀 Funcționalități
+
+- **📦 Cheson / HSQ Extractor (NOU în v1.10.0 — Descompunere Profile Compuse `.nc1` Direct în SteelSync)**:
+  - **Tab dedicat în interfața principală (`📦 Cheson / HSQ`)**: descompune automat fișierele DSTV `.nc1` de profile compuse (`HSQ`, `BOX`, `WQ`) în table individuale de debitare (`C1`, `C2`, `L1..Ln`), organizate pe subfoldere de grosimi (`T8`, `T25` etc.) în format `.dwg` nativ (via ODA) sau `.dxf` R2018 curat gata de nesting.
+  - **3 Moduri Selecție Piese**: poți genera **doar piesele din cheson (`.nc1`)**, **cheson + W-drawings (`.pdf`)** (convertite 1:1 prin `PdfToCadConverter`), sau **tot ansamblul complet** (inclusiv tablele dreptunghiulare `PL*W` din tabelul `STYKKLISTE` al `A-drawing.pdf`).
+  - **Reguli de Îmbinare Configurabile**: suportă modul calibrat de atelier cu sudură de colț exterioară (`184 mm` / retragere `tw`), modul nominal parametric din string-ul `HSQ`, ambele tălpi peste inimi (`BOX`) sau ambele între inimi, plus re-mapare automată găuri `BO`, decupaje `IK` și marcare `SI` la originea `(0, 0)`.
 
 - **📐 PDF to DWG / CAD Generator 1:1 Fără Cote (NOU în v1.8.1 — Impunere & Audit Automat Cote de Rază `R=...` ±0.2 mm + Re-generare Adaptivă)**:
   - **Extragere, Impunere Geometrică & Auditare Cote de Rază (`R=15`, `R=5`, `R10` etc.):** Algoritmul citește automat etichetele de rază cu linie de indicație (leader line + săgeată) din desenul PDF și recalibrează matematic arcul de racordare și capetele tangente ale muchiilor la raza reală cotată (`±0.00 mm`), corectând automat cazurile în care Tekla randează grafic un colț la o rază simbolică diferită (ex. desenat `R10` în PDF dar cotat `R=15` sau `R=5`).
