@@ -391,10 +391,18 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.18.0"
+APP_VERSION = "1.18.1"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+CHESON_PRESET_OPTIONS = [
+    "Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)",
+    "Tip 1: Cheson cu Talpă (H - tf - tw)",
+    "Tip 2: Cheson fără Talpă (H - 2*tw)",
+    "Tip 3: Cheson Dublu cu Talpă Mijloc",
+    "Nominal profil HSQ (fără retragere tw)",
+]
 
 # ─── Tab Configuration & Metadata ───────────────────────────────────────────
 DEFAULT_TAB_ORDER = ["extractor", "nc_sorter", "mod_nc", "dwg_finder", "pdf_to_dwg", "cheson_ext", "imports_gen"]
@@ -1378,7 +1386,10 @@ class UnifiedApp(ctk.CTk):
             self.cheson_batch_dir.set(s.get("cheson_batch_dir", ""))
             self.cheson_dest_dir.set(s.get("cheson_dest_dir", ""))
             self.cheson_scope_mode.set(s.get("cheson_scope_mode", "Doar Piese Cheson (.nc1)"))
-            self.cheson_preset_label.set(s.get("cheson_preset_label", "Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)"))
+            saved_preset = str(s.get("cheson_preset_label", "") or "").strip()
+            if saved_preset not in CHESON_PRESET_OPTIONS:
+                saved_preset = CHESON_PRESET_OPTIONS[0]
+            self.cheson_preset_label.set(saved_preset)
             self.cheson_format.set(s.get("cheson_format", "DWG (.dwg cu fallback .dxf)"))
             self.cheson_exact_gabarit.set(s.get("cheson_exact_gabarit", True))
             self.cheson_strip_residuals.set(s.get("cheson_strip_residuals", True))
@@ -7624,13 +7635,7 @@ class UnifiedApp(ctk.CTk):
 
         ctk.CTkOptionMenu(
             rule_frame,
-            values=[
-                "Auto-Detect Tip Cheson (Tip 1 / Tip 2 / Tip 3)",
-                "Tip 1: Cheson cu Talpă (H - tf - tw)",
-                "Tip 2: Cheson fără Talpă (H - 2*tw)",
-                "Tip 3: Cheson Dublu cu Talpă Mijloc",
-                "Nominal profil HSQ (fără retragere tw)",
-            ],
+            values=CHESON_PRESET_OPTIONS,
             variable=self.cheson_preset_label,
             width=320,
             height=30,
@@ -7879,13 +7884,15 @@ class UnifiedApp(ctk.CTk):
         else:
             scope_mode = "cheson_only"
 
-        preset_raw = self.cheson_preset_label.get().lower()
-        if "tip 1" in preset_raw or "cu talpă" in preset_raw:
-            preset = "cheson_cu_talpa"
-        elif "tip 2" in preset_raw or "fără talpă" in preset_raw:
-            preset = "cheson_fara_talpa"
-        elif "tip 3" in preset_raw or "dublu" in preset_raw or "sudură colț" in preset_raw:
+        preset_raw = self.cheson_preset_label.get().strip().lower()
+        if "auto" in preset_raw or "sudură colț" in preset_raw:
+            preset = "auto"
+        elif preset_raw.startswith("tip 3") or "dublu" in preset_raw:
             preset = "cheson_dublu"
+        elif preset_raw.startswith("tip 2") or "fără talpă" in preset_raw:
+            preset = "cheson_fara_talpa"
+        elif preset_raw.startswith("tip 1") or "cu talpă" in preset_raw:
+            preset = "cheson_cu_talpa"
         elif "nominal" in preset_raw:
             preset = "nominal_parametric"
         elif "peste inimi" in preset_raw:

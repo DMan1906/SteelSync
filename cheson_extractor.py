@@ -1997,8 +1997,20 @@ def _detect_tip1_recessed_web_faces(
     talpa_side: str,
 ) -> tuple[set[str], str, tuple[float, float]]:
     """Detect Tip 1 overhanging-talpă faces (v/h) whose DSTV AK only shows the talpă edge strip."""
-    if detected_type != "cheson_cu_talpa" or talpa_side not in ("bottom", "top"):
+    if detected_type not in ("cheson_cu_talpa", "nominal_parametric"):
         return set(), "", (0.0, spec.total_width)
+
+    if talpa_side not in ("bottom", "top"):
+        u_rings = locked_rings.get("u", [])
+        o_rings = locked_rings.get("o", [])
+        dy_u = (max(polygon_bounds(r)[3] for r in u_rings) - min(polygon_bounds(r)[1] for r in u_rings)) if u_rings else spec.b_bot
+        dy_o = (max(polygon_bounds(r)[3] for r in o_rings) - min(polygon_bounds(r)[1] for r in o_rings)) if o_rings else spec.b_top
+        if dy_u > dy_o + 2.0 * spec.tw + 1.0:
+            talpa_side = "bottom"
+        elif dy_o > dy_u + 2.0 * spec.tw + 1.0:
+            talpa_side = "top"
+        else:
+            return set(), "", (0.0, spec.total_width)
 
     talpa_face = "u" if talpa_side == "bottom" else "o"
     narrow_face = "o" if talpa_side == "bottom" else "u"
@@ -2040,16 +2052,19 @@ def _synthesize_recessed_web_rings(
     """Reconstruct recessed web contour(s) from the narrow flange outer box (`o`/`u`)."""
     H = spec.total_height
     tw = spec.tw
+    eff_talpa = talpa_side if talpa_side in ("bottom", "top") else (
+        "bottom" if spec.b_bot >= spec.b_top else "top"
+    )
     if cfg.override_web_height_mm is not None and cfg.override_web_height_mm > 0.0:
         target_h = float(cfg.override_web_height_mm)
-        if talpa_side == "bottom":
+        if eff_talpa == "bottom":
             z_lo = spec.tf_bot
             z_hi = z_lo + target_h
         else:
             z_hi = H - spec.tf_top
             z_lo = z_hi - target_h
     else:
-        if talpa_side == "bottom":
+        if eff_talpa == "bottom":
             z_lo = spec.tf_bot
             z_hi = H - tw
         else:
@@ -6222,6 +6237,16 @@ def _extract_and_verify_cheson_closed_loop(
                     False,
                 )
             )
+    else:
+        auto_recovery_cfg = ChesonConfig.from_preset(
+            "auto",
+            exact_gabarit_lock=base_cfg.exact_gabarit_lock,
+            target_length_mm=base_cfg.target_length_mm,
+            override_web_height_mm=base_cfg.override_web_height_mm,
+            strip_residual_fragments=base_cfg.strip_residual_fragments,
+            deduplicate_identical=base_cfg.deduplicate_identical,
+        )
+        strategies.append(("Auto-Detect Tip Cheson (corecție tip)", auto_recovery_cfg, True))
 
     best_bundle = None
     best_score = (-1, -1, -1.0, -999.0)
