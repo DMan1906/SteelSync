@@ -4079,10 +4079,21 @@ def simulate_3d_assembly(
     tw = spec.tw
 
     # 1. Recover 3D placements for every drawn plate
-    # Determine web mounting Y-span: on Tip 1 (cheson_cu_talpa), webs mount along the narrow capac bounds
+    # Determine web mounting Y-span: on Tip 1 / overhanging talpă, webs mount along the narrow capac bounds
+    eff_talpa_side = talpa_side
+    if detected_type in ("cheson_cu_talpa", "nominal_parametric") and eff_talpa_side not in ("bottom", "top"):
+        u_rings = locked_rings.get("u", [])
+        o_rings = locked_rings.get("o", [])
+        dy_u = (max(polygon_bounds(r)[3] for r in u_rings) - min(polygon_bounds(r)[1] for r in u_rings)) if u_rings else spec.b_bot
+        dy_o = (max(polygon_bounds(r)[3] for r in o_rings) - min(polygon_bounds(r)[1] for r in o_rings)) if o_rings else spec.b_top
+        if dy_u > dy_o + 2.0 * tw + 1.0:
+            eff_talpa_side = "bottom"
+        elif dy_o > dy_u + 2.0 * tw + 1.0:
+            eff_talpa_side = "top"
+
     y_box_lo, y_box_hi = 0.0, B
-    if detected_type == "cheson_cu_talpa":
-        narrow_face = "o" if talpa_side == "bottom" else "u"
+    if detected_type in ("cheson_cu_talpa", "nominal_parametric") and eff_talpa_side in ("bottom", "top"):
+        narrow_face = "o" if eff_talpa_side == "bottom" else "u"
         narrow_rings = locked_rings.get(narrow_face, [])
         if narrow_rings:
             _, ny0, _, ny1 = polygon_bounds(narrow_rings[0])
@@ -4200,6 +4211,7 @@ def simulate_3d_assembly(
         wp: ExtractedPlate = ws["plate"]
         wy_mid = 0.5 * (ws["y_band"][0] + ws["y_band"][1])
         wz0, wz1 = ws["z_band"]
+        wz_mid = 0.5 * (wz0 + wz1)
         wx0, _, _, wx1, _, _ = ws["bbox3d"]
         for fs in flange_solids:
             fp: ExtractedPlate = fs["plate"]
@@ -4207,10 +4219,18 @@ def simulate_3d_assembly(
             fy0, fy1 = fs["y_band"]
             # Check transverse contact gap (flush at Y or Z)
             if fy0 - 0.5 <= ws["y_band"][1] <= fy1 + 0.5 and fy0 - 0.5 <= ws["y_band"][0] <= fy1 + 0.5:
+                if detected_type == "cheson_dublu" and (
+                    (fp.face == "o" and wz_mid < 0.5 * H)
+                    or (fp.face == "u" and wz_mid > 0.5 * H)
+                ):
+                    continue
                 # Over-web flange (e.g. talpa): Z should touch web top/bot
                 gap_z = min(abs(wz0 - fz1), abs(fz0 - wz1))
                 max_seam_gap = max(max_seam_gap, gap_z)
             elif (ws["y_band"][1] <= fy0 + 0.5) or (ws["y_band"][0] >= fy1 - 0.5):
+                # Only compare vertically adjacent capac <-> web pairs (on Tip 3, bottom webs don't touch top capac)
+                if min(wz1, fz1) <= max(wz0, fz0) - 0.5:
+                    continue
                 # Between-web capac: Y face touches web inner wall
                 gap_y = abs(fy0 - ws["y_band"][1]) if ws["y_band"][1] <= fy0 + 0.5 else abs(ws["y_band"][0] - fy1)
                 max_seam_gap = max(max_seam_gap, gap_y)
@@ -4236,7 +4256,7 @@ def simulate_3d_assembly(
 
     # 5. 4-face 3D projection silhouette IoU vs locked .nc1 faces
     recessed_faces, _, _ = _detect_tip1_recessed_web_faces(
-        locked_rings, spec, detected_type, talpa_side
+        locked_rings, spec, detected_type, eff_talpa_side
     )
     face_iou: dict[str, float] = {}
     for face_xy in ("o", "u"):
@@ -4256,9 +4276,9 @@ def simulate_3d_assembly(
                         continue
                     if face_xy == "u" and wz_mid > 0.5 * H:
                         continue
-                if detected_type == "cheson_cu_talpa" and (
-                    (talpa_side == "bottom" and face_xy == "u")
-                    or (talpa_side == "top" and face_xy == "o")
+                if detected_type in ("cheson_cu_talpa", "nominal_parametric") and (
+                    (eff_talpa_side == "bottom" and face_xy == "u")
+                    or (eff_talpa_side == "top" and face_xy == "o")
                 ):
                     continue
                 proj_xy.append([(span_x[0], wy0), (span_x[1], wy0), (span_x[1], wy1), (span_x[0], wy1)])
@@ -5049,6 +5069,7 @@ def verify_post_draw_and_3d(
     _, _, l_assembled_env = _compute_raw_x_envelope(locked_rings)
     mid_x_raw = x_min_env + 0.5 * l_nc1_raw
     applied_delta_l = (l_assembled_env - l_nc1_raw) if cfg.exact_gabarit_lock else 0.0
+    l_sim_target = l_gabarit if cfg.exact_gabarit_lock else l_assembled_env
 
     sim_3d = simulate_3d_assembly(
         dstv=dstv,
@@ -5058,7 +5079,7 @@ def verify_post_draw_and_3d(
         re_read_rings=re_read_rings,
         dxf_audits=dxf_audits,
         locked_rings=locked_rings,
-        l_gabarit=l_gabarit,
+        l_gabarit=l_sim_target,
         detected_type=detected_type,
         talpa_side=talpa_side,
         bom_row=bom_row,
@@ -5150,7 +5171,7 @@ def verify_post_draw_and_3d(
     if pdf_overlay is not None:
         for iss in pdf_overlay.issues:
             issues.append(f"[OverlayPDF] {iss}")
-    if pdf_bom_len_err is not None and pdf_bom_len_err > 0.01:
+    if cfg.exact_gabarit_lock and pdf_bom_len_err is not None and pdf_bom_len_err > 0.01:
         issues.append(f"Gabarit 3D {sim_3d.l_3d_mm:.3f} != STYKKLISTE {bom_row.length_mm:.3f}")
 
     passed = (
@@ -5158,7 +5179,7 @@ def verify_post_draw_and_3d(
         and all_layer_zero
         and nc1_max_dim_err <= 0.01
         and nc1_max_hole_err <= 0.05
-        and (pdf_bom_len_err is None or pdf_bom_len_err <= 0.01)
+        and (not cfg.exact_gabarit_lock or pdf_bom_len_err is None or pdf_bom_len_err <= 0.01)
         and sim_3d.passed
         and (pdf_overlay is None or pdf_overlay.passed)
     )

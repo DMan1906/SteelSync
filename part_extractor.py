@@ -391,7 +391,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.18.1"
+APP_VERSION = "1.18.2"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -8010,6 +8010,7 @@ class UnifiedApp(ctk.CTk):
                 f"   Audit        : {badge} | Eroare max gabarit = {v['max_gabarit_error_mm']:.4f} mm | Layer 0 pur = {pda.get('all_layer_zero')}"
             )
             if s3:
+                s3_badge = "✅" if s3.get("passed") else "⚠"
                 iou_str = ", ".join(f"{k}={val:.2f}%" for k, val in (s3.get("face_iou_pct") or {}).items())
                 mass_s = (
                     f"{s3['mass_3d_kg']:.2f} kg (BOM {s3['mass_bom_kg']:.2f} kg)"
@@ -8017,8 +8018,9 @@ class UnifiedApp(ctk.CTk):
                     else f"{s3['mass_3d_kg']:.2f} kg"
                 )
                 self.cheson_log(
-                    f"   Simulare 3D  : {s3['l_3d_mm']:.3f} × {s3['b_3d_mm']:.3f} × {s3['h_3d_mm']:.3f} mm | "
-                    f"Coliziuni={s3['max_interference_mm']:.3f} mm | Fidelitate={s3['overall_3d_similarity_pct']:.2f}% ({iou_str}) | "
+                    f"   Simulare 3D  : {s3_badge} {s3['l_3d_mm']:.3f} × {s3['b_3d_mm']:.3f} × {s3['h_3d_mm']:.3f} mm | "
+                    f"Coliziuni={s3['max_interference_mm']:.3f} mm | Rost={s3.get('max_seam_gap_mm', 0.0):.3f} mm | "
+                    f"Fidelitate={s3['overall_3d_similarity_pct']:.2f}% ({iou_str}) | "
                     f"Găuri 3D={s3['holes_3d_matched']}/{s3['holes_3d_expected']} | Masă={mass_s}"
                 )
             if pda.get("pdf_overlay"):
@@ -8035,6 +8037,8 @@ class UnifiedApp(ctk.CTk):
             if pda.get("pdf_drawing_name") and pda.get("pdf_dims_confirmed"):
                 dims_s = ", ".join(f"{d:g}" for d in pda["pdf_dims_confirmed"][:10])
                 self.cheson_log(f"   Cote PDF OK  : [{dims_s}]")
+            for iss in (pda.get("issues") or [])[:5]:
+                self.cheson_log(f"      ⚠ {iss}")
             for pl in item["plates"]:
                 res_msg = f" | 🧹 {pl['removed_residuals']} reziduuri eliminate" if pl.get("removed_residuals", 0) > 0 else ""
                 qty_msg = f" | ×{pl.get('qty_per_cheson', 1)}/cheson -> {pl.get('total_qty', 1)} buc"
