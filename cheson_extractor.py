@@ -394,6 +394,16 @@ class Sim3DReport:
 
 
 @dataclass
+class PdfDrawingAnalysis:
+    pdf_name: str
+    text_source: str  # "vector" | "ocr_tesseract" | "ocr_winrt" | "none"
+    dimensions: set[float] = field(default_factory=set)
+    profile_callouts: list[str] = field(default_factory=list)
+    hole_callouts: list[tuple[int, float]] = field(default_factory=list)
+    raw_char_count: int = 0
+
+
+@dataclass
 class PostDrawVerificationReport:
     piece_id: str
     plates_audited: int
@@ -408,6 +418,9 @@ class PostDrawVerificationReport:
     plate_audits: list[DrawnDxfAudit]
     passed: bool
     issues: list[str] = field(default_factory=list)
+    pdf_text_source: str = "none"
+    pdf_profile_callouts: list[str] = field(default_factory=list)
+    pdf_hole_callouts: list[tuple[int, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -1946,6 +1959,121 @@ def _clip_single_band_web(
     return ring
 
 
+def _detect_tip1_recessed_web_faces(
+    locked_rings: dict[str, list[Ring]],
+    spec: CompoundProfileSpec,
+    detected_type: str,
+    talpa_side: str,
+) -> tuple[set[str], str, tuple[float, float]]:
+    """Detect Tip 1 overhanging-talpă faces (v/h) whose DSTV AK only shows the talpă edge strip."""
+    if detected_type != "cheson_cu_talpa" or talpa_side not in ("bottom", "top"):
+        return set(), "", (0.0, spec.total_width)
+
+    talpa_face = "u" if talpa_side == "bottom" else "o"
+    narrow_face = "o" if talpa_side == "bottom" else "u"
+    tf_talpa = spec.tf_bot if talpa_side == "bottom" else spec.tf_top
+
+    t_rings = locked_rings.get(talpa_face, [])
+    n_rings = locked_rings.get(narrow_face, [])
+    if not t_rings or not n_rings:
+        return set(), narrow_face, (0.0, spec.total_width)
+
+    y_t_lo = min(polygon_bounds(r)[1] for r in t_rings)
+    y_t_hi = max(polygon_bounds(r)[3] for r in t_rings)
+    y_n_lo = min(polygon_bounds(r)[1] for r in n_rings)
+    y_n_hi = max(polygon_bounds(r)[3] for r in n_rings)
+
+    recessed: set[str] = set()
+    h_rings = locked_rings.get("h", [])
+    h_max_h = max((polygon_bounds(r)[3] - polygon_bounds(r)[1] for r in h_rings), default=0.0)
+    if (y_n_lo > y_t_lo + 1.0) and (not h_rings or h_max_h <= tf_talpa + 1.0):
+        recessed.add("h")
+
+    v_rings = locked_rings.get("v", [])
+    v_max_h = max((polygon_bounds(r)[3] - polygon_bounds(r)[1] for r in v_rings), default=0.0)
+    if (y_n_hi < y_t_hi - 1.0) and (not v_rings or v_max_h <= tf_talpa + 1.0):
+        recessed.add("v")
+
+    return recessed, narrow_face, (y_n_lo, y_n_hi)
+
+
+def _synthesize_recessed_web_rings(
+    face: str,
+    narrow_rings: list[Ring],
+    y_n_lo: float,
+    y_n_hi: float,
+    spec: CompoundProfileSpec,
+    talpa_side: str,
+    cfg: ChesonConfig,
+) -> list[Ring]:
+    """Reconstruct recessed web contour(s) from the narrow flange outer box (`o`/`u`)."""
+    H = spec.total_height
+    tw = spec.tw
+    if cfg.override_web_height_mm is not None and cfg.override_web_height_mm > 0.0:
+        target_h = float(cfg.override_web_height_mm)
+        if talpa_side == "bottom":
+            z_lo = spec.tf_bot
+            z_hi = z_lo + target_h
+        else:
+            z_hi = H - spec.tf_top
+            z_lo = z_hi - target_h
+    else:
+        if talpa_side == "bottom":
+            z_lo = spec.tf_bot
+            z_hi = H - tw
+        else:
+            z_lo = tw
+            z_hi = H - spec.tf_top
+
+    if z_hi - z_lo <= 1.0:
+        return []
+
+    y_outer = y_n_hi if face == "v" else y_n_lo
+    y_inner = (y_n_hi - tw) if face == "v" else (y_n_lo + tw)
+
+    synthesized: list[Ring] = []
+    for nr in narrow_rings:
+        if len(nr) < 3 or abs(polygon_area(nr)) <= 0.1:
+            continue
+        sp_out = _x_span_at_y(nr, y_outer)
+        sp_in = _x_span_at_y(nr, y_inner)
+        if sp_out is None and sp_in is None:
+            continue
+        xs_lo = [sp[0] for sp in (sp_out, sp_in) if sp is not None]
+        xs_hi = [sp[1] for sp in (sp_out, sp_in) if sp is not None]
+        x0 = min(xs_lo)
+        x1 = max(xs_hi)
+        if x1 - x0 <= 1.0:
+            continue
+        rect: Ring = [(x0, z_lo), (x1, z_lo), (x1, z_hi), (x0, z_hi)]
+        rect = _apply_length_offset(rect, cfg.length_offset_mm)
+        if len(rect) >= 3 and abs(polygon_area(rect)) > 0.1:
+            synthesized.append(rect)
+    return synthesized
+
+
+def _narrow_face_web_x_bounds(
+    narrow_rings: list[Ring],
+    face: str,
+    y_n_lo: float,
+    y_n_hi: float,
+    tw: float,
+) -> Optional[tuple[float, float]]:
+    if not narrow_rings:
+        return None
+    y_outer = y_n_hi if face == "v" else y_n_lo
+    y_inner = (y_n_hi - tw) if face == "v" else (y_n_lo + tw)
+    xs_lo: list[float] = []
+    xs_hi: list[float] = []
+    for nr in narrow_rings:
+        for yt in (y_outer, y_inner):
+            sp = _x_span_at_y(nr, yt)
+            if sp is not None:
+                xs_lo.append(sp[0])
+                xs_hi.append(sp[1])
+    return (min(xs_lo), max(xs_hi)) if (xs_lo and xs_hi) else None
+
+
 def verify_cheson_decomposition(
     dstv: DSTVFile,
     plates: list[ExtractedPlate],
@@ -1956,14 +2084,21 @@ def verify_cheson_decomposition(
     detected_type: str,
     talpa_side: str,
     spec: CompoundProfileSpec,
+    cfg: Optional[ChesonConfig] = None,
 ) -> VerificationReport:
     """Closed-loop geometric audit verifying <= 0.001 mm tolerance on gabarit & flange-web contact."""
+    cfg = cfg or ChesonConfig()
     H_target = spec.total_height
     W_target = spec.total_width
     tw = spec.tw
 
     flanges = [p for p in plates if p.role in ("flange_top", "flange_bot", "talpa", "capac")]
     webs = [p for p in plates if p.role == "web"]
+
+    # Check minimum required structural plates for compound box beams
+    min_webs = 4 if detected_type == "cheson_dublu" else 2
+    min_flanges = 2
+    missing_components = (len(webs) < min_webs) or (len(flanges) < min_flanges)
 
     # Check assembled width
     if detected_type == "cheson_cu_talpa":
@@ -1985,7 +2120,7 @@ def verify_cheson_decomposition(
     else:
         w_assembled = max((fp.bounds[3] - fp.bounds[1]) for fp in flanges) if flanges else W_target
 
-    # Check assembled height
+    # Check assembled height across ALL webs (never mask a bogus/missing web)
     if detected_type == "cheson_dublu" and len(webs) >= 2:
         unique_web_hs = sorted({round(wp.bounds[3] - wp.bounds[1], 4) for wp in webs}, reverse=True)
         # Find gap between upper and lower web bands from raw NC1
@@ -2001,54 +2136,57 @@ def verify_cheson_decomposition(
         elif unique_web_hs:
             h_assembled = 2.0 * unique_web_hs[0] + gap_mm + 2.0 * tw
         else:
-            h_assembled = H_target
+            h_assembled = 0.0
     elif detected_type == "cheson_cu_talpa" and webs:
-        wh = webs[0].bounds[3] - webs[0].bounds[1]
         tf_t = spec.tf_top if talpa_side == "top" else spec.tf_bot
-        h_assembled = wh + tf_t + tw
+        h_candidates = [(wp.bounds[3] - wp.bounds[1]) + tf_t + tw for wp in webs]
+        h_assembled = max(h_candidates, key=lambda h_v: abs(h_v - H_target))
     elif detected_type == "cheson_fara_talpa" and webs:
-        wh = webs[0].bounds[3] - webs[0].bounds[1]
-        if flanges and abs((flanges[0].bounds[3] - flanges[0].bounds[1]) - W_target) <= 0.5:
-            h_assembled = wh + spec.tf_top + spec.tf_bot
-        else:
-            h_assembled = wh + 2.0 * tw
+        is_over_w = bool(flanges and abs((flanges[0].bounds[3] - flanges[0].bounds[1]) - W_target) <= 0.5)
+        h_candidates = [
+            ((wp.bounds[3] - wp.bounds[1]) + (spec.tf_top + spec.tf_bot if is_over_w else 2.0 * tw))
+            for wp in webs
+        ]
+        h_assembled = max(h_candidates, key=lambda h_v: abs(h_v - H_target))
     else:
-        h_assembled = H_target
+        h_assembled = 0.0 if missing_components else H_target
 
-    # Check flange-web contact length consistency on top capac (C or C1) vs webs
+    # Check global-coordinate seam contact between adjacent capac flanges and webs
     contact_err = 0.0
-    ref_flange = next((p for p in plates if p.role == "capac"), None)
-    if ref_flange is None:
-        ref_flange = next((p for p in plates if p.role in ("flange_top", "talpa")), None)
-    if ref_flange is not None and webs:
-        r = ref_flange.exterior
-        b = ref_flange.bounds
-        y_lo, y_hi = b[1], b[3]
-        # Measure top and bottom horizontal edge lengths of ref_flange
-        top_xs = [x for x, y in r if abs(y - y_hi) < 0.01]
-        bot_xs = [x for x, y in r if abs(y - y_lo) < 0.01]
-        if len(top_xs) >= 2 and len(bot_xs) >= 2:
-            len_edge_a = max(top_xs) - min(top_xs)
-            len_edge_b = max(bot_xs) - min(bot_xs)
-            f_long = max(len_edge_a, len_edge_b)
-            f_short = min(len_edge_a, len_edge_b)
-            full_webs = [
-                wp for wp in webs
-                if wp.removed_residuals == 0 and (wp.bounds[2] - wp.bounds[0]) >= f_short - 5.0
-            ]
-            web_lens = sorted({round(wp.bounds[2] - wp.bounds[0], 4) for wp in full_webs})
-            if abs(f_long - f_short) <= 0.5:
-                contact_err = max((abs(wl - f_long) for wl in web_lens), default=0.0)
-            else:
-                contact_err = max(
-                    (min(abs(wl - f_short), abs(wl - l_assembled), abs(wl - f_long)) for wl in web_lens),
-                    default=0.0,
-                )
+    capac_flanges = [p for p in plates if p.role == "capac"]
+    if not capac_flanges:
+        capac_flanges = [p for p in plates if p.role in ("flange_top", "talpa")]
+    for ref_flange in capac_flanges:
+        mir_y = cfg.mirror_flange_o_y if ref_flange.face == "o" else cfg.mirror_flange_u_y
+        f_glob = _untransform_dxf_ring(
+            ref_flange.exterior, ref_flange.source_bounds, mirror_x=False, mirror_y=mir_y
+        )
+        _, fy_lo, _, fy_hi = ref_flange.source_bounds
+        for wp in webs:
+            if wp.removed_residuals != 0:
+                continue
+            wz0, wz1 = wp.source_bounds[1], wp.source_bounds[3]
+            if detected_type == "cheson_dublu":
+                wz_mid = 0.5 * (wz0 + wz1)
+                if ref_flange.face == "o" and wz_mid < 0.5 * H_target:
+                    continue
+                if ref_flange.face == "u" and wz_mid > 0.5 * H_target:
+                    continue
+            mir_x = cfg.mirror_web_h_x if wp.face == "h" else False
+            w_glob = _untransform_dxf_ring(wp.exterior, wp.source_bounds, mirror_x=mir_x, mirror_y=False)
+            contact_y = fy_lo if wp.face == "h" else fy_hi
+            f_span = _x_span_at_y(f_glob, contact_y)
+            w_z_ref = wz1 if ref_flange.face == "o" else wz0
+            w_span = _x_span_at_y(w_glob, w_z_ref)
+            if f_span is not None and w_span is not None:
+                gap_l = max(0.0, w_span[0] - f_span[0])
+                gap_r = max(0.0, f_span[1] - w_span[1])
+                contact_err = max(contact_err, gap_l, gap_r)
 
     err_l = abs(l_assembled - l_gabarit_target)
     err_h = abs(h_assembled - H_target)
     err_w = abs(w_assembled - W_target)
-    max_err = max(err_l, err_h, err_w, contact_err)
+    max_err = max(err_l, err_h, err_w)
 
     return VerificationReport(
         piece_id=dstv.header.piece_id,
@@ -2064,7 +2202,7 @@ def verify_cheson_decomposition(
         w_assembled_mm=round(w_assembled, 4),
         max_gabarit_error_mm=round(max_err, 6),
         flange_web_contact_error_mm=round(contact_err, 6),
-        passed=(max_err <= 0.001 + 1e-9),
+        passed=(not missing_components) and (max_err <= 0.001 + 1e-9) and (contact_err <= 0.05 + 1e-9),
     )
 
 
@@ -2108,6 +2246,11 @@ def decompose_compound_nc1(
     mid_x_raw = x_min_env + 0.5 * l_nc1_raw
     applied_delta_l = (l_assembled_env - l_nc1_raw) if cfg.exact_gabarit_lock else 0.0
     start_tan, end_tan = _estimate_end_skew_angles(dstv, locked_rings)
+
+    # Detect Tip 1 overhanging-talpă faces whose AK v/h only captures the talpă edge strip
+    recessed_faces, narrow_face, (y_n_lo, y_n_hi) = _detect_tip1_recessed_web_faces(
+        locked_rings, spec, detected_type, talpa_side
+    )
 
     # Determine flange clipping modes & strict roles (talpa='T' vs capac='C') per detected cheson type
     dy_o_raw = _face_y_span(dstv, "o", cfg) or spec.b_top
@@ -2223,11 +2366,22 @@ def decompose_compound_nc1(
         _, ref_ylo, _, ref_yhi = polygon_bounds(ref_rings[0])
         left_contact_pair, right_contact_pair = _flange_skew_x_contacts(ref_rings, ref_ylo, ref_yhi)
 
-    # Determine which web face (v or h) is the longer vs shorter side at skewed ends
-    v_xmin = min((polygon_bounds(r)[0] for r in locked_rings.get("v", [])), default=0.0)
-    h_xmin = min((polygon_bounds(r)[0] for r in locked_rings.get("h", [])), default=0.0)
-    v_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("v", [])), default=0.0)
-    h_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("h", [])), default=0.0)
+    # Determine which web face (v or h) is the longer vs shorter side at skewed ends.
+    # For recessed faces on Tip 1 overhanging chesons, derive bounds from narrow_face instead of bogus talpă strips.
+    narrow_rings_locked = locked_rings.get(narrow_face, []) if narrow_face else []
+    if "v" in recessed_faces and narrow_rings_locked:
+        vb = _narrow_face_web_x_bounds(narrow_rings_locked, "v", y_n_lo, y_n_hi, tw)
+        v_xmin, v_xmax = vb if vb else (0.0, 0.0)
+    else:
+        v_xmin = min((polygon_bounds(r)[0] for r in locked_rings.get("v", [])), default=0.0)
+        v_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("v", [])), default=0.0)
+
+    if "h" in recessed_faces and narrow_rings_locked:
+        hb = _narrow_face_web_x_bounds(narrow_rings_locked, "h", y_n_lo, y_n_hi, tw)
+        h_xmin, h_xmax = hb if hb else (0.0, 0.0)
+    else:
+        h_xmin = min((polygon_bounds(r)[0] for r in locked_rings.get("h", [])), default=0.0)
+        h_xmax = max((polygon_bounds(r)[2] for r in locked_rings.get("h", [])), default=0.0)
 
     eff_start_tan = start_tan if abs(v_xmin - h_xmin) > 0.5 else 0.0
     eff_end_tan = end_tan if abs(v_xmax - h_xmax) > 0.5 else 0.0
@@ -2241,12 +2395,34 @@ def decompose_compound_nc1(
     bot_recess = resolve_recess_mm(cfg.web_bot_recess_mm, tw)
 
     for face in ("v", "h"):
+        if face in recessed_faces:
+            synth_rings = _synthesize_recessed_web_rings(
+                face=face,
+                narrow_rings=narrow_rings_locked,
+                y_n_lo=y_n_lo,
+                y_n_hi=y_n_hi,
+                spec=spec,
+                talpa_side=talpa_side,
+                cfg=cfg,
+            )
+            for s_ring in synth_rings:
+                if cfg.strip_residual_fragments:
+                    sub_rings, rem_cnt = remove_residual_fragments(
+                        s_ring, tw, min_seg_len=cfg.min_segment_length_mm
+                    )
+                else:
+                    sub_rings, rem_cnt = [s_ring], 0
+                for sr in sub_rings:
+                    if len(sr) >= 3 and abs(polygon_area(sr)) > 0.1:
+                        raw_webs.append((face, sr, rem_cnt))
+            continue
+
         is_long_left: Optional[bool] = None
         sync_lx: Optional[float] = None
         if eff_start_tan > 1e-6:
             is_long_left = (face == "v" and v_xmin < h_xmin) or (face == "h" and h_xmin < v_xmin)
             if is_long_left:
-                sync_lx = x_min_locked
+                sync_lx = min(v_xmin, h_xmin) if recessed_faces else x_min_locked
             elif left_contact_pair is not None:
                 sync_lx = left_contact_pair[1]
 
@@ -2255,7 +2431,7 @@ def decompose_compound_nc1(
         if eff_end_tan > 1e-6:
             is_long_right = (face == "v" and v_xmax > h_xmax) or (face == "h" and h_xmax > v_xmax)
             if is_long_right:
-                sync_rx = x_max_locked
+                sync_rx = max(v_xmax, h_xmax) if recessed_faces else x_max_locked
             elif right_contact_pair is not None:
                 sync_rx = right_contact_pair[0]
 
@@ -2381,6 +2557,7 @@ def decompose_compound_nc1(
         detected_type=detected_type,
         talpa_side=talpa_side,
         spec=spec,
+        cfg=cfg,
     )
     return plates, ver
 
@@ -3767,6 +3944,32 @@ def _x_span_at_y(ring: Ring, y_target: float) -> Optional[tuple[float, float]]:
     return (min(xs), max(xs)) if xs else None
 
 
+def _x_intervals_at_y(ring: Ring, y_target: float) -> list[tuple[float, float]]:
+    """Return horizontal solid [x_lo, x_hi] intervals of a polygon clipped at scanline y_target (edge-inclusive)."""
+    if len(ring) < 3:
+        return []
+    r0, r1, r2, r3 = polygon_bounds(ring)
+    probe_y = y_target
+    if abs(y_target - r1) <= 0.15:
+        probe_y = r1 + min(0.25, 0.1 * max(1.0, r3 - r1))
+    elif abs(y_target - r3) <= 0.15:
+        probe_y = r3 - min(0.25, 0.1 * max(1.0, r3 - r1))
+    xs: list[float] = []
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        lo_y, hi_y = (y1, y2) if y1 < y2 else (y2, y1)
+        if lo_y < probe_y <= hi_y and abs(y2 - y1) > 1e-9:
+            xs.append(x1 + (probe_y - y1) * (x2 - x1) / (y2 - y1))
+    xs.sort()
+    ivs: list[tuple[float, float]] = []
+    for j in range(0, len(xs) - 1, 2):
+        if xs[j + 1] - xs[j] > 0.1:
+            ivs.append((xs[j], xs[j + 1]))
+    return _merge_intervals_1d(ivs)
+
+
 def _untransform_dxf_ring(
     dxf_ring: Ring,
     source_bounds: tuple[float, float, float, float],
@@ -3961,13 +4164,15 @@ def simulate_3d_assembly(
         issues.append(f"Rost/decalaj sudură talpă-laterală: {max_seam_gap:.3f} mm")
 
     # 5. 4-face 3D projection silhouette IoU vs locked .nc1 faces
+    recessed_faces, _, _ = _detect_tip1_recessed_web_faces(
+        locked_rings, spec, detected_type, talpa_side
+    )
     face_iou: dict[str, float] = {}
     for face_xy in ("o", "u"):
         nc_rings = locked_rings.get(face_xy, [])
         if not nc_rings:
             continue
         proj_xy: list[Ring] = [s["ring"] for s in flange_solids if s["plate"].face == face_xy]
-        z_probe = (H - 0.5 * spec.tf_top) if face_xy == "o" else (0.5 * spec.tf_bot)
         for ws in web_solids:
             wy0, wy1 = ws["y_band"]
             # Check web footprint at outer top/bot band
@@ -3980,6 +4185,11 @@ def simulate_3d_assembly(
                         continue
                     if face_xy == "u" and wz_mid > 0.5 * H:
                         continue
+                if detected_type == "cheson_cu_talpa" and (
+                    (talpa_side == "bottom" and face_xy == "u")
+                    or (talpa_side == "top" and face_xy == "o")
+                ):
+                    continue
                 proj_xy.append([(span_x[0], wy0), (span_x[1], wy0), (span_x[1], wy1), (span_x[0], wy1)])
         _, _, iou = _rings_x_slab_metrics(proj_xy, nc_rings)
         face_iou[face_xy] = round(iou, 2)
@@ -3988,20 +4198,40 @@ def simulate_3d_assembly(
         nc_rings = locked_rings.get(face_xz, [])
         if not nc_rings:
             continue
-        proj_xz: list[Ring] = [s["ring"] for s in web_solids if s["plate"].face == face_xz]
-        y_probe = (B - tw) if face_xz == "v" else tw
-        for fs in flange_solids:
-            fz0, fz1 = fs["z_band"]
-            fy0, fy1 = fs["y_band"]
-            # Clamp y_probe to flange Y range (so over-web talpa projects its outer edge, between-web projects inner edge)
-            yp = min(max(y_probe, fy0), fy1)
-            span_x = _x_span_at_y(fs["ring"], yp)
-            if span_x is not None and span_x[1] - span_x[0] > 0.1:
-                proj_xz.append([(span_x[0], fz0), (span_x[1], fz0), (span_x[1], fz1), (span_x[0], fz1)])
+        if face_xz in recessed_faces:
+            # On recessed Tip 1 overhanging-talpă faces, AK only contains the outer talpă edge strip
+            proj_xz: list[Ring] = []
+            y_probe = B if face_xz == "v" else 0.0
+            for fs in flange_solids:
+                if fs["plate"].role != "talpa":
+                    continue
+                fz0, fz1 = fs["z_band"]
+                for x0, x1 in _x_intervals_at_y(fs["ring"], y_probe):
+                    proj_xz.append([(x0, fz0), (x1, fz0), (x1, fz1), (x0, fz1)])
+        else:
+            proj_xz = [s["ring"] for s in web_solids if s["plate"].face == face_xz]
+            y_probe = (B - tw) if face_xz == "v" else tw
+            for fs in flange_solids:
+                fz0, fz1 = fs["z_band"]
+                fy0, fy1 = fs["y_band"]
+                yp = min(max(y_probe, fy0), fy1)
+                for x0, x1 in _x_intervals_at_y(fs["ring"], yp):
+                    proj_xz.append([(x0, fz0), (x1, fz0), (x1, fz1), (x0, fz1)])
         _, _, iou = _rings_x_slab_metrics(proj_xz, nc_rings)
         face_iou[face_xz] = round(iou, 2)
 
     overall_iou = round(sum(face_iou.values()) / len(face_iou), 2) if face_iou else 100.0
+
+    # Completeness guard for compound box beams (must never silently miss webs/flanges)
+    min_webs = 4 if detected_type == "cheson_dublu" else 2
+    min_flanges = 2
+    missing_structural = False
+    if len(web_solids) < min_webs:
+        missing_structural = True
+        issues.append(f"Lipsesc laterale (L): detectate {len(web_solids)} din minim {min_webs}!")
+    if len(flange_solids) < min_flanges:
+        missing_structural = True
+        issues.append(f"Lipsesc tălpi/capace (T/C): detectate {len(flange_solids)} din minim {min_flanges}!")
 
     # 6. 3D Hole/Slot Cross-Check vs DSTV BO
     audit_by_name = {a.plate_name: a for a in dxf_audits}
@@ -4073,9 +4303,18 @@ def simulate_3d_assembly(
         if (mass_bom and mass_bom > 0.0)
         else None
     )
+    mass_ok = True
+    if mass_diff_pct is not None and mass_diff_pct > 10.0:
+        mass_ok = False
+        issues.append(
+            f"Diferență mare masă 3D vs STYKKLISTE PDF: {mass_3d:.1f} kg vs {mass_bom:.1f} kg "
+            f"({mass_diff_pct:.1f}% > 10%) — verificați piese lipsă!"
+        )
 
     sim_passed = (
-        err_l <= 0.001 + 1e-6
+        not missing_structural
+        and mass_ok
+        and err_l <= 0.001 + 1e-6
         and err_b <= 0.001 + 1e-6
         and err_h <= 0.001 + 1e-6
         and max_inter <= 0.01
@@ -4120,8 +4359,9 @@ def verify_post_draw_and_3d(
     bom: Optional[BomTable] = None,
     bom_row: Optional[BomRow] = None,
     pdf_dims: Optional[set[float]] = None,
+    pdf_analysis: Optional[PdfDrawingAnalysis] = None,
 ) -> PostDrawVerificationReport:
-    """Post-draw verification: re-read DXFs vs NC1 geometry, PDF drawing dimensions, and 3D simulation."""
+    """Post-draw verification: re-read DXFs vs NC1 geometry, PDF drawing/OCR dimensions, and 3D simulation."""
     spec = parse_compound_profile(dstv.header.profile_str, dstv.header)
     spec = _align_spec_flanges_to_faces(dstv, spec, cfg)
     detected_type, talpa_side = detect_cheson_type(dstv, spec, cfg)
@@ -4216,10 +4456,11 @@ def verify_post_draw_and_3d(
             if dl_p >= 10.0:
                 candidate_dims.add(round(dl_p, 1))
 
+    eff_pdf_dims = pdf_dims if pdf_dims is not None else (pdf_analysis.dimensions if pdf_analysis else None)
     pdf_confirmed: list[float] = []
-    if pdf_dims:
+    if eff_pdf_dims:
         for cval in sorted(candidate_dims):
-            if cval >= 10.0 and any(abs(cval - pd_val) <= 0.5 for pd_val in pdf_dims):
+            if cval >= 10.0 and any(abs(cval - pd_val) <= 0.5 for pd_val in eff_pdf_dims):
                 pdf_confirmed.append(round(cval, 2))
 
     issues: list[str] = []
@@ -4240,6 +4481,11 @@ def verify_post_draw_and_3d(
         and sim_3d.passed
     )
 
+    pdf_name = (
+        bom.source_pdf.name
+        if bom is not None
+        else (pdf_analysis.pdf_name if pdf_analysis is not None else None)
+    )
     return PostDrawVerificationReport(
         piece_id=dstv.header.piece_id,
         plates_audited=len(dxf_audits),
@@ -4247,13 +4493,16 @@ def verify_post_draw_and_3d(
         all_layer_zero=all_layer_zero,
         nc1_max_dim_err_mm=round(nc1_max_dim_err, 4),
         nc1_max_hole_err_mm=round(nc1_max_hole_err, 4),
-        pdf_drawing_name=(bom.source_pdf.name if bom else None),
+        pdf_drawing_name=pdf_name,
         pdf_bom_length_err_mm=pdf_bom_len_err,
         pdf_dims_confirmed=pdf_confirmed,
         sim_3d=sim_3d,
         plate_audits=dxf_audits,
         passed=passed,
         issues=issues,
+        pdf_text_source=(pdf_analysis.text_source if pdf_analysis else "none"),
+        pdf_profile_callouts=(list(pdf_analysis.profile_callouts) if pdf_analysis else []),
+        pdf_hole_callouts=(list(pdf_analysis.hole_callouts) if pdf_analysis else []),
     )
 
 
@@ -4383,7 +4632,154 @@ def _match_header_column(token_upper: str) -> Optional[str]:
     return None
 
 
-def extract_bom_from_pdf(pdf_path: str | Path) -> Optional[BomTable]:
+def _ocr_pdf_page_image(page, dpi: int = 200) -> tuple[str, str]:
+    """Run OCR (Tesseract if installed, else built-in Windows WinRT OcrEngine) on a PDF page image."""
+    if page is None:
+        return "", "none"
+
+    pix = page.get_pixmap(dpi=dpi)
+    with tempfile.TemporaryDirectory(prefix="steel_ocr_") as tmp_dir:
+        img_path = Path(tmp_dir) / "page.png"
+        pix.save(str(img_path))
+
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+        # Path 1: Tesseract CLI if installed
+        tess = shutil.which("tesseract")
+        if tess:
+            try:
+                proc = subprocess.run(
+                    [tess, str(img_path), "stdout", "--psm", "6"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    startupinfo=startupinfo,
+                    creationflags=creationflags,
+                )
+                txt = (proc.stdout or "").strip()
+                if txt:
+                    return txt, "ocr_tesseract"
+            except Exception:
+                pass
+
+        # Path 2: Built-in Windows 10/11 WinRT OCR (zero external dependencies)
+        if os.name == "nt":
+            img_escaped = str(img_path).replace("'", "''")
+            ps_script = f"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
+$null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+$null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType=WindowsRuntime]
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {{ $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' }})[0]
+function Await($WinRtTask, $ResultType) {{
+    $netTask = $asTaskGeneric.MakeGenericMethod($ResultType).Invoke($null, @($WinRtTask))
+    $netTask.Wait(-1) | Out-Null
+    return $netTask.Result
+}}
+$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync('{img_escaped}')) ([Windows.Storage.StorageFile])
+$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+if ($null -eq $engine) {{ $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language 'en-US')) }}
+if ($null -ne $engine) {{
+    $res = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $res.Text
+}}
+"""
+            try:
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=25,
+                    startupinfo=startupinfo,
+                    creationflags=creationflags,
+                )
+                txt = (proc.stdout or "").strip()
+                if txt:
+                    return txt, "ocr_winrt"
+            except Exception:
+                pass
+
+    return "", "none"
+
+
+def _parse_drawing_text_facts(full_text: str) -> tuple[set[float], list[str], list[tuple[int, float]]]:
+    dims: set[float] = set()
+    for m in re.finditer(r"(?<![A-Za-z0-9\-/])\d{2,5}(?:[.,]\d{1,2})?(?![A-Za-z0-9\-])", full_text):
+        try:
+            dims.add(float(m.group(0).replace(",", ".")))
+        except ValueError:
+            pass
+
+    profiles: list[str] = []
+    seen_prof: set[str] = set()
+    for m in re.finditer(r"\b(?:HSQ|BOX|WQ)\d+(?:[.,]\d+)?\*\d+(?:[.,]\d+)?(?:-\d+(?:[.,]\d+)?\*(?:\d+(?:[.,]\d+)?|\*{2,3}))+", full_text, re.IGNORECASE):
+        val = m.group(0).strip()
+        if val not in seen_prof:
+            seen_prof.add(val)
+            profiles.append(val)
+
+    hole_callouts: list[tuple[int, float]] = []
+    seen_holes: set[tuple[int, float]] = set()
+    for m in re.finditer(r"(\d+)\s*(?:stk|buc|pcs|x|×)\s*[Øø∅]\s*(\d+(?:[.,]\d+)?)", full_text, re.IGNORECASE):
+        qty = int(m.group(1))
+        dia = float(m.group(2).replace(",", "."))
+        pair = (qty, dia)
+        if pair not in seen_holes:
+            seen_holes.add(pair)
+            hole_callouts.append(pair)
+    return dims, profiles, hole_callouts
+
+
+def _extract_bom_from_ocr_text(ocr_text: str, source_pdf: Path) -> Optional[BomTable]:
+    """Fallback BOM line parser for scanned PDFs when vector STYKKLISTE words are absent."""
+    rows: list[BomRow] = []
+    for raw_ln in ocr_text.splitlines():
+        m = re.match(
+            r"^\s*([A-Za-z]{1,6}[-_]?\d{2,6})\s+(\d{1,3})\s+((?:HSQ|BOX|WQ|PL|FL)\S+)\s+(S\d{3}\w*)\s+(\d{2,5}(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)",
+            raw_ln.strip(),
+            re.IGNORECASE,
+        )
+        if m:
+            rows.append(
+                BomRow(
+                    pos_no=m.group(1),
+                    littra="",
+                    qty_per_assembly=int(m.group(2)),
+                    profile=m.group(3),
+                    material=m.group(4),
+                    length_mm=_parse_float_opt(m.group(5)),
+                    weight_unit_kg=_parse_float_opt(m.group(6)),
+                    weight_total_kg=None,
+                )
+            )
+    if not rows:
+        return None
+    return BomTable(
+        assembly_id=source_pdf.stem,
+        assembly_quantity=1,
+        rows=rows,
+        total_weight_kg=None,
+        source_pdf=source_pdf,
+    )
+
+
+def extract_bom_from_pdf(pdf_path: str | Path, allow_ocr: bool = True) -> Optional[BomTable]:
     if pymupdf is None:
         return None
     path = Path(pdf_path)
@@ -4399,48 +4795,105 @@ def extract_bom_from_pdf(pdf_path: str | Path) -> Optional[BomTable]:
                 for w in raw_words
                 if str(w[4]).strip()
             ]
-            vlines: set[float] = set()
-            for drw in page.get_drawings():
-                for item in drw.get("items", []):
-                    if item[0] == "l":
-                        p1, p2 = item[1], item[2]
-                        if abs(p1.x - p2.x) < 1.0 and abs(p1.y - p2.y) > 50.0:
-                            vlines.add(float(p1.x))
-                    elif item[0] == "re":
-                        r = item[1]
-                        if r.height > 50.0:
-                            vlines.add(float(r.x0))
-                            vlines.add(float(r.x1))
+            if len(words) >= 5:
+                vlines: set[float] = set()
+                for drw in page.get_drawings():
+                    for item in drw.get("items", []):
+                        if item[0] == "l":
+                            p1, p2 = item[1], item[2]
+                            if abs(p1.x - p2.x) < 1.0 and abs(p1.y - p2.y) > 50.0:
+                                vlines.add(float(p1.x))
+                        elif item[0] == "re":
+                            r = item[1]
+                            if r.height > 50.0:
+                                vlines.add(float(r.x0))
+                                vlines.add(float(r.x1))
 
-            bom = _parse_bom_from_words(words, float(page.rect.height), sorted(vlines), path)
-            if bom is not None and bom.rows:
-                return bom
+                bom = _parse_bom_from_words(words, float(page.rect.height), sorted(vlines), path)
+                if bom is not None and bom.rows:
+                    return bom
+            elif allow_ocr:
+                ocr_txt, _ = _ocr_pdf_page_image(page)
+                if ocr_txt:
+                    bom_ocr = _extract_bom_from_ocr_text(ocr_txt, path)
+                    if bom_ocr is not None:
+                        return bom_ocr
         return None
     finally:
         doc.close()
 
 
-def extract_pdf_drawing_dimensions(pdf_path: Optional[str | Path]) -> set[float]:
-    """Extract numeric dimensions from an A-drawing PDF for post-draw cross-verification."""
+def extract_pdf_drawing_analysis(
+    pdf_path: Optional[str | Path],
+    allow_ocr: bool = True,
+) -> Optional[PdfDrawingAnalysis]:
+    """Extract dimensions, HSQ profile callouts, and hole callouts from PDF vector text or OCR fallback."""
     if pymupdf is None or not pdf_path:
-        return set()
+        return None
     path = Path(pdf_path)
     if not path.is_file():
-        return set()
-    dims: set[float] = set()
+        return None
+
     doc = pymupdf.open(str(path))
     try:
+        vec_chunks: list[str] = []
+        vec_word_cnt = 0
         for page in doc:
-            for w in page.get_text("words") or []:
-                t = str(w[4]).strip()
-                if re.match(r"^\d{2,5}(?:[.,]\d{1,2})?$", t):
-                    try:
-                        dims.add(float(t.replace(",", ".")))
-                    except ValueError:
-                        pass
+            pw = page.get_text("words") or []
+            vec_word_cnt += len(pw)
+            pt = page.get_text("text") or ""
+            if pt.strip():
+                vec_chunks.append(pt)
+
+        if vec_word_cnt >= 10:
+            full_text = "\n".join(vec_chunks)
+            dims, profs, holes = _parse_drawing_text_facts(full_text)
+            for page in doc:
+                for w in page.get_text("words") or []:
+                    t = str(w[4]).strip()
+                    if re.match(r"^\d{2,5}(?:[.,]\d{1,2})?$", t):
+                        try:
+                            dims.add(float(t.replace(",", ".")))
+                        except ValueError:
+                            pass
+            return PdfDrawingAnalysis(
+                pdf_name=path.name,
+                text_source="vector",
+                dimensions=dims,
+                profile_callouts=profs,
+                hole_callouts=holes,
+                raw_char_count=len(full_text),
+            )
+
+        if allow_ocr and len(doc) > 0:
+            ocr_texts: list[str] = []
+            ocr_src = "none"
+            for page in doc[:2]:
+                txt, src = _ocr_pdf_page_image(page)
+                if txt:
+                    ocr_texts.append(txt)
+                    ocr_src = src
+            if ocr_texts:
+                full_ocr = "\n".join(ocr_texts)
+                dims, profs, holes = _parse_drawing_text_facts(full_ocr)
+                return PdfDrawingAnalysis(
+                    pdf_name=path.name,
+                    text_source=ocr_src,
+                    dimensions=dims,
+                    profile_callouts=profs,
+                    hole_callouts=holes,
+                    raw_char_count=len(full_ocr),
+                )
+
+        return PdfDrawingAnalysis(pdf_name=path.name, text_source="none")
     finally:
         doc.close()
-    return dims
+
+
+def extract_pdf_drawing_dimensions(pdf_path: Optional[str | Path]) -> set[float]:
+    """Extract numeric dimensions from an A-drawing PDF (vector or OCR fallback)."""
+    analysis = extract_pdf_drawing_analysis(pdf_path, allow_ocr=True)
+    return set(analysis.dimensions) if analysis else set()
 
 
 def _parse_bom_from_words(
@@ -4481,18 +4934,32 @@ def _parse_bom_from_words(
             if qv is not None and qv > 0:
                 assembly_qty = int(round(qv))
 
+    # Restrict header search strictly within the STYKKLISTE table width (exclude right-hand title-block words)
     header_candidates = [
         w for w in words
         if banner_word.bottom - 2.0 <= w.top <= banner_word.bottom + 36.0
-        and w.x0 >= banner_word.x0 - 20.0
+        and banner_word.x0 - 20.0 <= w.x0 <= banner_word.x0 + 610.0
     ]
-    header_row: Optional[list[_WordBox]] = None
-    for hr in _cluster_words_by_y(header_candidates, y_tol=4.5):
-        joined = " ".join(x.text.upper() for x in hr)
-        if ("POS" in joined or "PART" in joined) and ("PROFIL" in joined or "MAT" in joined):
-            header_row = hr
+    anchor_word: Optional[_WordBox] = None
+    for w in header_candidates:
+        ck = _match_header_column(w.text.upper())
+        if ck in ("pos_no", "profile", "littra"):
+            anchor_word = w
             break
-    if header_row is None:
+
+    header_row: Optional[list[_WordBox]] = None
+    if anchor_word is not None:
+        header_row = sorted(
+            [w for w in header_candidates if abs(w.top - anchor_word.top) <= 3.5],
+            key=lambda w: w.x0,
+        )
+    else:
+        for hr in _cluster_words_by_y(header_candidates, y_tol=4.5):
+            joined = " ".join(x.text.upper() for x in hr)
+            if ("POS" in joined or "PART" in joined) and ("PROFIL" in joined or "MAT" in joined):
+                header_row = hr
+                break
+    if not header_row:
         return None
 
     col_boxes: dict[str, tuple[float, float]] = {}
@@ -4532,7 +4999,8 @@ def _parse_bom_from_words(
             rb = table_x1
         col_bounds[cname] = (lb, rb)
 
-    header_bottom = max(w.bottom for w in header_row)
+    matched_header_words = [w for w in header_row if w.x0 <= last_x1 + 2.0]
+    header_bottom = max(w.bottom for w in (matched_header_words or header_row))
     body_words = [
         w for w in words
         if w.top > header_bottom - 1.0 and table_x0 <= w.x_center <= table_x1 and w.top <= page_h
@@ -4920,7 +5388,8 @@ def preview_cheson_pipeline(
     )
     resolved_xlsx = find_cheson_report_xlsx(search_root, cheson_report_xlsx)
     excel_qty_map = load_cheson_quantities_from_excel(resolved_xlsx)
-    pdf_dims = extract_pdf_drawing_dimensions(a_pdf)
+    pdf_analysis = extract_pdf_drawing_analysis(a_pdf)
+    pdf_dims = pdf_analysis.dimensions if pdf_analysis else set()
     bom_by_key: dict[str, BomRow] = {}
     if bom:
         for r in bom.rows:
@@ -4971,6 +5440,7 @@ def preview_cheson_pipeline(
                 bom=bom,
                 bom_row=bom_row,
                 pdf_dims=pdf_dims,
+                pdf_analysis=pdf_analysis,
             )
             if not (ver.passed and post_ver.passed):
                 all_passed = False
@@ -5073,7 +5543,8 @@ def _run_cheson_single_folder(
     )
     resolved_xlsx = find_cheson_report_xlsx(search_root, cheson_report_xlsx)
     excel_qty_map = load_cheson_quantities_from_excel(resolved_xlsx)
-    pdf_dims = extract_pdf_drawing_dimensions(a_pdf)
+    pdf_analysis = extract_pdf_drawing_analysis(a_pdf)
+    pdf_dims = pdf_analysis.dimensions if pdf_analysis else set()
     out_root = Path(dest_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     effective_oda = find_oda_exe(oda_path)
@@ -5247,6 +5718,7 @@ def _run_cheson_single_folder(
                 bom=bom,
                 bom_row=bom_row,
                 pdf_dims=pdf_dims,
+                pdf_analysis=pdf_analysis,
             )
             post_draw_audits.append(asdict(post_ver))
             tcl = format_cheson_tcl_summary(current_plate_rows)
@@ -5278,8 +5750,18 @@ def _run_cheson_single_folder(
             if post_ver.pdf_drawing_name:
                 pdf_preview_dims = ", ".join(f"{v:g}" for v in post_ver.pdf_dims_confirmed[:10])
                 bom_err_s = f"{post_ver.pdf_bom_length_err_mm:.4f} mm" if post_ver.pdf_bom_length_err_mm is not None else "-"
+                holes_call_s = (
+                    f" | Găuri PDF=[{', '.join(f'{q}xØ{d:g}' for q, d in post_ver.pdf_hole_callouts[:5])}]"
+                    if post_ver.pdf_hole_callouts
+                    else ""
+                )
+                prof_call_s = (
+                    f" | Profil PDF={post_ver.pdf_profile_callouts[0]}"
+                    if post_ver.pdf_profile_callouts
+                    else ""
+                )
                 _log(
-                    f"   📋 PDF ({post_ver.pdf_drawing_name}): ΔL STYKKLISTE={bom_err_s} | "
+                    f"   📋 PDF ({post_ver.pdf_drawing_name} [{post_ver.pdf_text_source}]): ΔL STYKKLISTE={bom_err_s}{prof_call_s}{holes_call_s} | "
                     f"Cote confirmate ({len(post_ver.pdf_dims_confirmed)}): [{pdf_preview_dims}]"
                 )
             iou_str = ", ".join(f"{k}={v:.2f}%" for k, v in s3.face_iou_pct.items())

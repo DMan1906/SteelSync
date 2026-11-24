@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.15.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.15.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.15.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.16.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.16.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.16.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.15.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.15.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.16.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.16.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,9 @@
 
 ## 🚀 Funcționalități
 
-- **📦 Cheson / HSQ Extractor (Actualizat în v1.14.0 — Deduplicare 100% Piese Identice, Distincție Strictă `T` Talpă vs `C` Capac & Raport Excel `T/C/L`)**:
+- **📦 Cheson / HSQ Extractor (Actualizat în v1.16.0 — Reconstrucție Laterale Retrase pe Talpă Lată + Interpretare PDF/OCR & Audit Masă 3D)**:
+  - **Reconstrucție Automată Laterale Retrase (`Tip 1` cu Talpă în Consolă):** pentru chesoanele la care talpa (`T`) depășește lateral inimile (simetric sau asimetric), motorul detectează că fețele `.nc1` `v`/`h` conțin doar cantul tălpii și reconstruiește automat ambele laterale (`L1`, `L2`) din conturul cutiei superioare/inferioare (`o`/`u`), păstrând capetele oblice și găurile `BO` din `.nc1`.
+  - **Interpretare Desene PDF (`STYKKLISTE` + Fallback OCR WinRT/Tesseract) & Gardă Masă 3D:** parserul `STYKKLISTE` izolează strict coloanele tabelului fără contaminare din cartuș, extrage profilele `HSQ...`, apelurile de găuri (`N stk ØD`), cotele și greutatea unitară (`VEKT/STK`), auditând automat lipsa lateralelor și abaterile de masă > 10% (cu fallback OCR automat pe PDF-uri scanate).
   - **Distincție Strictă Talpă (`T`) vs Capac (`C`):** talpa lată pe care se montează lateralele este clasificată și denumită întotdeauna cu `T` (fără retragere `tw`), iar capacele dintre inimi cu `C` (cu grosimea reală mapată corect din `HSQ*`).
   - **Deduplicare 100% Geometrică:** piesele identice dpdv contur exterior, grosime, material, decupaje și găuri (inclusiv sub rotație 180° sau oglindire X/Y) sunt generate ca **un singur fișier CAD** (ex. `C` cu `×2/cheson` în loc de `C1`+`C2`, sau `L1`×2 + `L2`×1 + `L3`×1), simularea 3D păstrând verificarea completă pe toate instanțele fizice.
   - **Raport Cantități Excel (`Raport_Piese_Cheson.xlsx`) + Integrare `raport_CHESON.xlsx`:** citește automat numărul de chesoane din `raport_CHESON.xlsx` (sau `STYKKLISTE`/`.nc1`), calculează necesarul multiplicat per cheson (`Sumar Complet: T: 3 | C: 6 | L1: 6 | L2: 3 | L3: 3`) și generează workbook-ul cu 3 foi (`Sumar Chesoane (T-C-L)`, `Lista Piese Debitare`, `Pe Grosimi`).
