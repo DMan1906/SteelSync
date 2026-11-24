@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.16.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.16.0/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.16.0)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.17.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.17.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.17.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.16.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.16.0/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.17.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.17.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,7 +16,9 @@
 
 ## 🚀 Funcționalități
 
-- **📦 Cheson / HSQ Extractor (Actualizat în v1.16.0 — Reconstrucție Laterale Retrase pe Talpă Lată + Interpretare PDF/OCR & Audit Masă 3D)**:
+- **📦 Cheson / HSQ Extractor (Actualizat în v1.17.0 — Suprapunere Asamblată la Scară peste Desenul PDF `> 99.9%`, Auto-Corecție Închisă & Cote Notate `≤ 0.001 mm`)**:
+  - **Suprapunere Geometrică la Scară peste Desenul de Ansamblu (`TOP` + `FRONT`):** după generarea și recitirea DXF-urilor, motorul reasamblează chesonul și îl suprapune la scara exactă a desenului PDF (`1:25` etc.) peste vectorii `TOP` și `FRONT` (linii + arce Bézier + găuri), impunând prag obligatoriu **`≥ 99.90%`** și verificând lipsa oricărei linii structurale neacoperite.
+  - **Auto-Corecție în Buclă Închisă & Aliniere la Cotele Reale din Desen (`≤ 0.001 mm`):** aliniază lungimile la cotele notate pe desen fără a compromite rosturile de sudură 3D; dacă un candidat scade sub `99.9%` sau are deviații, motorul testează și regenerează automat strategii alternative până la conformitate deplină.
   - **Reconstrucție Automată Laterale Retrase (`Tip 1` cu Talpă în Consolă):** pentru chesoanele la care talpa (`T`) depășește lateral inimile (simetric sau asimetric), motorul detectează că fețele `.nc1` `v`/`h` conțin doar cantul tălpii și reconstruiește automat ambele laterale (`L1`, `L2`) din conturul cutiei superioare/inferioare (`o`/`u`), păstrând capetele oblice și găurile `BO` din `.nc1`.
   - **Interpretare Desene PDF (`STYKKLISTE` + Fallback OCR WinRT/Tesseract) & Gardă Masă 3D:** parserul `STYKKLISTE` izolează strict coloanele tabelului fără contaminare din cartuș, extrage profilele `HSQ...`, apelurile de găuri (`N stk ØD`), cotele și greutatea unitară (`VEKT/STK`), auditând automat lipsa lateralelor și abaterile de masă > 10% (cu fallback OCR automat pe PDF-uri scanate).
   - **Distincție Strictă Talpă (`T`) vs Capac (`C`):** talpa lată pe care se montează lateralele este clasificată și denumită întotdeauna cu `T` (fără retragere `tw`), iar capacele dintre inimi cu `C` (cu grosimea reală mapată corect din `HSQ*`).

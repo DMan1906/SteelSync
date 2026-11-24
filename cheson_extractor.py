@@ -404,6 +404,23 @@ class PdfDrawingAnalysis:
 
 
 @dataclass
+class PdfOverlayReport:
+    pdf_name: str
+    top_scale: Optional[float]
+    front_scale: Optional[float]
+    top_overlay_pct: float
+    front_overlay_pct: float
+    overall_overlay_pct: float
+    top_mean_err_mm: float
+    front_mean_err_mm: float
+    holes_pdf_expected: int
+    holes_pdf_matched: int
+    missing_structural_lines: int
+    passed: bool
+    issues: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PostDrawVerificationReport:
     piece_id: str
     plates_audited: int
@@ -421,6 +438,10 @@ class PostDrawVerificationReport:
     pdf_text_source: str = "none"
     pdf_profile_callouts: list[str] = field(default_factory=list)
     pdf_hole_callouts: list[tuple[int, float]] = field(default_factory=list)
+    pdf_overlay: Optional[PdfOverlayReport] = None
+    refinement_iterations: int = 0
+    refinement_notes: list[str] = field(default_factory=list)
+    snapped_noted_dims: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1551,6 +1572,7 @@ def _apply_gabarit_x_lock_to_rings(
     delta_l = l_gabarit - l_nc1
     apply_delta = abs(delta_l) <= max_delta_mm
     mid_x = x_min_env + 0.5 * l_nc1
+    x_max_target = x_min_env + (l_gabarit if apply_delta else l_nc1)
 
     # Determine if left/right ends have intentional skew on flanges
     flange_left_skew = False
@@ -1573,6 +1595,8 @@ def _apply_gabarit_x_lock_to_rings(
                     nx = x + delta_l
                 elif (not flange_left_skew) and (not ls) and abs(x - x_min_env) <= 0.25:
                     nx = x_min_env
+                if (not flange_right_skew) and (not rs) and abs(nx - x_max_target) <= 0.25:
+                    nx = x_max_target
                 new_r.append((nx, y))
             new_list.append(clean_ring(new_r, min_seg_len=0.05, ccw=True))
         out[face] = new_list
@@ -1649,7 +1673,7 @@ def _adjust_web_skew_and_rounding(
     plane = (skew_plane or "outer").strip().lower()
     k = 0.5 if plane == "centerline" else (1.0 if plane == "inner" else 0.0)
 
-    minx, _, maxx, _ = polygon_bounds(ring)
+    minx, miny, maxx, maxy = polygon_bounds(ring)
     if sync_left_x is not None and start_tan > 1e-6:
         dx_left = sync_left_x - minx
     elif start_tan > 1e-6 and k > 0.0 and is_long_left is False:
@@ -1665,15 +1689,22 @@ def _adjust_web_skew_and_rounding(
         dx_right = 0.0
 
     if abs(dx_left) > 1e-7 or abs(dx_right) > 1e-7:
-        span = max(1.0, maxx - minx)
+        span = maxx - minx
         left_cut = minx + 0.35 * span
         right_cut = maxx - 0.35 * span
+        top_pts_l = [x for x, y in ring if abs(y - maxy) <= 1.0 and x <= left_cut]
+        bot_pts_l = [x for x, y in ring if abs(y - miny) <= 1.0 and x <= left_cut]
+        left_staggered = bool(top_pts_l and bot_pts_l and abs(min(top_pts_l) - min(bot_pts_l)) > 1.0)
+        top_pts_r = [x for x, y in ring if abs(y - maxy) <= 1.0 and x >= right_cut]
+        bot_pts_r = [x for x, y in ring if abs(y - miny) <= 1.0 and x >= right_cut]
+        right_staggered = bool(top_pts_r and bot_pts_r and abs(max(top_pts_r) - max(bot_pts_r)) > 1.0)
+
         new_pts: Ring = []
         for x, y in ring:
             nx = x
-            if abs(dx_left) > 1e-7 and x <= left_cut:
+            if abs(dx_left) > 1e-7 and ((x <= left_cut) if left_staggered else (abs(x - minx) <= 0.5)):
                 nx = x + dx_left
-            elif abs(dx_right) > 1e-7 and x >= right_cut:
+            elif abs(dx_right) > 1e-7 and ((x >= right_cut) if right_staggered else (abs(x - maxx) <= 0.5)):
                 nx = x + dx_right
             new_pts.append((nx, y))
         ring = clean_ring(new_pts, min_seg_len=0.05, ccw=True)
@@ -2417,12 +2448,32 @@ def decompose_compound_nc1(
                         raw_webs.append((face, sr, rem_cnt))
             continue
 
+        ref_orig_rings = locked_rings.get(ref_flange_face, [])
+        wall_lx: Optional[float] = None
+        wall_rx: Optional[float] = None
+        if ref_orig_rings:
+            ror = ref_orig_rings[0]
+            _, ro_ylo, _, ro_yhi = polygon_bounds(ror)
+            yw_out = ro_ylo if face == "h" else ro_yhi
+            yw_in = (ro_ylo + tw) if face == "h" else (ro_yhi - tw)
+            sp_w_o = _x_span_at_y(ror, yw_out)
+            sp_w_i = _x_span_at_y(ror, yw_in)
+            w_xs_l = [sp[0] for sp in (sp_w_o, sp_w_i) if sp is not None]
+            w_xs_r = [sp[1] for sp in (sp_w_o, sp_w_i) if sp is not None]
+            if w_xs_l:
+                wall_lx = min(w_xs_l)
+            if w_xs_r:
+                wall_rx = max(w_xs_r)
+
         is_long_left: Optional[bool] = None
         sync_lx: Optional[float] = None
         if eff_start_tan > 1e-6:
             is_long_left = (face == "v" and v_xmin < h_xmin) or (face == "h" and h_xmin < v_xmin)
             if is_long_left:
-                sync_lx = min(v_xmin, h_xmin) if recessed_faces else x_min_locked
+                if wall_lx is not None:
+                    sync_lx = wall_lx
+                else:
+                    sync_lx = min(v_xmin, h_xmin) if recessed_faces else x_min_locked
             elif left_contact_pair is not None:
                 sync_lx = left_contact_pair[1]
 
@@ -2431,7 +2482,10 @@ def decompose_compound_nc1(
         if eff_end_tan > 1e-6:
             is_long_right = (face == "v" and v_xmax > h_xmax) or (face == "h" and h_xmax > v_xmax)
             if is_long_right:
-                sync_rx = max(v_xmax, h_xmax) if recessed_faces else x_max_locked
+                if wall_rx is not None:
+                    sync_rx = wall_rx
+                else:
+                    sync_rx = max(v_xmax, h_xmax) if recessed_faces else x_max_locked
             elif right_contact_pair is not None:
                 sync_rx = right_contact_pair[0]
 
@@ -3233,7 +3287,7 @@ def write_cheson_quantity_report_xlsx(
     s1_headers = [
         "Cheson", "Folder", "Profil", "Tip Cheson", "Nr. Chesoane", "Sursă Cant.",
         "Talpă (T)", "Capace (C)", "Laterale (L)", "Sumar Complet (T / C / L)",
-        "Piese Unice", "Total Bucăți", "Status Audit 3D",
+        "Piese Unice", "Total Bucăți", "Suprapunere PDF (%)", "Status Audit 3D",
     ]
     s1_rows = [
         [
@@ -3249,13 +3303,14 @@ def write_cheson_quantity_report_xlsx(
             cs.get("full_summary", "-"),
             cs.get("unique_plates_count", 0),
             cs.get("total_pieces_count", 0),
+            (f"{cs['overlay_pct']:.2f}%" if cs.get("overlay_pct") is not None else "-"),
             cs.get("status", ""),
         ]
         for cs in cheson_summaries
     ]
-    _style_sheet(ws1, s1_headers, s1_rows, center_cols={5, 11, 12, 13})
+    _style_sheet(ws1, s1_headers, s1_rows, center_cols={5, 11, 12, 13, 14})
     for r_i in range(2, ws1.max_row + 1):
-        st_cell = ws1.cell(r_i, 13)
+        st_cell = ws1.cell(r_i, 14)
         st_val = str(st_cell.value or "").upper()
         if st_val == "PASS":
             st_cell.fill = pass_fill
@@ -3278,6 +3333,7 @@ def write_cheson_quantity_report_xlsx(
             sum(int(cs.get("unique_plates_count", 0)) for cs in cheson_summaries),
             sum(int(cs.get("total_pieces_count", 0)) for cs in cheson_summaries),
             "",
+            "",
         ]
         ws1.append(tot_vals)
         for col_i in range(1, len(s1_headers) + 1):
@@ -3285,7 +3341,7 @@ def write_cheson_quantity_report_xlsx(
             c.fill = total_fill
             c.font = total_font
             c.border = border
-            if col_i in {5, 11, 12}:
+            if col_i in {5, 11, 12, 13}:
                 c.alignment = Alignment(horizontal="center", vertical="center")
 
     # Sheet 2: Lista Piese Debitare
@@ -4350,6 +4406,596 @@ def simulate_3d_assembly(
     )
 
 
+_PDF_SCALE_TOKEN_RE = re.compile(r"^1\s*:\s*(\d+(?:\.\d+)?)$")
+
+
+def _cubic_bezier_samples(p0, p1, p2, p3, steps: int = 6) -> list[tuple[float, float]]:
+    pts: list[tuple[float, float]] = []
+    for i in range(steps + 1):
+        t = i / steps
+        mt = 1.0 - t
+        x = mt**3 * p0.x + 3.0 * mt**2 * t * p1.x + 3.0 * mt * t**2 * p2.x + t**3 * p3.x
+        y = mt**3 * p0.y + 3.0 * mt**2 * t * p1.y + 3.0 * mt * t**2 * p2.y + t**3 * p3.y
+        pts.append((float(x), float(y)))
+    return pts
+
+
+def _point_to_seg_dist_2d(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 <= 1e-12:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _build_seg_spatial_grid(
+    segs: list[tuple[float, float, float, float]],
+    cell: float = 8.0,
+) -> tuple[dict[tuple[int, int], list[int]], float]:
+    grid: dict[tuple[int, int], list[int]] = {}
+    for idx, (x1, y1, x2, y2) in enumerate(segs):
+        ix0 = int(math.floor(min(x1, x2) / cell))
+        ix1 = int(math.floor(max(x1, x2) / cell))
+        iy0 = int(math.floor(min(y1, y2) / cell))
+        iy1 = int(math.floor(max(y1, y2) / cell))
+        for ix in range(ix0, ix1 + 1):
+            for iy in range(iy0, iy1 + 1):
+                grid.setdefault((ix, iy), []).append(idx)
+    return grid, cell
+
+
+def _extract_pdf_orthographic_views(pdf_path: Optional[str | Path]) -> Optional[dict[str, Any]]:
+    """Extract TOP and FRONT true-scale dark vector segments & scales from a Tekla A-drawing PDF."""
+    if pymupdf is None or not pdf_path:
+        return None
+    path = Path(pdf_path)
+    if not path.is_file():
+        return None
+
+    doc = pymupdf.open(str(path))
+    try:
+        if len(doc) == 0:
+            return None
+        pg = doc[0]
+        words = pg.get_text("words") or []
+        views: dict[str, dict[str, Any]] = {}
+        for vname in ("TOP", "FRONT"):
+            for w in words:
+                if str(w[4]).strip().upper() == vname:
+                    cx = 0.5 * (float(w[0]) + float(w[2]))
+                    cy = float(w[3])
+                    sc = 25.0
+                    for w2 in words:
+                        m = _PDF_SCALE_TOKEN_RE.match(str(w2[4]).strip())
+                        if m and abs(0.5 * (float(w2[0]) + float(w2[2])) - cx) < 80.0 and -5.0 < float(w2[1]) - cy < 45.0:
+                            val = float(m.group(1))
+                            if val >= 1.0:
+                                sc = val
+                                break
+                    views[vname] = {
+                        "bbox": (float(w[0]), float(w[1]), float(w[2]), float(w[3])),
+                        "scale": sc,
+                    }
+                    break
+
+        if "TOP" not in views and "FRONT" not in views:
+            return None
+
+        top_ymax = views["TOP"]["bbox"][1] if "TOP" in views else pg.rect.height * 0.35
+        front_ymin = (views["TOP"]["bbox"][3] + 8.0) if "TOP" in views else pg.rect.height * 0.35
+        front_ymax = views["FRONT"]["bbox"][1] if "FRONT" in views else pg.rect.height * 0.65
+
+        top_segs: list[tuple[float, float, float, float]] = []
+        front_segs: list[tuple[float, float, float, float]] = []
+        for d in pg.get_drawings():
+            col = d.get("color")
+            if col is None or max(col) > 0.25:
+                continue
+            for it in d.get("items", []):
+                kind = it[0]
+                sub: list[tuple[float, float, float, float]] = []
+                if kind == "l":
+                    p1, p2 = it[1], it[2]
+                    if math.hypot(p2.x - p1.x, p2.y - p1.y) >= 0.15:
+                        sub.append((float(p1.x), float(p1.y), float(p2.x), float(p2.y)))
+                elif kind == "c":
+                    pts = _cubic_bezier_samples(it[1], it[2], it[3], it[4], steps=6)
+                    for k in range(len(pts) - 1):
+                        a, b = pts[k], pts[k + 1]
+                        if math.hypot(b[0] - a[0], b[1] - a[1]) >= 0.12:
+                            sub.append((a[0], a[1], b[0], b[1]))
+                elif kind == "re":
+                    r = it[1]
+                    sub.extend([
+                        (float(r.x0), float(r.y0), float(r.x1), float(r.y0)),
+                        (float(r.x1), float(r.y0), float(r.x1), float(r.y1)),
+                        (float(r.x1), float(r.y1), float(r.x0), float(r.y1)),
+                        (float(r.x0), float(r.y1), float(r.x0), float(r.y0)),
+                    ])
+                for seg in sub:
+                    ym = 0.5 * (seg[1] + seg[3])
+                    if 25.0 < ym < top_ymax:
+                        top_segs.append(seg)
+                    elif front_ymin < ym < front_ymax:
+                        front_segs.append(seg)
+
+        top_grid, cell = _build_seg_spatial_grid(top_segs, cell=8.0) if top_segs else ({}, 8.0)
+        front_grid, _ = _build_seg_spatial_grid(front_segs, cell=8.0) if front_segs else ({}, 8.0)
+        return {
+            "pdf_name": path.name,
+            "top_scale": views["TOP"]["scale"] if "TOP" in views else None,
+            "front_scale": views["FRONT"]["scale"] if "FRONT" in views else None,
+            "top_segs": top_segs,
+            "front_segs": front_segs,
+            "top_grid": top_grid,
+            "front_grid": front_grid,
+            "cell": cell,
+        }
+    finally:
+        doc.close()
+
+
+def _build_assembled_pdf_projections(
+    plates: list[ExtractedPlate],
+    re_read_rings: dict[str, Ring],
+    dxf_audits: list[DrawnDxfAudit],
+    spec: CompoundProfileSpec,
+    cfg: ChesonConfig,
+    detected_type: str,
+) -> tuple[list[tuple[float, float, float, float]], list[tuple[float, float, float, float]], list[tuple[str, float, float, float]]]:
+    """Build 3D-assembled TOP (XY), FRONT (XZ), and hole center projections from re-read DXFs."""
+    H, B, tw = spec.total_height, spec.total_width, spec.tw
+    y_box_lo, y_box_hi = 0.0, B
+    if detected_type == "cheson_cu_talpa":
+        cap = next((p for p in plates if p.role == "capac"), None)
+        if cap:
+            y_box_lo, y_box_hi = cap.source_bounds[1] - tw, cap.source_bounds[3] + tw
+
+    top_segs: list[tuple[float, float, float, float]] = []
+    front_segs: list[tuple[float, float, float, float]] = []
+    audit_by_name = {a.plate_name: a for a in dxf_audits}
+    holes_proj: list[tuple[str, float, float, float]] = []  # ("TOP"|"FRONT", gx, gy_or_gz, r_mm)
+
+    for p in plates:
+        dxf_r = re_read_rings.get(p.name, p.exterior)
+        aud = audit_by_name.get(p.name)
+        mir_x = cfg.mirror_web_h_x if p.face == "h" else False
+        mir_y = cfg.mirror_flange_o_y if p.face == "o" else (cfg.mirror_flange_u_y if p.face == "u" else False)
+        if p.face in ("o", "u"):
+            rg = _untransform_dxf_ring(dxf_r, p.source_bounds, mirror_x=False, mirror_y=mir_y)
+            is_between_capac = p.role in ("capac", "flange_top", "flange_bot") and abs((p.source_bounds[3] - p.source_bounds[1]) - ((y_box_hi - y_box_lo) - 2.0 * tw)) <= 1.0
+            for i in range(len(rg)):
+                a, b = rg[i], rg[(i + 1) % len(rg)]
+                ay, by = a[1], b[1]
+                # Map inner-wall horizontal edges of between-webs capac onto outer assembled beam edges;
+                # actual inner tw seam lines come strictly from the web segments where webs exist.
+                if is_between_capac and abs(ay - by) <= 0.2:
+                    if abs(ay - (y_box_lo + tw)) <= 0.5:
+                        ay = by = y_box_lo
+                    elif abs(ay - (y_box_hi - tw)) <= 0.5:
+                        ay = by = y_box_hi
+                top_segs.append((a[0], ay, b[0], by))
+            z0, z1 = (H - p.thickness, H) if p.face == "o" else (0.0, p.thickness)
+            bx0, _, bx1, _ = polygon_bounds(rg)
+            front_segs.extend([(bx0, z0, bx1, z0), (bx0, z1, bx1, z1)])
+        elif p.face in ("v", "h"):
+            rg = _untransform_dxf_ring(dxf_r, p.source_bounds, mirror_x=mir_x, mirror_y=False)
+            rg_flush: Ring = []
+            for x, z in rg:
+                nz = z
+                if abs(z - tw) <= 0.5 and detected_type != "cheson_cu_talpa":
+                    nz = 0.0
+                elif abs(z - (H - tw)) <= 0.5:
+                    nz = H
+                rg_flush.append((x, nz))
+            for i in range(len(rg_flush)):
+                a, b = rg_flush[i], rg_flush[(i + 1) % len(rg_flush)]
+                front_segs.append((a[0], a[1], b[0], b[1]))
+            y0, y1 = (y_box_hi - tw, y_box_hi) if p.face == "v" else (y_box_lo, y_box_lo + tw)
+            _, bz0, _, bz1 = polygon_bounds(rg)
+            seen_iv: set[tuple[float, float]] = set()
+            for z_probe in (bz1, bz0):
+                for sx0, sx1 in _x_intervals_at_y(rg, z_probe):
+                    k_iv = (round(sx0, 1), round(sx1, 1))
+                    if k_iv not in seen_iv:
+                        seen_iv.add(k_iv)
+                        top_segs.extend([(sx0, y0, sx1, y0), (sx0, y1, sx1, y1)])
+
+        if aud and aud.holes_drawn and p.face in ("o", "u", "v", "h"):
+            d0, d1, d2, d3 = polygon_bounds(dxf_r)
+            dcx, dcy = 0.5 * (d0 + d2), 0.5 * (d1 + d3)
+            sx0, sy0, _, _ = p.source_bounds
+            vname = "TOP" if p.face in ("o", "u") else "FRONT"
+            for dh in aud.holes_drawn:
+                ux = (2.0 * dcx - dh.cx) if mir_x else dh.cx
+                uy = (2.0 * dcy - dh.cy) if mir_y else dh.cy
+                gx = sx0 + (ux - d0)
+                gy = sy0 + (uy - d1)
+                holes_proj.append((vname, gx, gy, 0.5 * max(dh.width_mm, dh.length_mm)))
+
+    return top_segs, front_segs, holes_proj
+
+
+def _eval_view_overlay(
+    model_segs_mm: list[tuple[float, float, float, float]],
+    pdf_segs: list[tuple[float, float, float, float]],
+    grid: dict[tuple[int, int], list[int]],
+    cell: float,
+    scale: float,
+    ox_pt: float,
+    oy_pt: float,
+    flip_y: bool,
+    span_y_mm: float,
+    flip_x: bool,
+    span_x_mm: float,
+    tol_pt: float = 0.25,
+) -> tuple[float, float, float, float]:
+    """Return (overlay_pct, mean_err_pt, matched_len_mm, total_len_mm)."""
+    s = (72.0 / 25.4) / scale
+    total_len = 0.0
+    matched_len = 0.0
+    sum_err = 0.0
+
+    for ax, ay, bx, by in model_segs_mm:
+        seg_len = math.hypot(bx - ax, by - ay)
+        if seg_len < 0.5:
+            continue
+        n_samples = max(2, min(40, int(seg_len / 50.0) + 1))
+        step_w = seg_len / n_samples
+        for k in range(n_samples):
+            t = (k + 0.5) / n_samples
+            mx = ax + t * (bx - ax)
+            my = ay + t * (by - ay)
+            if flip_x:
+                mx = span_x_mm - mx
+            if flip_y:
+                my = span_y_mm - my
+            px = ox_pt + mx * s
+            py = oy_pt + my * s
+            ix, iy = int(math.floor(px / cell)), int(math.floor(py / cell))
+            best = 1e9
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for sidx in grid.get((ix + dx, iy + dy), ()):
+                        x1, y1, x2, y2 = pdf_segs[sidx]
+                        d = _point_to_seg_dist_2d(px, py, x1, y1, x2, y2)
+                        if d < best:
+                            best = d
+                            if best <= 0.02:
+                                break
+            total_len += step_w
+            if best <= tol_pt:
+                matched_len += step_w
+                sum_err += best * step_w
+
+    pct = (100.0 * matched_len / total_len) if total_len > 0.0 else 0.0
+    mean_err = (sum_err / matched_len) if matched_len > 0.0 else 999.0
+    return pct, mean_err, matched_len, total_len
+
+
+def _register_view_to_pdf(
+    model_segs_mm: list[tuple[float, float, float, float]],
+    L_mm: float,
+    W_mm: float,
+    pdf_segs: list[tuple[float, float, float, float]],
+    grid: dict[tuple[int, int], list[int]],
+    cell: float,
+    scale: float,
+    allowed_fy: tuple[bool, ...] = (False, True),
+    allowed_fx: tuple[bool, ...] = (False, True),
+    hint_ox_pt: Optional[float] = None,
+) -> tuple[float, float, float, float, Optional[tuple[float, float, bool, bool]]]:
+    if not model_segs_mm or not pdf_segs or L_mm <= 1.0 or W_mm <= 1.0:
+        return 0.0, 999.0, 0.0, 0.0, None
+
+    s = (72.0 / 25.4) / scale
+    L_pt, W_pt = L_mm * s, W_mm * s
+
+    by_y: dict[float, list[tuple[float, float]]] = {}
+    for x1, y1, x2, y2 in pdf_segs:
+        if abs(y1 - y2) < 0.35 and abs(x2 - x1) > 4.0:
+            ky = round(y1, 1)
+            by_y.setdefault(ky, []).append((min(x1, x2), max(x1, x2)))
+
+    y_runs: dict[float, list[tuple[float, float]]] = {}
+    for ky, ivs in by_y.items():
+        merged = _merge_intervals_1d([(a - 2.5, b + 2.5) for a, b in ivs])
+        runs = [(a + 2.5, b - 2.5) for a, b in merged if (b - a) >= max(10.0, 0.25 * L_pt)]
+        if runs:
+            y_runs[ky] = runs
+
+    ys_long = sorted(y_runs.keys())
+    model_h_xs: set[float] = set()
+    for ax, ay, bx, by in model_segs_mm:
+        if abs(ay - by) < 1.0 and abs(bx - ax) > 0.30 * L_mm:
+            model_h_xs.add(round(min(ax, bx), 1))
+            model_h_xs.add(round(max(ax, bx), 1))
+    model_x_offsets_pt = sorted({round(x * s, 2) for x in model_h_xs})[:10]
+
+    cand_anchors: list[tuple[float, float]] = []
+    for i, y1 in enumerate(ys_long):
+        for y2 in ys_long[i + 1:]:
+            if abs((y2 - y1) - W_pt) <= 1.5:
+                xs_cand: set[float] = set()
+                for ky in (y1, y2):
+                    for a, b in y_runs[ky]:
+                        xs_cand.add(round(a, 1))
+                        xs_cand.add(round(b - L_pt, 1))
+                        for off in model_x_offsets_pt:
+                            xs_cand.add(round(a - off, 1))
+                            xs_cand.add(round(b - off, 1))
+                for ox in xs_cand:
+                    if -50.0 < ox < 2200.0:
+                        cand_anchors.append((ox, y1))
+                        if abs((y2 - y1) - W_pt) > 0.2:
+                            cand_anchors.append((ox, y2 - W_pt))
+
+    if hint_ox_pt is not None:
+        hint_ys: list[float] = []
+        for _, oy in cand_anchors:
+            if not any(abs(oy - hy) <= 0.25 for hy in hint_ys):
+                hint_ys.append(oy)
+        for hy in hint_ys:
+            cand_anchors.append((hint_ox_pt, hy))
+
+    uniq: list[tuple[float, float]] = []
+    seen: set[tuple[int, int]] = set()
+    for ox, oy in cand_anchors:
+        k = (round(ox / 0.25), round(oy / 0.25))
+        if k not in seen:
+            seen.add(k)
+            uniq.append((ox, oy))
+
+    if not uniq:
+        return 0.0, 999.0, 0.0, 0.0, None
+
+    # Deduplicate model segments to 0.1 mm precision and preserve longest horizontal + non-horizontal bevel segments
+    dedup_segs: list[tuple[float, float, float, float]] = []
+    seen_segs: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for x1, y1, x2, y2 in model_segs_mm:
+        p1 = (round(x1 * 10.0), round(y1 * 10.0))
+        p2 = (round(x2 * 10.0), round(y2 * 10.0))
+        sk = (p1, p2) if p1 <= p2 else (p2, p1)
+        if sk not in seen_segs:
+            seen_segs.add(sk)
+            dedup_segs.append((x1, y1, x2, y2))
+
+    h_segs = sorted(
+        (g for g in dedup_segs if abs(g[3] - g[1]) <= 0.25),
+        key=lambda g: -math.hypot(g[2] - g[0], g[3] - g[1]),
+    )
+    non_h_segs = sorted(
+        (g for g in dedup_segs if abs(g[3] - g[1]) > 0.25),
+        key=lambda g: -math.hypot(g[2] - g[0], g[3] - g[1]),
+    )
+    fast_segs = h_segs[:10] + non_h_segs[:16]
+    ordered_segs = sorted(dedup_segs, key=lambda g: -math.hypot(g[2] - g[0], g[3] - g[1]))
+    coarse_segs = list(dict.fromkeys(ordered_segs[:45] + non_h_segs[:16]))
+
+    fast_scored: list[tuple[float, float, tuple[float, float, bool, bool]]] = []
+    for ox, oy in uniq:
+        for fy in allowed_fy:
+            for fx in allowed_fx:
+                pct, me, _, _ = _eval_view_overlay(
+                    fast_segs, pdf_segs, grid, cell, scale, ox, oy, fy, W_mm, fx, L_mm, tol_pt=0.35
+                )
+                if pct >= 60.0:
+                    fast_scored.append((pct, -me, (ox, oy, fy, fx)))
+    fast_scored.sort(key=lambda item: (round(item[0], 1), item[1]), reverse=True)
+    top_cands = [item[2] for item in fast_scored[:24]] if fast_scored else [(uniq[0][0], uniq[0][1], allowed_fy[0], allowed_fx[0])]
+    if hint_ox_pt is not None:
+        seen_cands = set(top_cands)
+        for ox, oy in uniq:
+            if abs(ox - hint_ox_pt) <= 0.3:
+                for fy in allowed_fy:
+                    for fx in allowed_fx:
+                        cand = (ox, oy, fy, fx)
+                        if cand not in seen_cands:
+                            seen_cands.add(cand)
+                            top_cands.append(cand)
+
+    best_c: tuple[float, float, Optional[tuple[float, float, bool, bool]]] = (-1.0, 999.0, None)
+    for ox, oy, fy, fx in top_cands:
+        pct, me, _, _ = _eval_view_overlay(
+            coarse_segs, pdf_segs, grid, cell, scale, ox, oy, fy, W_mm, fx, L_mm, tol_pt=0.28
+        )
+        if (pct > best_c[0] + 0.05) or (abs(pct - best_c[0]) <= 0.05 and me < best_c[1]):
+            best_c = (pct, me, (ox, oy, fy, fx))
+
+    if best_c[2] is None:
+        return 0.0, 999.0, 0.0, 0.0, None
+
+    ox0, oy0, fy, fx = best_c[2]
+    # Stage 1 fine search (±0.8 pt at 0.12 pt step) -> catches any tw-shift or edge-stroke offset
+    best_s1 = (-1.0, 999.0, ox0, oy0)
+    steps_s1 = [-0.72, -0.48, -0.24, -0.12, 0.0, 0.12, 0.24, 0.48, 0.72]
+    for dx in steps_s1:
+        for dy in steps_s1:
+            pct, me, _, _ = _eval_view_overlay(
+                coarse_segs, pdf_segs, grid, cell, scale, ox0 + dx, oy0 + dy, fy, W_mm, fx, L_mm, tol_pt=0.25
+            )
+            if (pct > best_s1[0] + 1e-5) or (abs(pct - best_s1[0]) <= 1e-5 and me < best_s1[1]):
+                best_s1 = (pct, me, ox0 + dx, oy0 + dy)
+
+    # Stage 2 sub-point refinement (±0.12 pt at 0.04 pt step) over all model segments
+    ox1, oy1 = best_s1[2], best_s1[3]
+    best_f = (-1.0, 999.0, 0.0, 0.0, (ox1, oy1, fy, fx))
+    for dx in (-0.12, -0.08, -0.04, 0.0, 0.04, 0.08, 0.12):
+        for dy in (-0.12, -0.08, -0.04, 0.0, 0.04, 0.08, 0.12):
+            pct, me, ml, tl = _eval_view_overlay(
+                model_segs_mm, pdf_segs, grid, cell, scale, ox1 + dx, oy1 + dy, fy, W_mm, fx, L_mm, tol_pt=0.25
+            )
+            if (pct > best_f[0] + 1e-6) or (abs(pct - best_f[0]) <= 1e-6 and me < best_f[1]):
+                best_f = (pct, me, ml, tl, (ox1 + dx, oy1 + dy, fy, fx))
+    return best_f
+
+
+def _count_uncovered_interior_web_lines(
+    model_segs_mm: list[tuple[float, float, float, float]],
+    L_mm: float,
+    B_mm: float,
+    pdf_segs: list[tuple[float, float, float, float]],
+    scale: float,
+    reg: tuple[float, float, bool, bool],
+) -> int:
+    """Detect long interior PDF lines (missed webs) inside the registered TOP beam footprint."""
+    ox_pt, oy_pt, fy, fx = reg
+    s = (72.0 / 25.4) / scale
+    L_pt, B_pt = L_mm * s, B_mm * s
+    by_y: dict[float, list[tuple[float, float]]] = {}
+    for x1, y1, x2, y2 in pdf_segs:
+        if abs(y1 - y2) < 0.25 and ox_pt - 1.0 <= min(x1, x2) and max(x1, x2) <= ox_pt + L_pt + 1.0:
+            if oy_pt + 0.35 <= y1 <= oy_pt + B_pt - 0.35:
+                by_y.setdefault(round(y1, 1), []).append((min(x1, x2), max(x1, x2)))
+
+    # Project horizontal model lines into PDF coords
+    m_hlines: list[tuple[float, float, float]] = []
+    for ax, ay, bx, by in model_segs_mm:
+        if abs(ay - by) < 0.5 and abs(bx - ax) > 0.20 * L_mm:
+            mx0 = ox_pt + ((L_mm - max(ax, bx)) if fx else min(ax, bx)) * s
+            mx1 = ox_pt + ((L_mm - min(ax, bx)) if fx else max(ax, bx)) * s
+            my = oy_pt + ((B_mm - ay) if fy else ay) * s
+            m_hlines.append((my, mx0, mx1))
+
+    missing = 0
+    for ky, ivs in by_y.items():
+        merged = _merge_intervals_1d([(a - 0.8, b + 0.8) for a, b in ivs])
+        for a, b in merged:
+            if (b - a) < 0.70 * L_pt:
+                continue
+            mid_x = 0.5 * (a + b)
+            if not any(abs(ky - my) <= 0.45 and mx0 - 2.0 <= mid_x <= mx1 + 2.0 for my, mx0, mx1 in m_hlines):
+                missing += 1
+    return missing
+
+
+def verify_assembly_pdf_overlay(
+    pdf_path: Optional[str | Path],
+    plates: list[ExtractedPlate],
+    re_read_rings: dict[str, Ring],
+    dxf_audits: list[DrawnDxfAudit],
+    spec: CompoundProfileSpec,
+    cfg: ChesonConfig,
+    detected_type: str,
+    l_assembled_mm: float,
+    cached_pdf_views: Optional[dict[str, Any]] = None,
+) -> Optional[PdfOverlayReport]:
+    """Scale-matched 2D orthographic overlay verification (>= 99.9%) vs A-drawing PDF TOP & FRONT views."""
+    views_data = cached_pdf_views if cached_pdf_views is not None else _extract_pdf_orthographic_views(pdf_path)
+    if views_data is None:
+        return None
+
+    top_segs_m, front_segs_m, holes_proj = _build_assembled_pdf_projections(
+        plates, re_read_rings, dxf_audits, spec, cfg, detected_type
+    )
+    H, B, L = spec.total_height, spec.total_width, l_assembled_mm
+
+    top_scale = views_data["top_scale"] or 25.0
+    front_scale = views_data["front_scale"] or 25.0
+
+    t_pct, t_me_pt, t_ml, t_tl, t_reg = _register_view_to_pdf(
+        top_segs_m, L, B, views_data["top_segs"], views_data["top_grid"], views_data["cell"], top_scale
+    )
+
+    fx_allow: tuple[bool, ...] = (t_reg[3],) if (t_reg is not None and t_pct >= 98.0) else (False, True)
+    front_hint_ox = t_reg[0] if (t_reg is not None and t_pct >= 98.0 and abs(top_scale - front_scale) <= 1e-6) else None
+    f_pct, f_me_pt, f_ml, f_tl, f_reg = _register_view_to_pdf(
+        front_segs_m, L, H, views_data["front_segs"], views_data["front_grid"], views_data["cell"], front_scale,
+        allowed_fy=(True,), allowed_fx=fx_allow, hint_ox_pt=front_hint_ox,
+    )
+    if f_pct < 98.0 and len(fx_allow) == 1:
+        f_pct, f_me_pt, f_ml, f_tl, f_reg = _register_view_to_pdf(
+            front_segs_m, L, H, views_data["front_segs"], views_data["front_grid"], views_data["cell"], front_scale,
+            allowed_fy=(True,), allowed_fx=(False, True), hint_ox_pt=front_hint_ox,
+        )
+    if t_pct < 99.9 and f_pct >= 99.9 and f_reg is not None and abs(top_scale - front_scale) <= 1e-6:
+        t2_pct, t2_me_pt, t2_ml, t2_tl, t2_reg = _register_view_to_pdf(
+            top_segs_m, L, B, views_data["top_segs"], views_data["top_grid"], views_data["cell"], top_scale,
+            allowed_fx=(f_reg[3],), hint_ox_pt=f_reg[0],
+        )
+        if (t2_pct > t_pct + 1e-6) or (abs(t2_pct - t_pct) <= 1e-6 and t2_me_pt < t_me_pt):
+            t_pct, t_me_pt, t_ml, t_tl, t_reg = t2_pct, t2_me_pt, t2_ml, t2_tl, t2_reg
+
+    missing_lines = 0
+    if t_reg is not None:
+        missing_lines = _count_uncovered_interior_web_lines(
+            top_segs_m, L, B, views_data["top_segs"], top_scale, t_reg
+        )
+
+    # Check projected holes on PDF TOP/FRONT views
+    holes_exp = 0
+    holes_hit = 0
+    cell = views_data["cell"]
+    for vname, hx, hy, r_mm in holes_proj:
+        reg = t_reg if vname == "TOP" else f_reg
+        sc = top_scale if vname == "TOP" else front_scale
+        span_y = B if vname == "TOP" else H
+        p_segs = views_data["top_segs"] if vname == "TOP" else views_data["front_segs"]
+        p_grid = views_data["top_grid"] if vname == "TOP" else views_data["front_grid"]
+        if reg is None or not p_segs:
+            continue
+        holes_exp += 1
+        ox, oy, fy, fx = reg
+        s = (72.0 / 25.4) / sc
+        mx = (L - hx) if fx else hx
+        my = (span_y - hy) if fy else hy
+        px = ox + mx * s
+        py = oy + my * s
+        tol_h = max(0.35, r_mm * s + 0.45)
+        ix, iy = int(math.floor(px / cell)), int(math.floor(py / cell))
+        found_h = False
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for sidx in p_grid.get((ix + dx, iy + dy), ()):
+                    x1, y1, x2, y2 = p_segs[sidx]
+                    if _point_to_seg_dist_2d(px, py, x1, y1, x2, y2) <= tol_h:
+                        found_h = True
+                        break
+                if found_h:
+                    break
+            if found_h:
+                break
+        if found_h:
+            holes_hit += 1
+
+    raw_tot = t_tl + f_tl
+    raw_pct = (100.0 * (t_ml + f_ml) / raw_tot) if raw_tot > 0.0 else 0.0
+    penalty = 15.0 * missing_lines
+    overall_pct = round(max(0.0, raw_pct - penalty), 2)
+    t_pct_pen = round(max(0.0, t_pct - penalty), 2)
+
+    pt_to_mm = 25.4 / 72.0
+    t_err_mm = round(t_me_pt * pt_to_mm * top_scale, 3) if t_me_pt < 900.0 else 999.0
+    f_err_mm = round(f_me_pt * pt_to_mm * front_scale, 3) if f_me_pt < 900.0 else 999.0
+
+    issues: list[str] = []
+    if missing_lines > 0:
+        issues.append(f"PDF TOP: {missing_lines} linii structurale interne neacoperite (posibil piese lipsă!)")
+    if overall_pct < 99.9:
+        issues.append(
+            f"Suprapunere asamblată PDF sub prag ({overall_pct:.2f}% < 99.90%): "
+            f"TOP={t_pct_pen:.2f}%, FRONT={f_pct:.2f}%"
+        )
+
+    passed = (overall_pct >= 99.9) and (missing_lines == 0)
+    return PdfOverlayReport(
+        pdf_name=views_data["pdf_name"],
+        top_scale=views_data["top_scale"],
+        front_scale=views_data["front_scale"],
+        top_overlay_pct=t_pct_pen,
+        front_overlay_pct=round(f_pct, 2),
+        overall_overlay_pct=overall_pct,
+        top_mean_err_mm=t_err_mm,
+        front_mean_err_mm=f_err_mm,
+        holes_pdf_expected=holes_exp,
+        holes_pdf_matched=holes_hit,
+        missing_structural_lines=missing_lines,
+        passed=passed,
+        issues=issues,
+    )
+
+
 def verify_post_draw_and_3d(
     dstv: DSTVFile,
     cfg: ChesonConfig,
@@ -4360,8 +5006,10 @@ def verify_post_draw_and_3d(
     bom_row: Optional[BomRow] = None,
     pdf_dims: Optional[set[float]] = None,
     pdf_analysis: Optional[PdfDrawingAnalysis] = None,
+    a_pdf_path: Optional[Path] = None,
+    cached_pdf_views: Optional[dict[str, Any]] = None,
 ) -> PostDrawVerificationReport:
-    """Post-draw verification: re-read DXFs vs NC1 geometry, PDF drawing/OCR dimensions, and 3D simulation."""
+    """Post-draw verification: re-read DXFs vs NC1 geometry, PDF overlay >=99.9%, and 3D simulation."""
     spec = parse_compound_profile(dstv.header.profile_str, dstv.header)
     spec = _align_spec_flanges_to_faces(dstv, spec, cfg)
     detected_type, talpa_side = detect_cheson_type(dstv, spec, cfg)
@@ -4463,12 +5111,30 @@ def verify_post_draw_and_3d(
             if cval >= 10.0 and any(abs(cval - pd_val) <= 0.5 for pd_val in eff_pdf_dims):
                 pdf_confirmed.append(round(cval, 2))
 
+    pdf_overlay: Optional[PdfOverlayReport] = None
+    eff_pdf_path = a_pdf_path or (bom.source_pdf if bom is not None else None)
+    if eff_pdf_path is not None or cached_pdf_views is not None:
+        pdf_overlay = verify_assembly_pdf_overlay(
+            pdf_path=eff_pdf_path,
+            plates=plates,
+            re_read_rings=re_read_rings,
+            dxf_audits=dxf_audits,
+            spec=spec,
+            cfg=cfg,
+            detected_type=detected_type,
+            l_assembled_mm=sim_3d.l_3d_mm if sim_3d.l_3d_mm > 0.0 else l_gabarit,
+            cached_pdf_views=cached_pdf_views,
+        )
+
     issues: list[str] = []
     for a in dxf_audits:
         for iss in a.issues:
             issues.append(f"[{a.plate_name}] {iss}")
     for iss in sim_3d.issues:
         issues.append(f"[Sim3D] {iss}")
+    if pdf_overlay is not None:
+        for iss in pdf_overlay.issues:
+            issues.append(f"[OverlayPDF] {iss}")
     if pdf_bom_len_err is not None and pdf_bom_len_err > 0.01:
         issues.append(f"Gabarit 3D {sim_3d.l_3d_mm:.3f} != STYKKLISTE {bom_row.length_mm:.3f}")
 
@@ -4479,12 +5145,13 @@ def verify_post_draw_and_3d(
         and nc1_max_hole_err <= 0.05
         and (pdf_bom_len_err is None or pdf_bom_len_err <= 0.01)
         and sim_3d.passed
+        and (pdf_overlay is None or pdf_overlay.passed)
     )
 
     pdf_name = (
         bom.source_pdf.name
         if bom is not None
-        else (pdf_analysis.pdf_name if pdf_analysis is not None else None)
+        else (pdf_analysis.pdf_name if pdf_analysis is not None else (pdf_overlay.pdf_name if pdf_overlay else None))
     )
     return PostDrawVerificationReport(
         piece_id=dstv.header.piece_id,
@@ -4503,6 +5170,7 @@ def verify_post_draw_and_3d(
         pdf_text_source=(pdf_analysis.text_source if pdf_analysis else "none"),
         pdf_profile_callouts=(list(pdf_analysis.profile_callouts) if pdf_analysis else []),
         pdf_hole_callouts=(list(pdf_analysis.hole_callouts) if pdf_analysis else []),
+        pdf_overlay=pdf_overlay,
     )
 
 
@@ -5314,6 +5982,323 @@ def _collect_inputs(
     return src, search_root, nc1_files, a_pdf, bom, w_map
 
 
+def extract_pdf_noted_dimensions(pdf_path: Optional[str | Path]) -> set[float]:
+    """Extract clean drawing dimension callouts from TOP/FRONT/SECTION (excluding dates, scales, Ø, BOM)."""
+    if pymupdf is None or not pdf_path:
+        return set()
+    path = Path(pdf_path)
+    if not path.is_file():
+        return set()
+
+    dims: set[float] = set()
+    doc = pymupdf.open(str(path))
+    try:
+        for page in doc:
+            words = page.get_text("words") or []
+            # Find STYKKLISTE titleblock region to avoid BOM weights/dates/scales
+            bom_top = page.rect.height
+            bom_x0 = page.rect.width
+            for w in words:
+                up = str(w[4]).strip().upper()
+                if any(kw in up for kw in BOM_BANNER_KEYWORDS):
+                    bom_top = min(bom_top, float(w[1]) - 15.0)
+                    bom_x0 = min(bom_x0, float(w[0]) - 20.0)
+            for idx, w in enumerate(words):
+                x0, y0, x1, y1, raw = float(w[0]), float(w[1]), float(w[2]), float(w[3]), str(w[4]).strip()
+                if x0 >= bom_x0 and y0 >= bom_top:
+                    continue
+                if re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$", raw):
+                    continue
+                if raw.startswith(("Ø", "ø", "∅", "R", "M", "S", "T", "1:")):
+                    continue
+                if re.match(r"^\d{2,5}(?:[.,]\d{1,2})?$", raw):
+                    # Skip scale denominator right after "1:" or diameter value right after Ø
+                    prev = str(words[idx - 1][4]).strip() if idx > 0 else ""
+                    if prev in ("Ø", "ø", "∅", "stk", "×", "x", "1:"):
+                        continue
+                    try:
+                        val = float(raw.replace(",", "."))
+                        if val >= 20.0:
+                            dims.add(val)
+                    except ValueError:
+                        pass
+    finally:
+        doc.close()
+    return dims
+
+
+def _clone_plate_with_geometry(
+    p: ExtractedPlate,
+    exterior: Ring,
+    holes: list[DSTVHole],
+    inners: list[Ring],
+    markings: list[DSTVMarking],
+    source_bounds: tuple[float, float, float, float],
+) -> ExtractedPlate:
+    return ExtractedPlate(
+        name=p.name,
+        folder=p.folder,
+        role=p.role,
+        face=p.face,
+        thickness=p.thickness,
+        piece_id=p.piece_id,
+        piece_clean=p.piece_clean,
+        material=p.material,
+        quantity=p.quantity,
+        exterior=exterior,
+        holes=holes,
+        inner_contours=inners,
+        markings=markings,
+        source_bounds=source_bounds,
+        removed_residuals=p.removed_residuals,
+        qty_per_cheson=p.qty_per_cheson,
+        role_code=p.role_code,
+        merged_sources=list(p.merged_sources),
+    )
+
+
+def _snap_plate_rings_to_noted_dims(
+    dstv: DSTVFile,
+    plates: list[ExtractedPlate],
+    spec: CompoundProfileSpec,
+    cfg: ChesonConfig,
+    detected_type: str,
+    talpa_side: str,
+    l_nc1_raw: float,
+    l_gabarit: float,
+    l_source_label: str,
+    noted_dims: set[float],
+) -> tuple[list[ExtractedPlate], list[str]]:
+    """Snap near-integer plate lengths (<=0.55 mm) to noted PDF drawing dims only when 3D seams remain intact."""
+    if not cfg.exact_gabarit_lock or not noted_dims or not plates:
+        return plates, []
+
+    notes: list[str] = []
+    cur_plates = list(plates)
+    for idx, p in enumerate(cur_plates):
+        b0, b1, b2, b3 = p.bounds
+        pL = b2 - b0
+        if pL < 200.0:
+            continue
+        # Only snap if NOT already within 0.001 mm of a noted PDF dim, and find unique match within 0.55 mm
+        cands = [d for d in noted_dims if abs(d - pL) <= 0.55]
+        if not cands:
+            continue
+        best_d = min(cands, key=lambda d: abs(d - pL))
+        delta = best_d - pL
+        if abs(delta) <= 0.001:
+            continue
+
+        sx0, sy0, sx1, sy1 = p.source_bounds
+        # Determine which end can move cleanly without exceeding [0, l_gabarit]
+        move_right = (sx1 + delta <= l_gabarit + 1e-4) and (abs(sx1 - l_gabarit) > 0.6 or abs(delta) <= 0.01)
+        move_left = (not move_right) and (sx0 - delta >= -1e-4) and (sx0 > 0.6)
+        if not move_right and not move_left:
+            continue
+
+        mir_x = cfg.mirror_web_h_x if p.face == "h" else False
+        if move_right:
+            new_ext = clean_ring(
+                [(x + delta if abs(x - pL) <= 0.15 else x, y) for x, y in p.exterior],
+                min_seg_len=cfg.min_segment_length_mm,
+                ccw=True,
+            )
+            new_holes = [
+                DSTVHole(
+                    face=h.face,
+                    x=(h.x + delta if h.x > 0.5 * pL else h.x),
+                    y=h.y,
+                    diameter=h.diameter,
+                    depth=h.depth,
+                    hole_type=h.hole_type,
+                    slot_length=h.slot_length,
+                    slot_width=h.slot_width,
+                    slot_angle=h.slot_angle,
+                    x_flag=h.x_flag,
+                    y_flag=h.y_flag,
+                )
+                for h in p.holes
+            ]
+            new_sb = (sx0, sy0, sx1 + delta, sy1)
+        else:
+            # Lengthen/shorten left end while keeping normalized origin at (0, 0)
+            new_ext = clean_ring(
+                [(x + delta if x > 0.15 else x, y) for x, y in p.exterior],
+                min_seg_len=cfg.min_segment_length_mm,
+                ccw=True,
+            )
+            new_holes = [
+                DSTVHole(
+                    face=h.face,
+                    x=(h.x + (delta if mir_x else delta)),
+                    y=h.y,
+                    diameter=h.diameter,
+                    depth=h.depth,
+                    hole_type=h.hole_type,
+                    slot_length=h.slot_length,
+                    slot_width=h.slot_width,
+                    slot_angle=h.slot_angle,
+                    x_flag=h.x_flag,
+                    y_flag=h.y_flag,
+                )
+                for h in p.holes
+            ]
+            new_sb = (sx0 - delta, sy0, sx1, sy1)
+
+        cand_p = _clone_plate_with_geometry(p, new_ext, new_holes, p.inner_contours, p.markings, new_sb)
+        trial_plates = list(cur_plates)
+        trial_plates[idx] = cand_p
+        trial_ver = verify_cheson_decomposition(
+            dstv=dstv,
+            plates=trial_plates,
+            l_nc1_raw=l_nc1_raw,
+            l_gabarit_target=l_gabarit,
+            l_source_label=l_source_label,
+            l_assembled=l_gabarit,
+            detected_type=detected_type,
+            talpa_side=talpa_side,
+            spec=spec,
+            cfg=cfg,
+        )
+        if trial_ver.passed and trial_ver.flange_web_contact_error_mm <= 0.05:
+            cur_plates = trial_plates
+            notes.append(f"{p.name}: L {pL:.3f} -> {best_d:.3f} mm (cotă desen)")
+
+    return cur_plates, notes
+
+
+def _score_closed_loop_candidate(ver: VerificationReport, post_ver: PostDrawVerificationReport) -> tuple[int, int, float, float]:
+    geom_ok = 1 if (ver.passed and post_ver.all_dxf_clean and post_ver.all_layer_zero and post_ver.sim_3d.passed) else 0
+    ov_ok = 1 if (post_ver.pdf_overlay is None or post_ver.pdf_overlay.passed) else 0
+    ov = post_ver.pdf_overlay.overall_overlay_pct if post_ver.pdf_overlay else 100.0
+    return (1 if (geom_ok and ov_ok) else 0, geom_ok, ov, -ver.max_gabarit_error_mm)
+
+
+def _extract_and_verify_cheson_closed_loop(
+    dstv: DSTVFile,
+    base_cfg: ChesonConfig,
+    bom: Optional[BomTable],
+    bom_row: Optional[BomRow],
+    pdf_analysis: Optional[PdfDrawingAnalysis],
+    noted_dims: set[float],
+    a_pdf: Optional[Path],
+    cached_pdf_views: Optional[dict[str, Any]],
+    use_nesting_layers: bool,
+    tmp_dir: Path,
+) -> tuple[
+    ChesonConfig,
+    list[ExtractedPlate],
+    VerificationReport,
+    list[ExtractedPlate],
+    list[tuple[int, str]],
+    list[DrawnDxfAudit],
+    dict[str, Ring],
+    PostDrawVerificationReport,
+]:
+    """Run extraction -> DXF write/read -> 3D sim -> PDF overlay, auto-refining if <99.9% or check fails."""
+    spec_base = _align_spec_flanges_to_faces(dstv, parse_compound_profile(dstv.header.profile_str, dstv.header), base_cfg)
+    pdf_dims = pdf_analysis.dimensions if pdf_analysis else set()
+
+    def _clone_cfg(**kw) -> ChesonConfig:
+        d = asdict(base_cfg)
+        d.update(kw)
+        return ChesonConfig(**d)
+
+    # Candidate strategies in priority order: (label, cfg_override, allow_noted_snap)
+    strategies: list[tuple[str, ChesonConfig, bool]] = [
+        ("Standard + Cote PDF", base_cfg, True),
+        ("Fără ajustare cote intermediare", base_cfg, False),
+        ("Păstrează segmente marginale (strip_residual=False)", _clone_cfg(strip_residual_fragments=False), False),
+        ("Plan oblic față exterioară (skew=outer)", _clone_cfg(web_skew_plane="outer"), False),
+        ("Plan oblic axă (skew=centerline)", _clone_cfg(web_skew_plane="centerline"), False),
+    ]
+    if base_cfg.cheson_type == "auto":
+        det_t, _ = detect_cheson_type(dstv, spec_base, base_cfg)
+        if det_t == "cheson_fara_talpa":
+            strategies.append(
+                (
+                    "Capace peste inimi (over_webs)",
+                    _clone_cfg(flange_top_mode="over_webs", flange_bot_mode="over_webs", web_skew_plane="outer"),
+                    False,
+                )
+            )
+
+    best_bundle = None
+    best_score = (-1, -1, -1.0, -999.0)
+    attempt_notes: list[str] = []
+    iters_done = 0
+
+    for idx_s, (label, cand_cfg, allow_snap) in enumerate(strategies):
+        # Skip duplicate strategy #1 if no noted dims would have snapped anyway
+        if idx_s == 1 and best_bundle is not None and not best_bundle[8]:
+            continue
+        iters_done += 1
+        cand_raw, cand_ver = decompose_nc1(dstv, cand_cfg, return_verification=True)
+        snapped_notes: list[str] = []
+        if allow_snap and noted_dims:
+            cand_raw_s, snapped_notes = _snap_plate_rings_to_noted_dims(
+                dstv=dstv,
+                plates=cand_raw,
+                spec=spec_base,
+                cfg=cand_cfg,
+                detected_type=cand_ver.detected_type,
+                talpa_side=detect_cheson_type(dstv, spec_base, cand_cfg)[1],
+                l_nc1_raw=cand_ver.l_nc1_raw_mm,
+                l_gabarit=cand_ver.l_gabarit_target_mm,
+                l_source_label=cand_ver.l_source_label,
+                noted_dims=noted_dims,
+            )
+            if snapped_notes:
+                cand_raw = cand_raw_s
+
+        cand_unique, cand_map = deduplicate_cheson_plates(cand_raw, cand_cfg)
+        cand_audits: list[DrawnDxfAudit] = []
+        cand_rings: dict[str, Ring] = {}
+        sub_tmp = tmp_dir / f"try_{idx_s}"
+        sub_tmp.mkdir(parents=True, exist_ok=True)
+        for p in cand_unique:
+            tdxf = sub_tmp / f"{p.name}.dxf"
+            write_plate_dxf(p, tdxf, use_nesting_layers=use_nesting_layers, include_marking=False)
+            aud, rr = inspect_drawn_dxf(tdxf, p, expect_layer_zero=(not use_nesting_layers))
+            cand_audits.append(aud)
+            cand_rings[p.name] = rr
+
+        exp_auds, exp_rings = _expand_audits_for_3d_sim(
+            cand_raw, cand_unique, cand_map, cand_audits, cand_rings
+        )
+        cand_post = verify_post_draw_and_3d(
+            dstv=dstv,
+            cfg=cand_cfg,
+            plates=cand_raw,
+            dxf_audits=exp_auds,
+            re_read_rings=exp_rings,
+            bom=bom,
+            bom_row=bom_row,
+            pdf_dims=pdf_dims,
+            pdf_analysis=pdf_analysis,
+            a_pdf_path=a_pdf,
+            cached_pdf_views=cached_pdf_views,
+        )
+        sc = _score_closed_loop_candidate(cand_ver, cand_post)
+        ov_s = f"{cand_post.pdf_overlay.overall_overlay_pct:.2f}%" if cand_post.pdf_overlay else "n/a"
+        attempt_notes.append(f"#{idx_s + 1} {label}: pass={cand_ver.passed and cand_post.passed}, overlay={ov_s}")
+
+        if sc > best_score:
+            best_score = sc
+            best_bundle = (
+                cand_cfg, cand_raw, cand_ver, cand_unique, cand_map,
+                cand_audits, cand_rings, cand_post, snapped_notes,
+            )
+        if sc[0] == 1 and (cand_post.pdf_overlay is None or cand_post.pdf_overlay.overall_overlay_pct >= 99.9):
+            break
+
+    win_cfg, win_raw, win_ver, win_unique, win_map, win_auds, win_rings, win_post, win_snaps = best_bundle
+    win_post.refinement_iterations = iters_done
+    win_post.refinement_notes = attempt_notes if iters_done > 1 else []
+    win_post.snapped_noted_dims = win_snaps
+    return win_cfg, win_raw, win_ver, win_unique, win_map, win_auds, win_rings, win_post
+
+
 def preview_cheson_pipeline(
     source_path: str | Path,
     source_mode: str = "folder",
@@ -5390,6 +6375,8 @@ def preview_cheson_pipeline(
     excel_qty_map = load_cheson_quantities_from_excel(resolved_xlsx)
     pdf_analysis = extract_pdf_drawing_analysis(a_pdf)
     pdf_dims = pdf_analysis.dimensions if pdf_analysis else set()
+    noted_dims = extract_pdf_noted_dimensions(a_pdf)
+    cached_pdf_views = _extract_pdf_orthographic_views(a_pdf)
     bom_by_key: dict[str, BomRow] = {}
     if bom:
         for r in bom.rows:
@@ -5407,7 +6394,7 @@ def preview_cheson_pipeline(
             target_len = override_length_mm if (override_length_mm and override_length_mm > 0) else (
                 bom_row.length_mm if (bom_row and bom_row.length_mm) else None
             )
-            cfg = ChesonConfig.from_preset(
+            base_cfg = ChesonConfig.from_preset(
                 preset,
                 exact_gabarit_lock=exact_gabarit_lock,
                 target_length_mm=target_len,
@@ -5415,32 +6402,19 @@ def preview_cheson_pipeline(
                 strip_residual_fragments=strip_residual_fragments,
                 deduplicate_identical=deduplicate_identical,
             )
-            raw_plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
-            unique_plates, instance_mapping = deduplicate_cheson_plates(raw_plates, cfg)
-
-            unique_audits: list[DrawnDxfAudit] = []
-            unique_rings: dict[str, Ring] = {}
-            for p in unique_plates:
-                tmp_dxf = tmp_dir / f"{p.name}.dxf"
-                write_plate_dxf(p, tmp_dxf, use_nesting_layers=use_nesting_layers, include_marking=False)
-                aud, rr = inspect_drawn_dxf(tmp_dxf, p, expect_layer_zero=(not use_nesting_layers))
-                unique_audits.append(aud)
-                unique_rings[p.name] = rr
-
-            exp_audits, exp_rings = _expand_audits_for_3d_sim(
-                raw_plates, unique_plates, instance_mapping, unique_audits, unique_rings
-            )
-
-            post_ver = verify_post_draw_and_3d(
+            piece_tmp = tmp_dir / piece_key
+            piece_tmp.mkdir(parents=True, exist_ok=True)
+            _, raw_plates, ver, unique_plates, _, _, _, post_ver = _extract_and_verify_cheson_closed_loop(
                 dstv=dstv,
-                cfg=cfg,
-                plates=raw_plates,
-                dxf_audits=exp_audits,
-                re_read_rings=exp_rings,
+                base_cfg=base_cfg,
                 bom=bom,
                 bom_row=bom_row,
-                pdf_dims=pdf_dims,
                 pdf_analysis=pdf_analysis,
+                noted_dims=noted_dims,
+                a_pdf=a_pdf,
+                cached_pdf_views=cached_pdf_views,
+                use_nesting_layers=use_nesting_layers,
+                tmp_dir=piece_tmp,
             )
             if not (ver.passed and post_ver.passed):
                 all_passed = False
@@ -5545,6 +6519,8 @@ def _run_cheson_single_folder(
     excel_qty_map = load_cheson_quantities_from_excel(resolved_xlsx)
     pdf_analysis = extract_pdf_drawing_analysis(a_pdf)
     pdf_dims = pdf_analysis.dimensions if pdf_analysis else set()
+    noted_dims = extract_pdf_noted_dimensions(a_pdf)
+    cached_pdf_views = _extract_pdf_orthographic_views(a_pdf)
     out_root = Path(dest_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     effective_oda = find_oda_exe(oda_path)
@@ -5600,7 +6576,7 @@ def _run_cheson_single_folder(
             target_len = override_length_mm if (override_length_mm and override_length_mm > 0) else (
                 bom_row.length_mm if (bom_row and bom_row.length_mm) else None
             )
-            cfg = ChesonConfig.from_preset(
+            base_cfg = ChesonConfig.from_preset(
                 preset,
                 exact_gabarit_lock=exact_gabarit_lock,
                 target_length_mm=target_len,
@@ -5608,9 +6584,22 @@ def _run_cheson_single_folder(
                 strip_residual_fragments=strip_residual_fragments,
                 deduplicate_identical=deduplicate_identical,
             )
-            raw_plates, ver = decompose_nc1(dstv, cfg, return_verification=True)
+            with tempfile.TemporaryDirectory(prefix="steel_cl_") as cl_tmp:
+                cfg, raw_plates, ver, unique_plates, instance_mapping, _, _, pre_post_ver = (
+                    _extract_and_verify_cheson_closed_loop(
+                        dstv=dstv,
+                        base_cfg=base_cfg,
+                        bom=bom,
+                        bom_row=bom_row,
+                        pdf_analysis=pdf_analysis,
+                        noted_dims=noted_dims,
+                        a_pdf=a_pdf,
+                        cached_pdf_views=cached_pdf_views,
+                        use_nesting_layers=use_nesting_layers,
+                        tmp_dir=Path(cl_tmp),
+                    )
+                )
             verifications.append(asdict(ver))
-            unique_plates, instance_mapping = deduplicate_cheson_plates(raw_plates, cfg)
 
             if piece_key in excel_qty_map and resolved_xlsx is not None:
                 cheson_qty = excel_qty_map[piece_key]
@@ -5719,7 +6708,12 @@ def _run_cheson_single_folder(
                 bom_row=bom_row,
                 pdf_dims=pdf_dims,
                 pdf_analysis=pdf_analysis,
+                a_pdf_path=a_pdf,
+                cached_pdf_views=cached_pdf_views,
             )
+            post_ver.refinement_iterations = pre_post_ver.refinement_iterations
+            post_ver.refinement_notes = list(pre_post_ver.refinement_notes)
+            post_ver.snapped_noted_dims = list(pre_post_ver.snapped_noted_dims)
             post_draw_audits.append(asdict(post_ver))
             tcl = format_cheson_tcl_summary(current_plate_rows)
             cheson_summaries.append(
@@ -5736,10 +6730,15 @@ def _run_cheson_single_folder(
                     "full_summary": tcl["full_summary"],
                     "unique_plates_count": len(unique_plates),
                     "total_pieces_count": sum(int(r["total_qty"]) for r in current_plate_rows),
+                    "overlay_pct": (post_ver.pdf_overlay.overall_overlay_pct if post_ver.pdf_overlay else None),
                     "status": "PASS" if (ver.passed and post_ver.passed) else "CHECK",
                 }
             )
             _log(f"   📊 Cantități T/C/L ({cheson_qty} chesoane [{qty_source}]): {tcl['full_summary']}")
+            if post_ver.snapped_noted_dims:
+                _log(f"   📐 Cote PDF blocate (≤0.001 mm): {', '.join(post_ver.snapped_noted_dims)}")
+            if post_ver.refinement_iterations > 1:
+                _log(f"   🔄 Auto-corecție închisă: {post_ver.refinement_iterations} iterații ({post_ver.refinement_notes[-1]})")
             s3 = post_ver.sim_3d
             p_badge = "✅ PASS" if post_ver.passed else "⚠ CHECK"
             _log(
@@ -5747,6 +6746,16 @@ def _run_cheson_single_folder(
                 f"Layer 0 pur={post_ver.all_layer_zero} | Err cote={post_ver.nc1_max_dim_err_mm:.4f} mm | "
                 f"Err găuri={post_ver.nc1_max_hole_err_mm:.4f} mm"
             )
+            if post_ver.pdf_overlay is not None:
+                ov = post_ver.pdf_overlay
+                ov_badge = "✅" if ov.passed else "⚠"
+                sc_s = f"1:{int(round(ov.top_scale or 25))}"
+                _log(
+                    f"   🎯 SUPRAPUNERE PDF LA SCARĂ ({sc_s}): {ov_badge} {ov.overall_overlay_pct:.2f}% "
+                    f"(TOP={ov.top_overlay_pct:.2f}% [err {ov.top_mean_err_mm:.2f} mm], "
+                    f"FRONT={ov.front_overlay_pct:.2f}% [err {ov.front_mean_err_mm:.2f} mm], "
+                    f"Găuri PDF={ov.holes_pdf_matched}/{ov.holes_pdf_expected})"
+                )
             if post_ver.pdf_drawing_name:
                 pdf_preview_dims = ", ".join(f"{v:g}" for v in post_ver.pdf_dims_confirmed[:10])
                 bom_err_s = f"{post_ver.pdf_bom_length_err_mm:.4f} mm" if post_ver.pdf_bom_length_err_mm is not None else "-"

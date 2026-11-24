@@ -390,7 +390,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.17.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -7805,6 +7805,17 @@ class UnifiedApp(ctk.CTk):
                     f"Coliziuni={s3['max_interference_mm']:.3f} mm | Fidelitate={s3['overall_3d_similarity_pct']:.2f}% ({iou_str}) | "
                     f"Găuri 3D={s3['holes_3d_matched']}/{s3['holes_3d_expected']} | Masă={mass_s}"
                 )
+            if pda.get("pdf_overlay"):
+                ov = pda["pdf_overlay"]
+                ov_badge = "✅" if ov.get("passed") else "⚠"
+                self.cheson_log(
+                    f"   Suprapunere PDF: {ov_badge} {ov['overall_overlay_pct']:.2f}% "
+                    f"(TOP={ov['top_overlay_pct']:.2f}% [err {ov['top_mean_err_mm']:.2f}mm], "
+                    f"FRONT={ov['front_overlay_pct']:.2f}% [err {ov['front_mean_err_mm']:.2f}mm], "
+                    f"Găuri={ov['holes_pdf_matched']}/{ov['holes_pdf_expected']})"
+                )
+            if pda.get("snapped_noted_dims"):
+                self.cheson_log(f"   Cote PDF blocate: {', '.join(pda['snapped_noted_dims'])}")
             if pda.get("pdf_drawing_name") and pda.get("pdf_dims_confirmed"):
                 dims_s = ", ".join(f"{d:g}" for d in pda["pdf_dims_confirmed"][:10])
                 self.cheson_log(f"   Cote PDF OK  : [{dims_s}]")
