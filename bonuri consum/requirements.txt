@@ -1,0 +1,8 @@
+streamlit
+playwright
+python-docx
+openpyxl
+pandas
+pywin32
+Pillow
+python-dotenv

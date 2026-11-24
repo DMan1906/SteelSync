@@ -7,6 +7,7 @@ from pdf_to_dwg import PdfToCadConverter
 import cheson_extractor
 import metalix_importer
 import dwg_organizer
+from bon_consum_launcher import BonConsumLauncher
 from tkinter import filedialog, messagebox, ttk
 # pyrefly: ignore [missing-import]
 import customtkinter as ctk
@@ -390,7 +391,7 @@ _RED_HOV     = ("#d70015", "#d90429")
 _ORANGE      = ("#ff9500", "#f4a261")   # optional / info accent
 
 SETTINGS_PATH = _get_settings_path()
-APP_VERSION = "1.17.0"
+APP_VERSION = "1.18.0"
 
 GITHUB_REPO = "DMan1906/SteelSync"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1207,9 +1208,13 @@ class UnifiedApp(ctk.CTk):
         self.available_extensions = ['.nc', '.pdf', '.dwg', '.dxf', '.step', '.stp']
         self.extension_vars = {}
 
-        # ── Update tracking ──
+        # ── Update & Bon Consum Launcher tracking ──
         self.ignored_update_version = ""
         self._update_dialog = None
+        self.bon_consum_dir = ""
+        self.bon_consum_python = ""
+        self.bon_consum_launcher = BonConsumLauncher()
+        self._bon_consum_launching = False
 
         # ── Directory Browse Memories (Independent per Requirement #3) ──
         self.extractor_source_last_dir = ""
@@ -1287,6 +1292,8 @@ class UnifiedApp(ctk.CTk):
             self._saved_settings_raw = s
 
             self.ignored_update_version = s.get("ignored_update_version", "")
+            self.bon_consum_dir = s.get("bon_consum_dir", "")
+            self.bon_consum_python = s.get("bon_consum_python", "")
             self.appearance_mode_var.set(s.get("appearance_mode", "Dark"))
             ctk.set_appearance_mode(self.appearance_mode_var.get())
             self.source_dir.set(s.get("source_dir", ""))
@@ -1580,6 +1587,8 @@ class UnifiedApp(ctk.CTk):
             "cheson_generate_reports": self.cheson_generate_reports.get(),
             "cheson_open_folder": self.cheson_open_folder.get(),
             "ignored_update_version": getattr(self, "ignored_update_version", ""),
+            "bon_consum_dir": getattr(self, "bon_consum_dir", ""),
+            "bon_consum_python": getattr(self, "bon_consum_python", ""),
             "extensions": ext_map,
             "extractor_source_last_dir": getattr(self, "extractor_source_last_dir", ""),
             "extractor_dest_last_dir": getattr(self, "extractor_dest_last_dir", ""), 
@@ -1605,10 +1614,195 @@ class UnifiedApp(ctk.CTk):
         self.save_settings()
 
     def on_close(self):
+        if hasattr(self, "bon_consum_launcher"):
+            try:
+                self.bon_consum_launcher.stop()
+            except Exception:
+                pass
         if hasattr(self, "_update_tab_buttons_style"):
             self._update_tab_buttons_style()
         self.save_settings()
         self.destroy()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  BON CONSUM WEB APP LAUNCHER
+    # ══════════════════════════════════════════════════════════════════════
+    def launch_bon_consum_app(self, force_restart=False):
+        """Pornește (sau deschide direct în browser) aplicația Streamlit din `bonuri consum`."""
+        if getattr(self, "_bon_consum_launching", False):
+            return
+        self._bon_consum_launching = True
+        if hasattr(self, "bon_consum_btn"):
+            self.bon_consum_btn.configure(text="⏳ Pornire...", state="disabled")
+        threading.Thread(
+            target=self._launch_bon_consum_worker,
+            args=(bool(force_restart),),
+            daemon=True,
+        ).start()
+
+    def _launch_bon_consum_worker(self, force_restart=False):
+        try:
+            if force_restart:
+                self.bon_consum_launcher.stop()
+            res = self.bon_consum_launcher.start_or_open(
+                saved_dir=getattr(self, "bon_consum_dir", ""),
+                saved_python=getattr(self, "bon_consum_python", ""),
+            )
+        except Exception as exc:
+            res = {"status": "error", "message": str(exc)}
+        try:
+            self.after(0, lambda r=res: self._on_bon_consum_result(r))
+        except Exception:
+            pass
+
+    def _reset_bon_consum_btn(self):
+        if hasattr(self, "bon_consum_btn"):
+            running = False
+            try:
+                running = self.bon_consum_launcher.is_running()
+            except Exception:
+                pass
+            if running:
+                self.bon_consum_btn.configure(
+                    text="🟢 Bon Consum",
+                    state="normal",
+                    fg_color=("#1E7E34", "#2EA043"),
+                    hover_color=("#186429", "#238636"),
+                )
+            else:
+                self.bon_consum_btn.configure(
+                    text="🌐 Bon Consum",
+                    state="normal",
+                    fg_color=("#0077B6", "#0096C7"),
+                    hover_color=("#005F8F", "#00B4D8"),
+                )
+
+    def _on_bon_consum_result(self, result):
+        self._bon_consum_launching = False
+        status = result.get("status", "error")
+
+        if status in {"started", "opened"}:
+            app_dir = str(result.get("app_dir", "") or "")
+            py_exe = str(result.get("python", "") or "")
+            changed = False
+            if app_dir and os.path.isdir(app_dir) and app_dir != self.bon_consum_dir:
+                self.bon_consum_dir = app_dir
+                changed = True
+            if py_exe and os.path.isfile(py_exe) and py_exe != self.bon_consum_python:
+                self.bon_consum_python = py_exe
+                changed = True
+            if changed:
+                self.save_settings()
+            if hasattr(self, "bon_consum_btn"):
+                self.bon_consum_btn.configure(
+                    text="🟢 Bon Consum",
+                    state="normal",
+                    fg_color=("#1E7E34", "#2EA043"),
+                    hover_color=("#186429", "#238636"),
+                )
+            return
+
+        self._reset_bon_consum_btn()
+
+        if status == "missing_dir":
+            if messagebox.askyesno(
+                "Bon Consum — Folder lipsă",
+                "Folderul aplicației 'bonuri consum' (cu app.py) nu a fost găsit automat.\n\n"
+                "Dorești să selectezi manual folderul aplicației?",
+            ):
+                self._select_bon_consum_dir(retry=True)
+            return
+
+        if status == "missing_python":
+            app_dir = result.get("app_dir", "")
+            if messagebox.askyesno(
+                "Bon Consum — Python / Streamlit lipsă",
+                f"Aplicația a fost găsită în:\n{app_dir}\n\n"
+                "Nu a fost găsit un interpretor Python (.venv) cu pachetul Streamlit instalat.\n"
+                "Dorești să selectezi manual fișierul python.exe din mediul virtual (.venv)?",
+            ):
+                self._select_bon_consum_python(retry=True)
+            return
+
+        msg = str(result.get("message") or "Nu s-a putut porni aplicația Bon Consum.")
+        tail = str(result.get("log_tail") or "").strip()
+        if tail:
+            tail_short = "\n".join(tail.splitlines()[-10:])
+            msg = f"{msg}\n\nUltimele linii din log:\n{tail_short}"
+        messagebox.showerror("Eroare Bon Consum", msg)
+
+    def _show_bon_consum_menu(self, event):
+        menu = tk.Menu(self, tearoff=0)
+        is_up = False
+        try:
+            is_up = self.bon_consum_launcher.is_running()
+        except Exception:
+            pass
+        menu.add_command(
+            label="🌐 Deschide în browser" + (" (activ)" if is_up else ""),
+            command=lambda: self.launch_bon_consum_app(force_restart=False),
+        )
+        menu.add_command(
+            label="🔄 Repornește serverul",
+            command=lambda: self.launch_bon_consum_app(force_restart=True),
+        )
+        menu.add_command(
+            label="⏹️ Oprește serverul",
+            state="normal" if is_up else "disabled",
+            command=self._stop_bon_consum_server,
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="📁 Selectează folder Bon Consum...",
+            command=lambda: self._select_bon_consum_dir(retry=False),
+        )
+        menu.add_command(
+            label="🐍 Selectează Python (.venv)...",
+            command=lambda: self._select_bon_consum_python(retry=False),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _stop_bon_consum_server(self):
+        try:
+            self.bon_consum_launcher.stop()
+        finally:
+            self._reset_bon_consum_btn()
+
+    def _select_bon_consum_dir(self, retry=False):
+        init_dir = self.bon_consum_dir or self._get_browse_initial_dir("global")
+        chosen = filedialog.askdirectory(
+            title="Selectează folderul aplicației Bon Consum (cu app.py)",
+            initialdir=init_dir if os.path.isdir(init_dir) else None,
+        )
+        if not chosen:
+            return
+        if not os.path.isfile(os.path.join(chosen, "app.py")):
+            messagebox.showwarning(
+                "Folder invalid",
+                f"Folderul selectat nu conține fișierul 'app.py':\n{chosen}",
+            )
+            return
+        self.bon_consum_dir = os.path.normpath(chosen)
+        self.save_settings()
+        if retry:
+            self.launch_bon_consum_app(force_restart=True)
+
+    def _select_bon_consum_python(self, retry=False):
+        init_dir = os.path.dirname(self.bon_consum_python) if self.bon_consum_python else (self.bon_consum_dir or "")
+        chosen = filedialog.askopenfilename(
+            title="Selectează interpretorul python.exe (cu Streamlit instalat)",
+            initialdir=init_dir if init_dir and os.path.isdir(init_dir) else None,
+            filetypes=[("Python Executable", "python.exe"), ("Toate fișierele", "*.*")],
+        )
+        if not chosen:
+            return
+        self.bon_consum_python = os.path.normpath(chosen)
+        self.save_settings()
+        if retry:
+            self.launch_bon_consum_app(force_restart=True)
 
     # ══════════════════════════════════════════════════════════════════════
     #  AUTO-UPDATE METHODS
@@ -2015,6 +2209,21 @@ class UnifiedApp(ctk.CTk):
         )
         self.version_lbl.pack(side="right", padx=(0, 16))
         self.version_lbl.bind("<Button-1>", lambda e: self.start_update_check(manual=True))
+
+        self.bon_consum_btn = ctk.CTkButton(
+            top_bar,
+            text="🌐 Bon Consum",
+            command=self.launch_bon_consum_app,
+            width=148,
+            height=30,
+            fg_color=("#0077B6", "#0096C7"),
+            hover_color=("#005F8F", "#00B4D8"),
+            text_color="#FFFFFF",
+            corner_radius=8,
+            font=("Segoe UI", 12, "bold"),
+        )
+        self.bon_consum_btn.pack(side="right", padx=(0, 14))
+        self.bon_consum_btn.bind("<Button-3>", self._show_bon_consum_menu)
 
         # ──── Native Floating CTkTabview (Requirement #2 with Drag & Drop) ────
         self.tabview = ctk.CTkTabview(

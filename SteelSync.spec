@@ -1,7 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app_icon.ico', '.')]
+datas = [
+    ('app_icon.ico', '.'),
+    ('bonuri consum/app.py', 'bonuri_consum'),
+    ('bonuri consum/browser_bot.py', 'bonuri_consum'),
+    ('bonuri consum/parser_docs.py', 'bonuri_consum'),
+    ('bonuri consum/settings_store.py', 'bonuri_consum'),
+    ('bonuri consum/word_qr_printer.py', 'bonuri_consum'),
+    ('bonuri consum/requirements.txt', 'bonuri_consum'),
+    ('bonuri consum/.streamlit/config.toml', 'bonuri_consum/.streamlit'),
+]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('customtkinter')
@@ -14,7 +23,7 @@ tmp_ret4 = collect_all('ezdxf')
 datas += tmp_ret4[0]; binaries += tmp_ret4[1]; hiddenimports += tmp_ret4[2]
 tmp_ret5 = collect_all('docx')
 datas += tmp_ret5[0]; binaries += tmp_ret5[1]; hiddenimports += tmp_ret5[2]
-hiddenimports += ['metalix_importer', 'dwg_organizer', 'cheson_extractor', 'openpyxl']
+hiddenimports += ['metalix_importer', 'dwg_organizer', 'cheson_extractor', 'bon_consum_launcher', 'openpyxl']
 
 
 a = Analysis(

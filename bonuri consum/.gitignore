@@ -1,0 +1,10 @@
+.venv/
+.env
+user_settings.json
+__pycache__/
+work_tmp/
+temp_qr/
+output_print/
+*.pyc
+*.pyo
+.pytest_cache/
