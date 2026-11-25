@@ -171,6 +171,7 @@ class Stage1PlanResult:
     red_deleted: int = 0
     pink_kept: int = 0
     error: str = ""
+    red_kept: int = 0
 
 
 @dataclass
@@ -181,6 +182,7 @@ class Stage2PlanResult:
     output_docx_path: str = ""
     printed: bool = False
     error: str = ""
+    red_deleted: int = 0
 
 
 def _strip_accents(text: str) -> str:
@@ -619,8 +621,9 @@ class NorstalBrowserBot:
         self,
         plans: list[CuttingPlanRecord],
         panel3_mode: str = "manual_plus",
+        clean_red_rows: bool = True,
     ) -> concurrent.futures.Future:
-        return self._submit(self._run_stage1, plans, panel3_mode)
+        return self._submit(self._run_stage1, plans, panel3_mode, clean_red_rows)
 
     def start_stage2_async(
         self,
@@ -631,6 +634,7 @@ class NorstalBrowserBot:
         print_delay: float = 3.0,
         printer_name: Optional[str] = None,
         overwrite_original: bool = True,
+        clean_red_rows: bool = False,
     ) -> concurrent.futures.Future:
         return self._submit(
             self._run_stage2,
@@ -641,6 +645,7 @@ class NorstalBrowserBot:
             print_delay,
             printer_name,
             overwrite_original,
+            clean_red_rows,
         )
 
     def run_custom_task(self, fn: Callable[[Page, "NorstalBrowserBot"], Any]) -> concurrent.futures.Future:
@@ -2607,6 +2612,29 @@ class NorstalBrowserBot:
             }"""
         )
 
+    def _inspect_panel3_color_counts(self, panel3_grid: Locator, plan_name: str) -> tuple[int, int]:
+        """Inspectează rândurile din Panoul 3 fără a șterge nimic și returnează (red_kept, pink_kept)."""
+        red_kept = 0
+        pink_kept = 0
+        rows_info = self._inspect_panel3_rows(panel3_grid)
+        for info in rows_info:
+            category, reason = classify_row_color(
+                tr_bg=info["trBg"],
+                cell_bgs=info["cellBgs"],
+                first_cell_text=info["firstCellText"],
+                row_classes=info["rowClasses"],
+                cell_classes=info["cellClasses"],
+            )
+            if category == "red":
+                red_kept += 1
+                self._log(
+                    f"  [{plan_name}] Rând ROȘU păstrat (curățare Etapa 1 dezactivată; {reason}): {info['preview']}"
+                )
+            elif category == "pink":
+                pink_kept += 1
+                self._log(f"  [{plan_name}] Rând ROZ păstrat ({reason}): {info['preview']}")
+        return red_kept, pink_kept
+
     def _clean_panel3_rows(self, page: Page, frame: Page | Frame, panel3_grid: Locator, plan_name: str) -> tuple[int, int]:
         """Scanează rândurile din Panoul 3: șterge ROȘU, păstrează ROZ."""
         red_deleted = 0
@@ -3182,6 +3210,7 @@ class NorstalBrowserBot:
         red_deleted: int,
         pink_kept: int,
         mode_tag: str = "Etapa 1",
+        red_kept: int = 0,
     ) -> Stage1PlanResult:
         """Verifică dacă au rămas piese valide în Panoul 3 și construiește rezultatul planului."""
         final_rows = 0
@@ -3203,11 +3232,12 @@ class NorstalBrowserBot:
                 red_deleted=red_deleted,
                 pink_kept=pink_kept,
                 error=empty_msg,
+                red_kept=red_kept,
             )
 
         self._log(
             f"[{plan.plan_name}] Finalizat {mode_tag} — Piese: {parts_added} (respinse: {parts_rejected}), "
-            f"Rânduri finale Panou 3: {final_rows}, ROȘII șterse: {red_deleted}, ROZ păstrate: {pink_kept}."
+            f"Rânduri finale Panou 3: {final_rows}, ROȘII șterse: {red_deleted}, ROȘII păstrate: {red_kept}, ROZ păstrate: {pink_kept}."
         )
         return Stage1PlanResult(
             plan_name=plan.plan_name,
@@ -3217,6 +3247,7 @@ class NorstalBrowserBot:
             parts_rejected=parts_rejected,
             red_deleted=red_deleted,
             pink_kept=pink_kept,
+            red_kept=red_kept,
         )
 
     def _run_single_plan_ui(
@@ -3226,6 +3257,7 @@ class NorstalBrowserBot:
         effective_panel3_mode: str,
         calibrate: bool = False,
         cache_blueprint: Optional[_FullHttpBlueprint] = None,
+        clean_red_rows: bool = True,
     ) -> tuple[Stage1PlanResult, Optional[_FullHttpBlueprint]]:
         """Execută un plan prin UI (opțional capturând și șablonul pentru Full HTTP)."""
         recorder = _HttpTrafficRecorder(page) if calibrate else None
@@ -3392,7 +3424,15 @@ class NorstalBrowserBot:
                         level="WARN",
                     )
 
-            red_deleted, pink_kept = self._clean_panel3_rows(page, frame, panel3, plan.plan_name)
+            if clean_red_rows:
+                red_deleted, pink_kept = self._clean_panel3_rows(page, frame, panel3, plan.plan_name)
+                red_kept = 0
+            else:
+                red_kept, pink_kept = self._inspect_panel3_color_counts(panel3, plan.plan_name)
+                red_deleted = 0
+                self._log(
+                    f"[{plan.plan_name}] Curățare ROȘU dezactivată în Etapa 1 — păstrate {red_kept} rânduri ROȘII și {pink_kept} rânduri ROZ."
+                )
             res = self._finalize_stage1_result(
                 page=page,
                 panel3=panel3,
@@ -3403,6 +3443,7 @@ class NorstalBrowserBot:
                 red_deleted=red_deleted,
                 pink_kept=pink_kept,
                 mode_tag="Etapa 1",
+                red_kept=red_kept,
             )
             return res, blueprint
         finally:
@@ -3548,6 +3589,7 @@ class NorstalBrowserBot:
         frame: Page | Frame,
         bp: _FullHttpBlueprint,
         plan: CuttingPlanRecord,
+        clean_red_rows: bool = True,
     ) -> Optional[Stage1PlanResult]:
         """
         Execută complet un plan (#2..#N) prin HTTP Request (Panou 1 + Panou 2 + toate piesele Panou 3)
@@ -3768,8 +3810,18 @@ class NorstalBrowserBot:
                 self._log(f"  [{plan.plan_name}] Rând ROZ păstrat ({reason}): {info['preview']}")
 
         red_deleted = 0
+        red_kept = 0
         if red_rows:
-            if missing_row_id:
+            if not clean_red_rows:
+                red_kept = len(red_rows)
+                for rr in red_rows:
+                    self._log(
+                        f"  [{plan.plan_name}] Rând ROȘU păstrat (curățare Etapa 1 dezactivată; {rr['reason']}): {rr['preview']}"
+                    )
+                self._log(
+                    f"[{plan.plan_name}] Curățare ROȘU dezactivată în Etapa 1 (Full HTTP) — păstrate {red_kept} rânduri ROȘII și {pink_kept} rânduri ROZ."
+                )
+            elif missing_row_id:
                 red_deleted, extra_pink = self._clean_panel3_rows(page, frame, panel3, plan.plan_name)
                 if pink_kept == 0 and extra_pink > 0:
                     pink_kept = extra_pink
@@ -3833,12 +3885,14 @@ class NorstalBrowserBot:
             red_deleted=red_deleted,
             pink_kept=pink_kept,
             mode_tag="Full HTTP",
+            red_kept=red_kept,
         )
 
     def _run_stage1(
         self,
         plans: list[CuttingPlanRecord],
         panel3_mode: str = "manual_plus",
+        clean_red_rows: bool = True,
     ) -> list[Stage1PlanResult]:
         results: list[Stage1PlanResult] = []
         total = len(plans)
@@ -3865,7 +3919,7 @@ class NorstalBrowserBot:
             self._log(
                 f"=== ETAPA 1 [{idx}/{total}]: {plan.plan_name} "
                 f"(Debitare={plan.cutting_type}, Comanda='{plan.project_query}', "
-                f"Greutate={plan.part_weight_int}, ModPiese={panel3_mode}) ==="
+                f"Greutate={plan.part_weight_int}, ModPiese={panel3_mode}, CuratareRosu={clean_red_rows}) ==="
             )
 
             if not plan.excel_path or not Path(plan.excel_path).exists():
@@ -3886,7 +3940,13 @@ class NorstalBrowserBot:
                 res: Optional[Stage1PlanResult] = None
 
                 if panel3_mode == "full_http" and ct_key in blueprints:
-                    res = self._run_plan_full_http(page, frame, blueprints[ct_key], plan)
+                    res = self._run_plan_full_http(
+                        page,
+                        frame,
+                        blueprints[ct_key],
+                        plan,
+                        clean_red_rows=clean_red_rows,
+                    )
                     if res is not None:
                         used_full_http = True
                     else:
@@ -3896,6 +3956,7 @@ class NorstalBrowserBot:
                             effective_panel3_mode="http_request",
                             calibrate=False,
                             cache_blueprint=blueprints[ct_key],
+                            clean_red_rows=clean_red_rows,
                         )
                 elif panel3_mode == "full_http":
                     res, new_bp = self._run_single_plan_ui(
@@ -3903,6 +3964,7 @@ class NorstalBrowserBot:
                         plan=plan,
                         effective_panel3_mode="http_request",
                         calibrate=True,
+                        clean_red_rows=clean_red_rows,
                     )
                     if new_bp is not None:
                         blueprints[ct_key] = new_bp
@@ -3912,6 +3974,7 @@ class NorstalBrowserBot:
                         plan=plan,
                         effective_panel3_mode=panel3_mode,
                         calibrate=False,
+                        clean_red_rows=clean_red_rows,
                     )
 
                 results.append(res)
@@ -4057,6 +4120,71 @@ class NorstalBrowserBot:
 
         return out_png
 
+    def _clean_plan_red_rows_in_stage2(
+        self,
+        page: Page,
+        frame: Page | Frame,
+        panel1: Locator,
+        row1: Locator,
+        plan: CuttingPlanRecord,
+    ) -> int:
+        """Selectează planul în Panoul 1 și curăță rândurile ROȘII din Panoul 3 pentru fiecare comandă din Panoul 2."""
+        self._log(f"[{plan.plan_name}] Etapa 2: verificare și curățare rânduri ROȘII înainte de validare...")
+        self._click_grid_row_to_select(page, frame, row1)
+
+        panel2 = self._find_panel_grid(frame, "panel2_titles", fallback_index=1)
+        self._clear_grid_search_filters(page, frame, panel2)
+        self._wait_frame_ajax(page, frame)
+
+        p2_rows = panel2.locator(SELECTORS["jqgrid"]["rows"])
+        p2_count = p2_rows.count()
+        if p2_count == 0:
+            time.sleep(0.25)
+            p2_count = p2_rows.count()
+
+        if p2_count == 0:
+            self._log(
+                f"[{plan.plan_name}] Etapa 2 (curățare ROȘU): 0 rânduri în Panoul 2 — nimic de curățat.",
+                level="WARN",
+            )
+            return 0
+
+        row2_ids = [(p2_rows.nth(i).get_attribute("id") or "").strip() for i in range(p2_count)]
+        total_red_deleted = 0
+        total_pink_kept = 0
+        total_remaining_rows = 0
+
+        for idx, rid in enumerate(row2_ids):
+            if rid:
+                safe_rid = rid.replace('"', '\\"')
+                row2 = panel2.locator(f'tr[id="{safe_rid}"]')
+            else:
+                row2 = panel2.locator(SELECTORS["jqgrid"]["rows"]).nth(idx)
+
+            self._click_grid_row_to_select(page, frame, row2)
+            panel3 = self._find_panel_grid(frame, "panel3_titles", fallback_index=2)
+            self._clear_grid_search_filters(page, frame, panel3)
+            self._wait_frame_ajax(page, frame)
+            time.sleep(0.20)
+
+            d_cnt, p_cnt = self._clean_panel3_rows(page, frame, panel3, plan.plan_name)
+            total_red_deleted += d_cnt
+            total_pink_kept += p_cnt
+            try:
+                total_remaining_rows += panel3.locator(SELECTORS["jqgrid"]["rows"]).count()
+            except Exception:
+                pass
+
+        self._log(
+            f"[{plan.plan_name}] Curățare Etapa 2 finalizată — ROȘII șterse: {total_red_deleted}, "
+            f"ROZ păstrate: {total_pink_kept}, Rânduri rămase Panou 3: {total_remaining_rows}."
+        )
+        if p2_count > 0 and total_remaining_rows == 0:
+            raise RuntimeError(
+                "Plan gol: 0 piese rămase în Panoul 3 după curățarea ROȘU din Etapa 2 — validarea a fost oprită."
+            )
+        return total_red_deleted
+
     def _run_stage2(
         self,
         plans: list[CuttingPlanRecord],
@@ -4066,6 +4194,7 @@ class NorstalBrowserBot:
         print_delay: float,
         printer_name: Optional[str] = None,
         overwrite_original: bool = True,
+        clean_red_rows: bool = False,
     ) -> list[Stage2PlanResult]:
         if self._page is None or self._page.is_closed():
             self._log("Browserul nu este deschis; se pornește și se navighează automat pentru Etapa 2...")
@@ -4098,7 +4227,7 @@ class NorstalBrowserBot:
                 plan=plan.plan_name,
                 message=f"Validare & QR {plan.plan_name} ({idx}/{total})...",
             )
-            self._log(f"=== ETAPA 2 [{idx}/{total}]: {plan.plan_name} ===")
+            self._log(f"=== ETAPA 2 [{idx}/{total}]: {plan.plan_name} (CuratareRosu={clean_red_rows}) ===")
 
             if not plan.working_docx_path or not Path(plan.working_docx_path).exists():
                 msg = "Lipsește documentul Word pregătit (.docx)."
@@ -4106,6 +4235,7 @@ class NorstalBrowserBot:
                 results.append(Stage2PlanResult(plan_name=plan.plan_name, success=False, error=msg))
                 continue
 
+            stage2_red_deleted = 0
             try:
                 frame = self._get_work_frame(page)
                 self._dismiss_any_open_modals(page, frame)
@@ -4121,6 +4251,29 @@ class NorstalBrowserBot:
                     col_hints=["Plan croi", "Plan"],
                     click_to_select=False,
                 )
+
+                if clean_red_rows:
+                    self._set_progress(
+                        message=f"Curățare ROȘU {plan.plan_name} ({idx}/{total})...",
+                    )
+                    stage2_red_deleted = self._clean_plan_red_rows_in_stage2(
+                        page=page,
+                        frame=frame,
+                        panel1=panel1,
+                        row1=row,
+                        plan=plan,
+                    )
+                    self._set_progress(
+                        message=f"Validare & QR {plan.plan_name} ({idx}/{total})...",
+                    )
+                    row = self._find_and_select_grid_row(
+                        page,
+                        frame,
+                        panel1,
+                        plan.plan_name,
+                        col_hints=["Plan croi", "Plan"],
+                        click_to_select=False,
+                    )
 
                 edit_btn = self._first_visible(row, [SELECTORS["jqgrid"]["inline_edit"]])
                 if edit_btn is not None:
@@ -4216,6 +4369,7 @@ class NorstalBrowserBot:
                         qr_path=str(qr_png_path),
                         output_docx_path=str(out_docx),
                         printed=printed,
+                        red_deleted=stage2_red_deleted,
                     )
                 )
             except Exception as exc:
@@ -4227,6 +4381,7 @@ class NorstalBrowserBot:
                             plan_name=plan.plan_name,
                             success=False,
                             error="Browser închis manual.",
+                            red_deleted=stage2_red_deleted,
                         )
                     )
                     break
@@ -4239,6 +4394,7 @@ class NorstalBrowserBot:
                         plan_name=plan.plan_name,
                         success=False,
                         error=err_msg,
+                        red_deleted=stage2_red_deleted,
                     )
                 )
 

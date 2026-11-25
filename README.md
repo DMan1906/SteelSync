@@ -1,9 +1,9 @@
 # SteelSync Toolkit
 
-[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.18.2)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.18.2/SteelSync.exe)
-[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.18.2)
+[![Download SteelSync.exe](https://img.shields.io/badge/Download-SteelSync.exe%20(v1.19.0)-blue?style=for-the-badge&logo=windows)](https://github.com/DMan1906/SteelSync/releases/download/v1.19.0/SteelSync.exe)
+[![Release](https://img.shields.io/github/v/release/DMan1906/SteelSync?style=for-the-badge)](https://github.com/DMan1906/SteelSync/releases/tag/v1.19.0)
 
-> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.18.2)](https://github.com/DMan1906/SteelSync/releases/download/v1.18.2/SteelSync.exe)
+> **Descarcă direct:** [👉 Click aici pentru SteelSync.exe (v1.19.0)](https://github.com/DMan1906/SteelSync/releases/download/v1.19.0/SteelSync.exe)
 > 
 > *Nu necesită instalare – se descarcă și se rulează direct.*
 
@@ -16,9 +16,10 @@
 
 ## 🚀 Funcționalități
 
-- **🌐 Bon Consum (Lansare Directă în Browser — NOU în v1.18.0):**
+- **🌐 Bon Consum (Lansare Directă în Browser — Actualizat în v1.19.0):**
   - Buton dedicat **`🌐 Bon Consum`** în bara superioară a aplicației **SteelSync Toolkit**: pornește silențios serverul local **Streamlit** pentru aplicația Python din `bonuri consum\` (`app.py`), așteaptă confirmarea endpoint-ului `/_stcore/health` și o deschide automat în browserul implicit (`http://127.0.0.1:8501`).
   - Detectează automat folderul aplicației și mediul Python `.venv` cu Streamlit/Playwright instalat, păstrează serverul activ între apăsări (redeschide instant tab-ul fără a porni un al doilea server) și îl oprește curat la închiderea ferestrei principale. Click-dreapta pe buton oferă meniu rapid de repornire, oprire sau selectare manuală a folderului / interpretorului `.venv`.
+  - **Control Separat Curățare Piese ROȘII (Etapa 1 / Etapa 2 — NOU în v1.19.0):** în Etapa 1 poți debifa **`🧹 Curăță automat piesele ROȘII în Etapa 1`** pentru a păstra toate piesele ROȘII în Panoul 3 fără ștergere automată, iar în Etapa 2 ai opțiunea separată **`🧹 Curăță piesele ROȘII în Etapa 2 (înainte de validare)`** care curăță piesele ROȘII imediat înainte de bifarea `Valid` și generarea QR.
 
 - **📦 Cheson / HSQ Extractor (Actualizat în v1.17.0 — Suprapunere Asamblată la Scară peste Desenul PDF `> 99.9%`, Auto-Corecție Închisă & Cote Notate `≤ 0.001 mm`)**:
   - **Suprapunere Geometrică la Scară peste Desenul de Ansamblu (`TOP` + `FRONT`):** după generarea și recitirea DXF-urilor, motorul reasamblează chesonul și îl suprapune la scara exactă a desenului PDF (`1:25` etc.) peste vectorii `TOP` și `FRONT` (linii + arce Bézier + găuri), impunând prag obligatoriu **`≥ 99.90%`** și verificând lipsa oricărei linii structurale neacoperite.

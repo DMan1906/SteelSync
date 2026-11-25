@@ -79,9 +79,12 @@ _bot_stale = (
     or _word_reloaded
     or _bot_cls is None
     or not hasattr(browser_bot, "_is_uploaded_temp_word_path")
+    or not hasattr(_bot_cls, "start_stage1_async")
     or not hasattr(_bot_cls, "start_stage2_async")
+    or "clean_red_rows" not in inspect.signature(_bot_cls.start_stage1_async).parameters
     or "printer_name" not in inspect.signature(_bot_cls.start_stage2_async).parameters
     or "overwrite_original" not in inspect.signature(_bot_cls.start_stage2_async).parameters
+    or "clean_red_rows" not in inspect.signature(_bot_cls.start_stage2_async).parameters
 )
 browser_bot, _bot_reloaded = _reload_local_module_if_needed(browser_bot, force=_bot_stale)
 
@@ -91,6 +94,8 @@ _settings_stale = (
     or not hasattr(settings_store, "get_default_settings")
     or "printer_name" not in settings_store.get_default_settings()
     or "overwrite_original_word" not in settings_store.get_default_settings()
+    or "clean_red_stage1" not in settings_store.get_default_settings()
+    or "clean_red_stage2" not in settings_store.get_default_settings()
 )
 settings_store, _ = _reload_local_module_if_needed(settings_store, force=_settings_stale)
 
@@ -117,6 +122,9 @@ session_fingerprint = settings_store.session_fingerprint
 
 DEFAULT_PRINTER_OPTION = word_qr_printer.DEFAULT_PRINTER_OPTION
 list_windows_printers = word_qr_printer.list_windows_printers
+
+_CHECKBOX_SUPPORTS_PERSIST_STATE = "persist_state" in inspect.signature(st.checkbox).parameters
+_CB_PERSIST_KW = {"persist_state": "session"} if _CHECKBOX_SUPPORTS_PERSIST_STATE else {}
 
 load_dotenv()
 
@@ -287,6 +295,8 @@ def _init_state() -> None:
     st.session_state["use_full_http_mode"] = bool(saved_settings["use_full_http_mode"])
     st.session_state["use_http_mode"] = bool(saved_settings["use_http_mode"])
     st.session_state["use_import_mode"] = bool(saved_settings["use_import_mode"])
+    st.session_state["cfg_clean_red_stage1"] = bool(saved_settings["clean_red_stage1"])
+    st.session_state["cfg_clean_red_stage2"] = bool(saved_settings["clean_red_stage2"])
     st.session_state["cfg_send_to_printer"] = bool(saved_settings["send_to_printer"])
     st.session_state["cfg_printer_name"] = saved_settings["printer_name"] or DEFAULT_PRINTER_OPTION
     st.session_state["cfg_overwrite_original_word"] = bool(
@@ -343,8 +353,8 @@ def _render_stepper(stage: str) -> None:
         f"""
 <div class="step-bar">
   <div class="step-pill {s1_cls}">1️⃣ Încărcare &amp; Parsare Fișiere</div>
-  <div class="step-pill {s2_cls}">2️⃣ Etapa 1: Intranet &amp; Curățare (ROȘU/ROZ)</div>
-  <div class="step-pill {s3_cls}">3️⃣ Verificare Umană → Etapa 2: Validare, QR &amp; Print</div>
+  <div class="step-pill {s2_cls}">2️⃣ Etapa 1: Încărcare Intranet (ROȘU opțional)</div>
+  <div class="step-pill {s3_cls}">3️⃣ Verificare Umană → Etapa 2: Curățare/Validare, QR &amp; Print</div>
 </div>
 """,
         unsafe_allow_html=True,
@@ -650,8 +660,10 @@ else:
     excel_dir_str = str(st.session_state["saved_settings"].get("excel_dir_str", ""))
     name_filter = str(st.session_state["saved_settings"].get("name_filter", ""))
 
-_persist_settings_if_changed(
-    {
+def _build_current_settings_dict() -> dict[str, Any]:
+    """Construiește dicționarul complet de setări din valorile curente ale interfeței."""
+    saved = st.session_state.get("saved_settings", {})
+    return {
         "intranet_url": intranet_url,
         "intranet_user": intranet_user,
         "intranet_pass": intranet_pass,
@@ -659,6 +671,12 @@ _persist_settings_if_changed(
         "use_full_http_mode": bool(use_full_http_mode),
         "use_http_mode": bool(use_http_mode),
         "use_import_mode": bool(use_import_mode),
+        "clean_red_stage1": bool(
+            st.session_state.get("cfg_clean_red_stage1", saved.get("clean_red_stage1", True))
+        ),
+        "clean_red_stage2": bool(
+            st.session_state.get("cfg_clean_red_stage2", saved.get("clean_red_stage2", False))
+        ),
         "send_to_printer": bool(send_to_printer),
         "printer_name": effective_printer_name,
         "overwrite_original_word": bool(overwrite_original_word),
@@ -669,7 +687,9 @@ _persist_settings_if_changed(
         "excel_dir_str": excel_dir_str,
         "name_filter": name_filter,
     }
-)
+
+
+_persist_settings_if_changed(_build_current_settings_dict())
 
 if input_mode == INPUT_MODE_LOCAL:
     if st.button("🔎 Scanează folderul"):
@@ -898,8 +918,13 @@ if plans:
         batch_plans: list[CuttingPlanRecord],
         progress_slot,
         log_slot,
+        clean_red_rows: bool,
     ) -> Optional[list[Stage1PlanResult]]:
-        fut = bot.start_stage1_async(batch_plans, panel3_mode=panel3_mode)
+        fut = bot.start_stage1_async(
+            batch_plans,
+            panel3_mode=panel3_mode,
+            clean_red_rows=clean_red_rows,
+        )
         pbar = progress_slot.progress(0.0, text="Inițializare browser Playwright...")
 
         while not fut.done():
@@ -922,8 +947,28 @@ if plans:
             st.error(f"Etapa 1 a întâmpinat o eroare critică: {exc}")
             return None
 
+    if "cfg_clean_red_stage1" not in st.session_state:
+        st.session_state["cfg_clean_red_stage1"] = bool(
+            st.session_state.get("saved_settings", {}).get("clean_red_stage1", True)
+        )
+    clean_red_stage1 = st.checkbox(
+        "🧹 Curăță automat piesele ROȘII în Etapa 1",
+        key="cfg_clean_red_stage1",
+        help="Debifați pentru a NU șterge piesele ROȘII în Etapa 1 — acestea rămân în Panoul 3 pentru verificare manuală sau curățare separată în Etapa 2.",
+        **_CB_PERSIST_KW,
+    )
+    if not clean_red_stage1:
+        st.info(
+            "ℹ️ Curățarea automată a pieselor ROȘII este **dezactivată** în Etapa 1 — toate piesele rămân în Panoul 3 și le puteți curăța separat în **Etapa 2**."
+        )
+
+    s1_btn_label = (
+        "🚀 Pornește Etapa 1 (Încărcare în Intranet & Curățare ROȘU)"
+        if clean_red_stage1
+        else "🚀 Pornește Etapa 1 (Încărcare fără ștergere ROȘU)"
+    )
     start_s1 = st.button(
-        "🚀 Pornește Etapa 1 (Încărcare în Intranet & Curățare)",
+        s1_btn_label,
         type="primary",
         disabled=(len(edited_records) == 0),
     )
@@ -935,7 +980,13 @@ if plans:
         _close_bot_and_reset(reset_plans=False)
         bot = _get_or_create_bot(force_new=True)
         st.session_state["active_plans"] = edited_records
-        s1_res = _run_stage1_with_ui(bot, edited_records, progress_slot_s1, log_slot_live)
+        s1_res = _run_stage1_with_ui(
+            bot,
+            edited_records,
+            progress_slot_s1,
+            log_slot_live,
+            clean_red_rows=bool(clean_red_stage1),
+        )
         if s1_res is not None:
             st.session_state["stage1_results"] = s1_res
             st.session_state["stage"] = "stage1_done"
@@ -971,6 +1022,7 @@ if st.session_state["stage"] in {"stage1_done", "stage2_done"}:
                     "Piese adăugate": r.parts_added,
                     "Respinse": r.parts_rejected,
                     "Rânduri ROȘII șterse": r.red_deleted,
+                    "Rânduri ROȘII păstrate": getattr(r, "red_kept", 0),
                     "Rânduri ROZ păstrate": r.pink_kept,
                     "Eroare": r.error or "-",
                 }
@@ -990,7 +1042,13 @@ if st.session_state["stage"] in {"stage1_done", "stage2_done"}:
         retry_logs = st.empty()
         if retry_plans and st.button(f"🔁 Reîncearcă Etapa 1 doar pentru planurile cu eroare ({len(retry_plans)})"):
             bot = _get_or_create_bot(force_new=False)
-            retry_res = _run_stage1_with_ui(bot, retry_plans, retry_progress, retry_logs)
+            retry_res = _run_stage1_with_ui(
+                bot,
+                retry_plans,
+                retry_progress,
+                retry_logs,
+                clean_red_rows=bool(clean_red_stage1),
+            )
             if retry_res is not None:
                 retry_map = {r.plan_name: r for r in retry_res}
                 merged = [retry_map.get(r.plan_name, r) for r in s1_results]
@@ -1056,6 +1114,17 @@ if plans:
         key=lambda rec: plan_sort_key(rec.plan_name),
     )
 
+    if "cfg_clean_red_stage2" not in st.session_state:
+        st.session_state["cfg_clean_red_stage2"] = bool(
+            st.session_state.get("saved_settings", {}).get("clean_red_stage2", False)
+        )
+    clean_red_stage2 = st.checkbox(
+        "🧹 Curăță piesele ROȘII în Etapa 2 (înainte de validare)",
+        key="cfg_clean_red_stage2",
+        help="Opțiune separată pentru Pasul 2: șterge automat piesele ROȘII din Panoul 3 pentru fiecare plan selectat, imediat înainte de bifarea 'Valid' și generarea codului QR.",
+        **_CB_PERSIST_KW,
+    )
+
     bot_alive = current_bot is not None and current_bot.is_alive()
     if not bot_alive:
         st.info("ℹ️ Browserul nu este deschis momentan — la pornirea Etapei 2 se va deschide automat și va continua cu validarea.")
@@ -1065,10 +1134,15 @@ if plans:
     else:
         save_dest_desc = f"va salva copii noi Word + QR în `{output_dir_str}`"
 
+    clean_prefix = (
+        "Va **curăța mai întâi piesele ROȘII** din Panoul 3, apoi va"
+        if clean_red_stage2
+        else "Va"
+    )
     mode_info = (
-        f"Va valida planurile în intranet, {save_dest_desc} și le va trimite la imprimanta **{printer_display}**."
+        f"{clean_prefix} valida planurile în intranet, {save_dest_desc} și le va trimite la imprimanta **{printer_display}**."
         if send_to_printer
-        else f"Va valida planurile, va extrage QR și {save_dest_desc} (fără printare)."
+        else f"{clean_prefix} valida planurile, va extrage QR și {save_dest_desc} (fără printare)."
     )
     st.info(f"ℹ️ Mod curent: {mode_info}")
 
@@ -1081,8 +1155,13 @@ if plans:
             f"Acestea vor fi salvate în folderul `{output_dir_str}`. Pentru a suprascrie direct fișierele originale, folosiți modul **📁 Folder local**."
         )
 
+    s2_btn_label = (
+        "✅ Curăță ROȘU, Validează, Inserează QR & Printează"
+        if clean_red_stage2
+        else "✅ Validează, Inserează QR & Printează"
+    )
     start_s2 = st.button(
-        "✅ Validează, Inserează QR & Printează",
+        s2_btn_label,
         type="primary",
         disabled=(len(stage2_candidates) == 0),
     )
@@ -1100,6 +1179,7 @@ if plans:
             print_delay=float(print_delay),
             printer_name=effective_printer_name or None,
             overwrite_original=bool(overwrite_original_word),
+            clean_red_rows=bool(clean_red_stage2),
         )
         pbar2 = progress_slot_s2.progress(0.0, text="Inițializare Etapa 2...")
 
@@ -1134,6 +1214,7 @@ if s2_results:
             {
                 "Plan croi": r.plan_name,
                 "Status": "✅ OK" if r.success else "❌ Eroare",
+                "Rânduri ROȘII șterse": getattr(r, "red_deleted", 0),
                 "Fișier Word + QR": r.output_docx_path or "-",
                 "Printat": "🖨️ Da" if r.printed else "Nu (test)",
                 "Eroare": r.error or "-",
@@ -1166,4 +1247,5 @@ if logs:
         log_box = st.empty()
         _render_logs_box(log_box, logs)
 
+_persist_settings_if_changed(_build_current_settings_dict())
 _persist_session_if_changed()

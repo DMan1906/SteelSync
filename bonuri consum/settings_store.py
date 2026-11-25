@@ -92,6 +92,8 @@ def get_default_settings() -> dict[str, Any]:
         "use_full_http_mode": False,
         "use_http_mode": False,
         "use_import_mode": False,
+        "clean_red_stage1": True,
+        "clean_red_stage2": False,
         "send_to_printer": False,
         "printer_name": "",
         "overwrite_original_word": True,
@@ -117,6 +119,8 @@ def sanitize_settings(raw: Any) -> dict[str, Any]:
         "use_full_http_mode": _coerce_bool(src.get("use_full_http_mode"), defaults["use_full_http_mode"]),
         "use_http_mode": _coerce_bool(src.get("use_http_mode"), defaults["use_http_mode"]),
         "use_import_mode": _coerce_bool(src.get("use_import_mode"), defaults["use_import_mode"]),
+        "clean_red_stage1": _coerce_bool(src.get("clean_red_stage1"), defaults["clean_red_stage1"]),
+        "clean_red_stage2": _coerce_bool(src.get("clean_red_stage2"), defaults["clean_red_stage2"]),
         "send_to_printer": _coerce_bool(src.get("send_to_printer"), defaults["send_to_printer"]),
         "printer_name": str(src["printer_name"]).strip() if src.get("printer_name") is not None else defaults["printer_name"],
         "overwrite_original_word": _coerce_bool(
